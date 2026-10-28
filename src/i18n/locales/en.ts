@@ -472,6 +472,14 @@ export const en = {
       finished: "Export finished",
       failed: "Export failed",
       canceled: "Export stopped",
+      // The number of exports that wait in the queue, after the line of the running export
+      // (ADR 049). {{count}} is that number.
+      queued_one: "+{{count}} queued",
+      queued_other: "+{{count}} queued",
+      // The summary after the result of a batch of more than one export (ADR 049). {{count}}
+      // is the number of exports that ended, and {{finished}} the number that finished.
+      batchSummary_one: "{{finished}} of {{count}} export finished",
+      batchSummary_other: "{{finished}} of {{count}} exports finished",
       output: "Output: {{name}}",
       showHint: "Click to show the export window.",
       dismiss: "Dismiss",

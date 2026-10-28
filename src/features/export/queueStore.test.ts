@@ -3,9 +3,13 @@ import { createPresetDraft } from "@/features/settings/presetDocument";
 import type { Pts } from "@/types/project";
 import {
   createExportQueueStore,
+  exportBatchContinues,
+  exportBatchEndsOf,
+  exportBatchHasFailure,
   hasPendingExportWork,
   selectExportQueueRows,
 } from "./queueStore";
+import { isExportRunLive } from "./runState";
 import { createExportStore } from "./store";
 import {
   ExportError,
@@ -941,5 +945,191 @@ describe("pending export work", () => {
     await expect(submitting).resolves.toEqual({ kind: "superseded" });
     expect(queue.getState().submitting).toBe(0);
     expect(hasPendingExportWork(queue.getState())).toBe(false);
+  });
+});
+
+describe("exportBatchContinues", () => {
+  it("is true while runs wait or a submission has no answer", () => {
+    const none = { order: [], waiting: [], submitting: 0, ended: [] };
+    expect(exportBatchContinues(none, { runId: "run-1" })).toBe(false);
+    expect(exportBatchContinues({ ...none, waiting: ["run-2"] }, { runId: null })).toBe(
+      true,
+    );
+    expect(exportBatchContinues({ ...none, submitting: 1 }, { runId: "run-1" })).toBe(
+      true,
+    );
+  });
+
+  it("is true when the queue archived the run of the export store", () => {
+    const ended = [{ runId: "run-1", status: "finished" as const, error: null }];
+    const queue = { order: ["run-1", "run-2"], waiting: [], submitting: 0, ended };
+    expect(exportBatchContinues(queue, { runId: "run-1" })).toBe(true);
+    expect(exportBatchContinues(queue, { runId: "run-2" })).toBe(false);
+  });
+
+  it("is true for an idle export store while a run of the batch has not ended", () => {
+    const endA = { runId: "run-1", status: "finished" as const, error: null };
+    const endB = { runId: "run-2", status: "failed" as const, error: null };
+    const order = ["run-1", "run-2"];
+    const queue = { order, waiting: [], submitting: 0 };
+    expect(exportBatchContinues({ ...queue, ended: [endA] }, { runId: null })).toBe(
+      true,
+    );
+    expect(
+      exportBatchContinues({ ...queue, ended: [endA, endB] }, { runId: null }),
+    ).toBe(false);
+    // No run of the batch ended, so no batch is over or goes on.
+    expect(exportBatchContinues({ ...queue, ended: [] }, { runId: null })).toBe(false);
+    expect(
+      exportBatchContinues(
+        { order: [], waiting: [], submitting: 0, ended: [] },
+        { runId: null },
+      ),
+    ).toBe(false);
+  });
+
+  it("stays true through the adoption after a reset while runs waited", async () => {
+    const { queue, exportStore, emit } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+    finishRun(emit, "run-1", "/out/a.mp4");
+    // The Close of the dialog resets the result while run-2 waits.
+    exportStore.getState().reset();
+    expect(queue.getState().ended.map((entry) => entry.runId)).toEqual(["run-1"]);
+    const seen: boolean[] = [];
+    const record = () => {
+      if (!isExportRunLive(exportStore.getState())) {
+        seen.push(exportBatchContinues(queue.getState(), exportStore.getState()));
+      }
+    };
+    const stopQueue = queue.subscribe(record);
+    const stopExport = exportStore.subscribe(record);
+    emit({ event: "preparing", runId: "run-2" });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every(Boolean)).toBe(true);
+    stopQueue();
+    stopExport();
+  });
+
+  it("ends the batch when the last waiting run fails after a reset", async () => {
+    const { queue, exportStore, emit } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+    finishRun(emit, "run-1", "/out/a.mp4");
+    exportStore.getState().reset();
+    expect(exportBatchContinues(queue.getState(), exportStore.getState())).toBe(true);
+    // The user saw the result of run-1 before the reset.
+    expect(queue.getState().seenEndedCount).toBe(1);
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    expect(exportBatchContinues(queue.getState(), exportStore.getState())).toBe(false);
+    // The failure of run-2 is a new end, so the batch keeps its rows for the status bar.
+    expect(queue.getState().ended.length).toBeGreaterThan(
+      queue.getState().seenEndedCount,
+    );
+    expect(exportBatchEndsOf(queue.getState(), exportStore.getState())).toEqual([
+      "finished",
+      "failed",
+    ]);
+
+    // The dismissal of that end drops the rows of the batch.
+    queue.getState().dismissEndedBatch();
+    expect(queue.getState().order).toEqual([]);
+    expect(queue.getState().ended).toEqual([]);
+  });
+
+  it("drops the rows when the removal of the last waiting run ends the batch after a reset", async () => {
+    const { queue, exportStore, emit } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+    finishRun(emit, "run-1", "/out/a.mp4");
+    exportStore.getState().reset();
+    expect(queue.getState().order).toEqual(["run-1", "run-2"]);
+
+    await queue.getState().remove("run-2");
+    emit({ event: "failed", runId: "run-2", code: "canceled" });
+
+    // No end came after the reset, so nothing is left to show.
+    expect(queue.getState()).toMatchObject({
+      order: [],
+      ended: [],
+      waiting: [],
+      seenEndedCount: 0,
+    });
+  });
+
+  it("drops the rows when a refused submission ends the batch after a reset", async () => {
+    const { queue, exportStore, emit, fixture } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    finishRun(emit, "run-1", "/out/a.mp4");
+    const answer = createDeferred<ExportSubmission>();
+    fixture.answer = () => answer.promise;
+    // The run that ended is still in the export store, so this submission joins the queue.
+    const submitting = queue.getState().submit(createRequest("/out/b.mp4"));
+    exportStore.getState().reset();
+    expect(queue.getState()).toMatchObject({ order: ["run-1"], seenEndedCount: 1 });
+
+    answer.reject(new ExportError({ code: "exportQueueClosed" }));
+    await expect(submitting).resolves.toMatchObject({ kind: "refused" });
+
+    expect(queue.getState()).toMatchObject({ order: [], ended: [], seenEndedCount: 0 });
+  });
+
+  it("stays true at each change of the adoption, and is false at the end of the batch", async () => {
+    const { queue, exportStore, emit } = createFixture();
+    await queue.getState().submit(createRequest("/out/a.mp4"));
+    await queue.getState().submit(createRequest("/out/b.mp4"));
+    // The value at each change while the export store holds no live run.
+    const seen: boolean[] = [];
+    const record = () => {
+      if (!isExportRunLive(exportStore.getState())) {
+        seen.push(exportBatchContinues(queue.getState(), exportStore.getState()));
+      }
+    };
+    const stopQueue = queue.subscribe(record);
+    const stopExport = exportStore.subscribe(record);
+
+    finishRun(emit, "run-1", "/out/a.mp4");
+    emit({ event: "preparing", runId: "run-2" });
+    expect(seen).toEqual([true, true, true]);
+
+    seen.length = 0;
+    finishRun(emit, "run-2", "/out/b.mp4");
+    expect(seen[seen.length - 1]).toBe(false);
+    stopQueue();
+    stopExport();
+  });
+});
+
+describe("exportBatchEndsOf and exportBatchHasFailure", () => {
+  const end = (runId: string, status: "finished" | "failed" | "canceled") => ({
+    runId,
+    status,
+    error: null,
+  });
+
+  it("adds the end of the run of the export store once", () => {
+    const queue = { ended: [end("run-1", "failed"), end("run-2", "finished")] };
+    expect(
+      exportBatchEndsOf(queue, { runId: "run-2", status: "finished", tracking: false }),
+    ).toEqual(["failed", "finished"]);
+    expect(
+      exportBatchEndsOf(queue, { runId: "run-3", status: "canceled", tracking: false }),
+    ).toEqual(["failed", "finished", "canceled"]);
+  });
+
+  it("leaves out a live run of the export store", () => {
+    const queue = { ended: [end("run-1", "finished")] };
+    expect(
+      exportBatchEndsOf(queue, { runId: "run-2", status: "running", tracking: true }),
+    ).toEqual(["finished"]);
+    expect(
+      exportBatchEndsOf(queue, { runId: "run-2", status: "failed", tracking: true }),
+    ).toEqual(["finished"]);
+  });
+
+  it("finds a failure only in a batch of more than one run", () => {
+    expect(exportBatchHasFailure(["failed"])).toBe(false);
+    expect(exportBatchHasFailure(["failed", "finished"])).toBe(true);
+    expect(exportBatchHasFailure(["finished", "canceled"])).toBe(false);
   });
 });

@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import capability from "../../../src-tauri/capabilities/default.json";
 import {
+  createExportQueueStore,
   createExportStore,
   EXPORT_STATUSES,
   ExportError,
   type ExportProgressEvent,
+  type ExportRequest,
   type ExportSubmission,
   type ExportState,
   type ExportStatus,
@@ -12,6 +14,7 @@ import {
 import type { Pts } from "@/types/project";
 import type { ExportAttentionInput, ExportAttentionState } from "./exportAttentionSync";
 import {
+  batchEndAsksForAttention,
   endsRunForAttention,
   shouldRequestExportAttention,
   startExportAttentionSync,
@@ -115,6 +118,16 @@ describe("shouldRequestExportAttention", () => {
     expect(
       shouldRequestExportAttention(input({ next: state("failed"), focused: true })),
     ).toBe(false);
+  });
+
+  it("does not request while the batch goes on", () => {
+    expect(shouldRequestExportAttention(input({ batchContinues: true }))).toBe(false);
+    expect(
+      shouldRequestExportAttention(
+        input({ next: state("failed"), batchContinues: true }),
+      ),
+    ).toBe(false);
+    expect(shouldRequestExportAttention(input({ batchContinues: false }))).toBe(true);
   });
 
   it("does not request twice for one run", () => {
@@ -567,5 +580,242 @@ describe("startExportAttentionSync", () => {
     );
     // `is_focused` comes from `core:window:default`, which `core:default` holds.
     expect(capability.permissions).toContain("core:default");
+  });
+});
+
+describe("batchEndAsksForAttention", () => {
+  it("is true when a run of the batch finished or failed", () => {
+    expect(batchEndAsksForAttention(["canceled", "finished"])).toBe(true);
+    expect(batchEndAsksForAttention(["failed"])).toBe(true);
+  });
+
+  it("is false for a batch that ended only canceled, or with no end", () => {
+    expect(batchEndAsksForAttention(["canceled", "canceled"])).toBe(false);
+    expect(batchEndAsksForAttention([])).toBe(false);
+  });
+});
+
+describe("startExportAttentionSync with a batch of runs", () => {
+  function request(outputPath: string): ExportRequest {
+    return {
+      sourcePath: "/media/source.mp4",
+      outputPath,
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      preset: createPresetDraft("mp4-h264", "Test preset"),
+      streams: "videoAndAudio",
+      audioMode: "encode",
+    };
+  }
+
+  /** A real export store and queue store that share one fake backend. */
+  async function setupBatch(outputPaths: readonly string[], focused = false) {
+    const handlers: Array<(event: ExportProgressEvent) => void> = [];
+    const subscribe = (handler: (event: ExportProgressEvent) => void) => {
+      handlers.push(handler);
+      return Promise.resolve(() => {});
+    };
+    let nextRun = 1;
+    const fixture = {
+      answer: null as null | (() => Promise<ExportSubmission>),
+    };
+    const start = (): Promise<ExportSubmission> => {
+      if (fixture.answer) {
+        return fixture.answer();
+      }
+      const runId = `run-${nextRun++}`;
+      return Promise.resolve({ runId, queued: runId !== "run-1" });
+    };
+    const cancel = () => Promise.resolve(true);
+    const store = createExportStore({
+      subscribeExportProgress: subscribe,
+      startExport: start,
+      cancelExport: cancel,
+    });
+    const queueStore = createExportQueueStore({
+      exportStore: store,
+      startExport: start,
+      cancelExport: cancel,
+      subscribeExportProgress: subscribe,
+    });
+    for (const path of outputPaths) {
+      await queueStore.getState().submit(request(path));
+    }
+    const emit = (event: ExportProgressEvent) => {
+      for (const handler of handlers) handler(event);
+    };
+    const isFocused = vi.fn<() => Promise<boolean>>(() => Promise.resolve(focused));
+    const requestAttention = vi.fn<() => Promise<void>>(() => Promise.resolve());
+    const stop = startExportAttentionSync({
+      store,
+      queueStore,
+      isFocused,
+      requestAttention,
+      enabled: true,
+    });
+    return { fixture, store, queueStore, emit, isFocused, requestAttention, stop };
+  }
+
+  function finish(runId: string): ExportProgressEvent {
+    return { event: "finished", runId, outputPath: `/out/${runId}.mp4`, frames: 30 };
+  }
+
+  it("does not request between runs, and requests once when the batch ends", async () => {
+    const { emit, isFocused, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+      "/out/c.mp4",
+    ]);
+    emit(finish("run-1"));
+    await flushPromises();
+    emit({ event: "preparing", runId: "run-2" });
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(isFocused).not.toHaveBeenCalled();
+    expect(requestAttention).not.toHaveBeenCalled();
+
+    emit({ event: "preparing", runId: "run-3" });
+    emit(finish("run-3"));
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("does not request for a run that ends while a submission has no answer", async () => {
+    const { fixture, emit, queueStore, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+    ]);
+    let answer: (submission: ExportSubmission) => void = () => {};
+    fixture.answer = () =>
+      new Promise<ExportSubmission>((resolve) => {
+        answer = resolve;
+      });
+    const submitting = queueStore.getState().submit(request("/out/b.mp4"));
+    await flushPromises();
+    expect(queueStore.getState().submitting).toBe(1);
+
+    emit(finish("run-1"));
+    await flushPromises();
+    expect(requestAttention).not.toHaveBeenCalled();
+
+    answer({ runId: "run-2", queued: true });
+    await submitting;
+    emit({ event: "preparing", runId: "run-2" });
+    emit(finish("run-2"));
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("requests once when the last waiting run fails before it takes the slot", async () => {
+    const { emit, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit(finish("run-1"));
+    await flushPromises();
+    expect(requestAttention).not.toHaveBeenCalled();
+
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("requests once when the removal of the last waiting run ends the batch behind another window", async () => {
+    const { emit, queueStore, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit(finish("run-1"));
+    await flushPromises();
+    await queueStore.getState().remove("run-2");
+    emit({ event: "failed", runId: "run-2", code: "canceled" });
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("does not request when the user removes the last waiting run at the window", async () => {
+    const { emit, queueStore, isFocused, requestAttention, stop } = await setupBatch(
+      ["/out/a.mp4", "/out/b.mp4"],
+      true,
+    );
+    emit(finish("run-1"));
+    await flushPromises();
+    await queueStore.getState().remove("run-2");
+    emit({ event: "failed", runId: "run-2", code: "canceled" });
+    await flushPromises();
+    expect(isFocused).toHaveBeenCalledTimes(1);
+    expect(requestAttention).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("requests once when the last waiting run fails after a reset while it waited", async () => {
+    const { emit, store, isFocused, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit(finish("run-1"));
+    await flushPromises();
+    // The Close of the dialog resets the result while run-2 waits.
+    store.getState().reset();
+    await flushPromises();
+    expect(isFocused).not.toHaveBeenCalled();
+
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("does not request for the adoption after a reset, and requests at the end of the batch", async () => {
+    const { emit, store, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit(finish("run-1"));
+    store.getState().reset();
+    emit({ event: "preparing", runId: "run-2" });
+    await flushPromises();
+    expect(requestAttention).not.toHaveBeenCalled();
+    emit(finish("run-2"));
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("does not request for a batch that the user stopped and emptied", async () => {
+    const { emit, queueStore, isFocused, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "failed", runId: "run-1", code: "canceled" });
+    await flushPromises();
+    await queueStore.getState().remove("run-2");
+    emit({ event: "failed", runId: "run-2", code: "canceled" });
+    await flushPromises();
+    expect(isFocused).not.toHaveBeenCalled();
+    expect(requestAttention).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("requests for a stopped run when a waiting run then fails as the end of the batch", async () => {
+    const { emit, requestAttention, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "failed", runId: "run-1", code: "canceled" });
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("requests once for a batch of one run, as before", async () => {
+    const { emit, requestAttention, stop } = await setupBatch(["/out/a.mp4"]);
+    emit(finish("run-1"));
+    await flushPromises();
+    expect(requestAttention).toHaveBeenCalledTimes(1);
+    stop();
   });
 });

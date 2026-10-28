@@ -3,12 +3,14 @@ import { presentExportProgress } from "@/components/export/exportProgressPresent
 import { EXPORT_STATUSES, ExportError, type ExportStatus } from "@/features/export";
 import { createI18nInstance, en, zhCN } from "@/i18n";
 import type {
+  ExportIndicatorBatchInput,
   ExportIndicatorInput,
   ExportIndicatorLine,
   IndicatorTranslate,
 } from "./exportIndicatorPresenter";
 import {
   announcementKeyOf,
+  batchInputOf,
   decideFocusRestore,
   focusInsideAfterBlur,
   formatIndicatorLine,
@@ -208,6 +210,8 @@ describe("presentExportIndicator", () => {
       expect(view).toEqual({
         kind: "finished",
         outputName: "complete.mp4",
+        batchSummary: null,
+        lastRunFinished: true,
         canDismiss: true,
       });
     });
@@ -223,6 +227,8 @@ describe("presentExportIndicator", () => {
       expect(view).toEqual({
         kind: "failed",
         outputName: "error.mp4",
+        batchSummary: null,
+        lastRunFinished: false,
         canDismiss: true,
       });
     });
@@ -238,6 +244,8 @@ describe("presentExportIndicator", () => {
       expect(view).toEqual({
         kind: "canceled",
         outputName: "aborted.mp4",
+        batchSummary: null,
+        lastRunFinished: false,
         canDismiss: true,
       });
     });
@@ -253,6 +261,8 @@ describe("presentExportIndicator", () => {
       expect(view).toEqual({
         kind: "finished",
         outputName: null,
+        batchSummary: null,
+        lastRunFinished: true,
         canDismiss: true,
       });
     });
@@ -620,6 +630,7 @@ describe("a failed status that the store still tracks", () => {
       progress: presentExportProgress(input),
       line: { key: "statusBar.export.stopFailed" },
       outputName: "exported_video.mp4",
+      queuedCount: 0,
     });
     // The progress is the progress of the encode, so the bar keeps its fill.
     expect(view?.kind === "active" && view.progress.barValue).toBe(50);
@@ -675,6 +686,7 @@ describe("result dismissal", () => {
     for (const status of ["finished", "failed", "canceled"] as const) {
       expect(presentExportIndicator(createInput({ status }))).toMatchObject({
         kind: status,
+        batchSummary: null,
         canDismiss: true,
       });
     }
@@ -879,5 +891,381 @@ describe("presentStopFailureAnnouncement", () => {
         }),
       ).toEqual({ key: null, shownFailure: first });
     }
+  });
+});
+
+describe("the queue in the indicator", () => {
+  function batch(
+    overrides: Partial<ExportIndicatorBatchInput> = {},
+  ): ExportIndicatorBatchInput {
+    return {
+      waitingCount: 0,
+      continues: false,
+      earlierEnds: [],
+      lastEndOutputPath: null,
+      hasUnseenEnd: false,
+      ...overrides,
+    };
+  }
+
+  describe("batchInputOf", () => {
+    const error = new ExportError({ code: "ffmpegProcessFailed" });
+
+    const job = (runId: string) => ({
+      runId,
+      outputPath: `/out/${runId}.mp4`,
+      presetName: "Test preset",
+      segmentCount: 1,
+      streams: "videoAndAudio" as const,
+    });
+    const jobs = {
+      "run-1": job("run-1"),
+      "run-2": job("run-2"),
+      "run-3": job("run-3"),
+      "run-4": job("run-4"),
+    };
+    const order = ["run-1", "run-2", "run-3", "run-4"];
+
+    it("counts the waiting runs and keeps the ends before the run of the export store", () => {
+      expect(
+        batchInputOf(
+          {
+            jobs,
+            order,
+            waiting: ["run-3", "run-4"],
+            removing: [],
+            submitting: 0,
+            ended: [{ runId: "run-1", status: "failed", error }],
+            seenEndedCount: 0,
+          },
+          { runId: "run-2" },
+        ),
+      ).toEqual({
+        waitingCount: 2,
+        continues: true,
+        earlierEnds: ["failed"],
+        lastEndOutputPath: "/out/run-1.mp4",
+        hasUnseenEnd: true,
+      });
+    });
+
+    it("does not count a waiting run that the user removes", () => {
+      expect(
+        batchInputOf(
+          {
+            jobs,
+            order,
+            waiting: ["run-3", "run-4"],
+            removing: ["run-4"],
+            submitting: 0,
+            ended: [],
+            seenEndedCount: 0,
+          },
+          { runId: "run-2" },
+        ).waitingCount,
+      ).toBe(1);
+    });
+
+    it("leaves out the run of the export store while the queue archives it", () => {
+      expect(
+        batchInputOf(
+          {
+            jobs,
+            order: ["run-1", "run-2"],
+            waiting: [],
+            removing: [],
+            submitting: 0,
+            ended: [
+              { runId: "run-1", status: "finished", error: null },
+              { runId: "run-2", status: "finished", error: null },
+            ],
+            seenEndedCount: 0,
+          },
+          { runId: "run-2" },
+        ),
+      ).toEqual({
+        waitingCount: 0,
+        continues: true,
+        earlierEnds: ["finished"],
+        lastEndOutputPath: "/out/run-1.mp4",
+        hasUnseenEnd: true,
+      });
+    });
+
+    it("gives a batch of one run for an empty queue", () => {
+      expect(
+        batchInputOf(
+          {
+            jobs: {},
+            order: [],
+            waiting: [],
+            removing: [],
+            submitting: 0,
+            ended: [],
+            seenEndedCount: 0,
+          },
+          { runId: "run-1" },
+        ),
+      ).toEqual({
+        waitingCount: 0,
+        continues: false,
+        earlierEnds: [],
+        lastEndOutputPath: null,
+        hasUnseenEnd: false,
+      });
+    });
+  });
+
+  it("gives the number of waiting runs on the active item", () => {
+    for (const status of ["preparing", "running", "publishing"] as const) {
+      const view = presentExportIndicator(
+        createInput({
+          status,
+          tracking: true,
+          batch: batch({ waitingCount: 2, continues: true }),
+        }),
+      );
+      expect(view?.kind === "active" && view.queuedCount).toBe(2);
+    }
+    const alone = presentExportIndicator(
+      createInput({ status: "running", tracking: true }),
+    );
+    expect(alone?.kind === "active" && alone.queuedCount).toBe(0);
+  });
+
+  it.each(["finished", "failed", "canceled", "idle"] as const)(
+    "shows the preparation, not a result, for %s between two runs",
+    (status) => {
+      const view = presentExportIndicator(
+        createInput({
+          status,
+          tracking: false,
+          batch: batch({ waitingCount: 1, continues: true, earlierEnds: ["failed"] }),
+        }),
+      );
+      expect(view).toMatchObject({
+        kind: "active",
+        progress: { phase: "preparing", barValue: null, percentFraction: null },
+        line: { key: "statusBar.export.preparing" },
+        outputName: null,
+        queuedCount: 1,
+      });
+      expect(announcementKeyOf(view)).toBeNull();
+    },
+  );
+
+  it("still hides between two runs while the dialog is open", () => {
+    expect(
+      presentExportIndicator(
+        createInput({
+          status: "finished",
+          panelOpen: true,
+          batch: batch({ waitingCount: 1, continues: true }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("adds a summary to the result of a batch of more than one run", () => {
+    const view = presentExportIndicator(
+      createInput({
+        status: "failed",
+        tracking: false,
+        batch: batch({ earlierEnds: ["finished", "finished"] }),
+      }),
+    );
+    expect(view).toMatchObject({
+      kind: "failed",
+      batchSummary: { count: 3, finished: 2 },
+    });
+    expect(announcementKeyOf(view)).toBe("statusBar.export.failed");
+  });
+
+  it("counts the last run when it finished", () => {
+    const view = presentExportIndicator(
+      createInput({
+        status: "finished",
+        tracking: false,
+        batch: batch({ earlierEnds: ["canceled"] }),
+      }),
+    );
+    expect(view).toMatchObject({ batchSummary: { count: 2, finished: 1 } });
+  });
+
+  it("adds no summary for a batch of one run", () => {
+    for (const status of ["finished", "failed", "canceled"] as const) {
+      const view = presentExportIndicator(
+        createInput({ status, tracking: false, batch: batch() }),
+      );
+      expect(view).toMatchObject({ kind: status, batchSummary: null });
+    }
+  });
+
+  it("gives no result while runs wait, and one result when the batch ends", () => {
+    // The views of a batch of three runs, in order. Only the last gives a result.
+    const steps: ExportIndicatorInput[] = [
+      createInput({
+        status: "running",
+        tracking: true,
+        batch: batch({ waitingCount: 2, continues: true }),
+      }),
+      createInput({
+        status: "finished",
+        tracking: false,
+        batch: batch({ waitingCount: 2, continues: true }),
+      }),
+      createInput({
+        status: "preparing",
+        tracking: true,
+        batch: batch({ waitingCount: 1, continues: true, earlierEnds: ["finished"] }),
+      }),
+      createInput({
+        status: "failed",
+        tracking: false,
+        batch: batch({ waitingCount: 1, continues: true, earlierEnds: ["finished"] }),
+      }),
+      createInput({
+        status: "running",
+        tracking: true,
+        batch: batch({ earlierEnds: ["finished", "failed"] }),
+      }),
+      createInput({
+        status: "finished",
+        tracking: false,
+        batch: batch({ earlierEnds: ["finished", "failed"] }),
+      }),
+    ];
+    const announcements = steps.map((input) =>
+      announcementKeyOf(presentExportIndicator(input)),
+    );
+    expect(announcements).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+      // A run of the batch failed, so the end of the batch is a failure.
+      "statusBar.export.failed",
+    ]);
+  });
+
+  it("shows a batch with a failed run as failed, and keeps the file of a finished last run", () => {
+    const view = presentExportIndicator(
+      createInput({
+        status: "finished",
+        tracking: false,
+        batch: batch({ earlierEnds: ["failed", "finished"] }),
+      }),
+    );
+    expect(view).toMatchObject({
+      kind: "failed",
+      batchSummary: { count: 3, finished: 2 },
+      lastRunFinished: true,
+    });
+  });
+
+  it("keeps the rules of one run for a batch of one run", () => {
+    const view = presentExportIndicator(
+      createInput({ status: "finished", tracking: false, batch: batch() }),
+    );
+    expect(view).toMatchObject({ kind: "finished", lastRunFinished: true });
+  });
+
+  it("shows the end of a batch that ended while the export store is idle", () => {
+    const view = presentExportIndicator(
+      createInput({
+        status: "idle",
+        tracking: false,
+        outputPath: null,
+        batch: batch({
+          earlierEnds: ["finished", "failed"],
+          lastEndOutputPath: "/out/b.mp4",
+          hasUnseenEnd: true,
+        }),
+      }),
+    );
+    expect(view).toEqual({
+      kind: "failed",
+      outputName: "b.mp4",
+      batchSummary: { count: 2, finished: 1 },
+      lastRunFinished: false,
+      canDismiss: true,
+    });
+    expect(announcementKeyOf(view)).toBe("statusBar.export.failed");
+  });
+
+  it("does not show again the result that a reset dropped", () => {
+    expect(
+      presentExportIndicator(
+        createInput({
+          status: "idle",
+          tracking: false,
+          batch: batch({
+            earlierEnds: ["finished"],
+            lastEndOutputPath: "/out/a.mp4",
+            hasUnseenEnd: false,
+          }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("counts the ends that the user saw before a reset", () => {
+    const ended = [
+      { runId: "run-1", status: "finished" as const, error: null },
+      { runId: "run-2", status: "failed" as const, error: null },
+    ];
+    const queue = {
+      jobs: {},
+      order: ["run-1", "run-2"],
+      waiting: [],
+      removing: [],
+      submitting: 0,
+      ended,
+    };
+    expect(
+      batchInputOf({ ...queue, seenEndedCount: 1 }, { runId: null }).hasUnseenEnd,
+    ).toBe(true);
+    expect(
+      batchInputOf({ ...queue, seenEndedCount: 2 }, { runId: null }).hasUnseenEnd,
+    ).toBe(false);
+  });
+
+  it("shows nothing for an idle export store with no batch", () => {
+    expect(
+      presentExportIndicator(
+        createInput({ status: "idle", tracking: false, batch: batch() }),
+      ),
+    ).toBeNull();
+  });
+
+  describe("the catalog", () => {
+    async function tFor(language: "en" | "zh-CN") {
+      const instance = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+        systemLanguages: [],
+      });
+      return instance.t;
+    }
+
+    it("formats the number of waiting runs", async () => {
+      const enT = await tFor("en");
+      expect(enT("statusBar.export.queued", { count: 1 })).toBe("+1 queued");
+      expect(enT("statusBar.export.queued", { count: 2 })).toBe("+2 queued");
+      const zhT = await tFor("zh-CN");
+      expect(zhT("statusBar.export.queued", { count: 2 })).toBe("另有 2 个排队中");
+    });
+
+    it("formats the summary of a batch", async () => {
+      const enT = await tFor("en");
+      expect(enT("statusBar.export.batchSummary", { count: 3, finished: 2 })).toBe(
+        "2 of 3 exports finished",
+      );
+      const zhT = await tFor("zh-CN");
+      expect(zhT("statusBar.export.batchSummary", { count: 3, finished: 2 })).toBe(
+        "3 个导出中已完成 2 个",
+      );
+    });
   });
 });

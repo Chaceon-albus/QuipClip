@@ -75,6 +75,13 @@ export type ExportQueueState = {
    */
   removing: string[];
   /**
+   * The number of entries of `ended` that the user saw before a reset of the export store
+   * while the batch went on, such as the Close of the dialog. The status bar shows the end of
+   * a batch that ended while the export store is idle only when `ended` holds more entries,
+   * so it never shows again a result that the user dismissed. A new batch clears it.
+   */
+  seenEndedCount: number;
+  /**
    * The number of submissions that have no answer yet. Such a submission can still start a
    * run or add one to the queue. A new batch does not clear it.
    */
@@ -128,6 +135,13 @@ export type ExportQueueActions = {
    * @returns True when the backend accepted the cancel, false otherwise.
    */
   remove: (runId: string) => Promise<boolean>;
+  /**
+   * Drops the rows of a batch that is over while the export store is idle. A reset of the
+   * export store while runs wait keeps the batch, so its end can still show in the status
+   * bar. The dismissal of that end calls this. It does nothing while the export store is not
+   * idle or while the batch goes on (`exportBatchContinues`).
+   */
+  dismissEndedBatch: () => void;
 };
 
 /** Combined type of the export queue state and actions. */
@@ -154,7 +168,14 @@ const TERMINAL_STATUSES: ReadonlySet<ExportState["status"]> = new Set([
 ]);
 
 function emptyBatch(): ExportQueueBatch {
-  return { jobs: {}, order: [], waiting: [], ended: [], removing: [] };
+  return {
+    jobs: {},
+    order: [],
+    waiting: [],
+    ended: [],
+    removing: [],
+    seenEndedCount: 0,
+  };
 }
 
 function noop(): void {}
@@ -195,7 +216,7 @@ export function createExportQueueStore(
   let awaitingRunId = false;
   let pendingEvents: ExportProgressEvent[] = [];
 
-  return createStore<ExportQueueStoreState>()((set, get) => {
+  const store = createStore<ExportQueueStoreState>()((set, get) => {
     function removeFrom(list: string[], runId: string): string[] {
       return list.filter((id) => id !== runId);
     }
@@ -471,6 +492,8 @@ export function createExportQueueStore(
         set(emptyBatch());
       } else {
         archiveRun(previous);
+        // The user saw the result that the reset dropped, and every end before it.
+        set({ seenEndedCount: get().ended.length });
       }
     });
 
@@ -507,6 +530,14 @@ export function createExportQueueStore(
         }
       },
 
+      dismissEndedBatch: (): void => {
+        const current = exportStoreApi.getState();
+        if (current.status !== "idle" || exportBatchContinues(get(), current)) {
+          return;
+        }
+        set(emptyBatch());
+      },
+
       remove: async (runId: string): Promise<boolean> => {
         const before = get();
         if (!before.waiting.includes(runId) || before.removing.includes(runId)) {
@@ -541,6 +572,23 @@ export function createExportQueueStore(
       },
     };
   });
+
+  // A batch can end while the export store is idle, after a reset while runs waited. When it
+  // ends with no end that the user did not see, such as by the removal of the last waiting
+  // run or a refused submission, the status bar has nothing to show, and the rows go.
+  store.subscribe((state) => {
+    const current = exportStoreApi.getState();
+    if (
+      current.status === "idle" &&
+      state.order.length > 0 &&
+      state.ended.length <= state.seenEndedCount &&
+      !exportBatchContinues(state, current)
+    ) {
+      store.setState(emptyBatch());
+    }
+  });
+
+  return store;
 }
 
 export type ExportQueueStore = ReturnType<typeof createExportQueueStore>;
@@ -557,6 +605,79 @@ export function hasPendingExportWork(
   state: Pick<ExportQueueState, "waiting" | "submitting">,
 ): boolean {
   return state.waiting.length > 0 || state.submitting > 0;
+}
+
+/** The fields of the export queue state that the rules of a batch read. */
+export type ExportBatchQueueState = Pick<
+  ExportQueueState,
+  "order" | "waiting" | "submitting" | "ended"
+>;
+
+/**
+ * True while the batch goes on after the run of the export store: runs wait, a submission has
+ * no answer yet (`hasPendingExportWork`), the queue archived the run of the export store, or
+ * the export store is idle while a run of the batch has not ended.
+ *
+ * The third test covers the adoption of the next run. The queue first adds the run of the
+ * export store to `ended`, then takes the next run out of `waiting`, and only then does the
+ * export store move to `preparing`. Between those changes nothing waits, but the batch goes
+ * on. The status views read this rule, so they show no end of the batch in that gap.
+ *
+ * The last test covers the same gap after a reset of the export store while runs waited, such
+ * as the Close of the dialog: the export store is idle and has no run, and the next run left
+ * `waiting` but has not ended.
+ */
+export function exportBatchContinues(
+  queue: ExportBatchQueueState,
+  exportState: Pick<ExportState, "runId">,
+): boolean {
+  if (hasPendingExportWork(queue)) {
+    return true;
+  }
+  const runId = exportState.runId;
+  const endedIds = new Set(queue.ended.map((entry) => entry.runId));
+  if (runId !== null) {
+    return endedIds.has(runId);
+  }
+  return (
+    queue.order.length > 0 &&
+    queue.ended.length > 0 &&
+    queue.order.some((id) => !endedIds.has(id))
+  );
+}
+
+/** The end of one run of a batch. */
+export type ExportBatchEnd = ExportQueueEndedJob["status"];
+
+/**
+ * The ends of the runs of the batch, in the order that they ended: the runs in `ended`, and
+ * then the run of the export store when it ended (not `isExportRunLive`). A run of the export
+ * store that the queue archived counts once.
+ */
+export function exportBatchEndsOf(
+  queue: Pick<ExportQueueState, "ended">,
+  exportState: Pick<ExportState, "runId" | "status" | "tracking">,
+): ExportBatchEnd[] {
+  const ends = queue.ended
+    .filter((entry) => entry.runId !== exportState.runId)
+    .map((entry) => entry.status);
+  const status = exportState.status;
+  if (
+    !isExportRunLive(exportState) &&
+    (status === "finished" || status === "failed" || status === "canceled")
+  ) {
+    ends.push(status);
+  }
+  return ends;
+}
+
+/**
+ * True when a batch of more than one run has a failed run. The status views then show the end
+ * of the batch as a failure, also when its last run finished. A batch of one run gives false,
+ * so its views keep the rules of one run.
+ */
+export function exportBatchHasFailure(ends: readonly ExportBatchEnd[]): boolean {
+  return ends.length > 1 && ends.includes("failed");
 }
 
 /** The phase of a row of the queue list. */

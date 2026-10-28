@@ -2,13 +2,18 @@
  * Pure presenter for the status bar export indicator.
  *
  * Implements status bar indicator visibility and view model derivation according to ADR 025.
- * The indicator is hidden when the export dialog is open or when status is idle.
+ * The indicator is hidden when the export dialog is open or when status is idle. It also shows
+ * the queue of the batch (ADR 049).
  */
 
 import {
+  exportBatchContinues,
+  exportBatchHasFailure,
   isExportRunLive,
   type ExportError,
+  type ExportQueueState,
   type ExportRunLiveState,
+  type ExportState,
 } from "@/features/export";
 import { splitFilePath } from "@/lib/fileName";
 import {
@@ -18,12 +23,83 @@ import {
   type ExportProgressView,
 } from "../export/exportProgressPresenter";
 
+export type ExportResultKind = "finished" | "failed" | "canceled";
+
+/** The facts of the batch that the indicator shows, from the export queue store. */
+export interface ExportIndicatorBatchInput {
+  /** The number of runs that wait in the queue, less the runs that the user removes. */
+  readonly waitingCount: number;
+  /**
+   * True while the batch goes on after the run of the export store
+   * (`exportBatchContinues`).
+   */
+  readonly continues: boolean;
+  /** The ends of the runs of the batch that ended before the run of the export store. */
+  readonly earlierEnds: readonly ExportResultKind[];
+  /**
+   * The output path of the last run in `earlierEnds`, or null. The result of a batch that
+   * ended while the export store is idle names that file.
+   */
+  readonly lastEndOutputPath: string | null;
+  /**
+   * True when `ended` holds an end that the user did not see before a reset of the export
+   * store (`ExportQueueState.seenEndedCount`). Only such an end gives the result of a batch
+   * that ended while the export store is idle.
+   */
+  readonly hasUnseenEnd: boolean;
+}
+
+/** The input of a batch of one run, with nothing that waits. */
+export const SINGLE_RUN_BATCH: ExportIndicatorBatchInput = {
+  waitingCount: 0,
+  continues: false,
+  earlierEnds: [],
+  lastEndOutputPath: null,
+  hasUnseenEnd: false,
+};
+
+/** The batch facts of the indicator, from the export queue store and the export store. */
+export function batchInputOf(
+  queue: Pick<
+    ExportQueueState,
+    | "jobs"
+    | "order"
+    | "waiting"
+    | "removing"
+    | "submitting"
+    | "ended"
+    | "seenEndedCount"
+  >,
+  exportState: Pick<ExportState, "runId">,
+): ExportIndicatorBatchInput {
+  const earlier = queue.ended.filter((entry) => entry.runId !== exportState.runId);
+  const last = earlier[earlier.length - 1];
+  return {
+    waitingCount: queue.waiting.filter((runId) => !queue.removing.includes(runId))
+      .length,
+    continues: exportBatchContinues(queue, exportState),
+    earlierEnds: earlier.map((entry) => entry.status),
+    lastEndOutputPath:
+      last === undefined ? null : (queue.jobs[last.runId]?.outputPath ?? null),
+    hasUnseenEnd: queue.ended.length > queue.seenEndedCount,
+  };
+}
+
 export type ExportIndicatorInput = ExportProgressInput & {
   panelOpen: boolean;
   outputPath: string | null;
+  /** The batch of the run. A batch of one run when the field is not given. */
+  batch?: ExportIndicatorBatchInput;
 };
 
-export type ExportResultKind = "finished" | "failed" | "canceled";
+/**
+ * The summary of a batch of more than one run: `count` runs ended, and `finished` of them
+ * finished. It fills `statusBar.export.batchSummary`.
+ */
+export interface ExportBatchSummary {
+  readonly count: number;
+  readonly finished: number;
+}
 
 /**
  * The text of an active run: one catalog key, and the values of its placeholders.
@@ -53,10 +129,19 @@ export type ExportIndicatorView =
       progress: ExportProgressView;
       line: ExportIndicatorLine;
       outputName: string | null;
+      /** The number of runs that wait in the queue. Zero shows no count. */
+      queuedCount: number;
     }
   | {
       kind: ExportResultKind;
       outputName: string | null;
+      /** The summary of a batch of more than one run, or null for a batch of one run. */
+      batchSummary: ExportBatchSummary | null;
+      /**
+       * True when the run of the export store finished, so its file can be shown. The kind
+       * of a batch with a failed run is `failed`, also when its last run finished.
+       */
+      lastRunFinished: boolean;
       /**
        * False while the run is live (`isExportRunLive`), because a dismissal resets the
        * store and drops the only record of the run. A live `failed` shows as `active`, so a
@@ -120,21 +205,71 @@ export function presentIndicatorLine(
 }
 
 /**
- * Null when the panel is open or the status is idle (ADR 025).
+ * The progress between two runs of a batch: the preparation of the next run, with no value.
+ */
+const BETWEEN_RUNS_PROGRESS: ExportProgressView = {
+  phase: "preparing",
+  basePhase: "preparing",
+  barValue: null,
+  percentFraction: null,
+  remainingSeconds: null,
+  speed: null,
+  frame: null,
+  expectedFrames: null,
+};
+
+/**
+ * The result of a batch from the ends of its runs, in order. The last end gives the kind,
+ * except that a batch of more than one run with a failed run is `failed`
+ * (`exportBatchHasFailure`). A batch of more than one run also gets a summary.
+ */
+function batchResultOf(ends: readonly ExportResultKind[]): {
+  kind: ExportResultKind;
+  batchSummary: ExportBatchSummary | null;
+} | null {
+  const last = ends[ends.length - 1];
+  if (last === undefined) {
+    return null;
+  }
+  return {
+    kind: exportBatchHasFailure(ends) ? "failed" : last,
+    batchSummary:
+      ends.length > 1
+        ? {
+            count: ends.length,
+            finished: ends.filter((end) => end === "finished").length,
+          }
+        : null,
+  };
+}
+
+/**
+ * Null when the panel is open, or when the status is idle and no batch ended (ADR 025).
  *
  * A live run (`isExportRunLive`) shows as `active`, also a `failed` that the store still
  * tracks. A Stop request failed there, and the backend still encodes, so the item shows the
  * progress and not a result. A result would offer the dismissal and be announced as a
- * failure that has not happened.
+ * failure that has not happened. The active item also gives the number of waiting runs.
+ *
+ * Between two runs of a batch (`batch.continues`), the run of the export store ended and the
+ * next run did not take the slot yet. The item shows the preparation, and not the result of
+ * the run that ended. So the result of a run in the middle of a batch is not shown, flashed,
+ * or announced. Only the end of the batch gives a result. For a batch of more than one run,
+ * that result also holds a summary of the batch, and a failed run makes it a failure
+ * (ADR 049).
+ *
+ * A batch can also end while the export store is idle: a reset while runs waited, such as the
+ * Close of the dialog, and then the failure of the last waiting run before it took the slot.
+ * The result then comes from the runs in the queue, and it shows only when a run ended after
+ * the reset. The result that the reset dropped does not come back.
  */
 export function presentExportIndicator(
   input: ExportIndicatorInput,
 ): ExportIndicatorView | null {
-  if (input.panelOpen || input.status === "idle") {
+  if (input.panelOpen) {
     return null;
   }
-
-  const outputName = outputNameOf(input.outputPath);
+  const batch = input.batch ?? SINGLE_RUN_BATCH;
 
   if (isExportRunLive(input)) {
     const progress = presentExportProgress(input);
@@ -145,7 +280,19 @@ export function presentExportIndicator(
       kind: "active",
       progress,
       line: presentIndicatorLine(progress, input.status === "failed"),
-      outputName,
+      outputName: outputNameOf(input.outputPath),
+      queuedCount: batch.waitingCount,
+    };
+  }
+
+  if (batch.continues) {
+    return {
+      kind: "active",
+      progress: BETWEEN_RUNS_PROGRESS,
+      line: presentIndicatorLine(BETWEEN_RUNS_PROGRESS),
+      // The run of the export store ended, so its output is not the output of this line.
+      outputName: null,
+      queuedCount: batch.waitingCount,
     };
   }
 
@@ -154,10 +301,29 @@ export function presentExportIndicator(
     input.status === "failed" ||
     input.status === "canceled"
   ) {
+    const result = batchResultOf([...batch.earlierEnds, input.status]);
+    if (result === null) {
+      return null;
+    }
     return {
-      kind: input.status,
-      outputName,
+      ...result,
+      outputName: outputNameOf(input.outputPath),
+      lastRunFinished: input.status === "finished",
       canDismiss: !isExportRunLive(input),
+    };
+  }
+
+  // The result that the reset dropped was seen, so only a later end shows.
+  if (input.status === "idle" && batch.hasUnseenEnd) {
+    const result = batchResultOf(batch.earlierEnds);
+    if (result === null) {
+      return null;
+    }
+    return {
+      ...result,
+      outputName: outputNameOf(batch.lastEndOutputPath),
+      lastRunFinished: false,
+      canDismiss: true,
     };
   }
 

@@ -1,11 +1,19 @@
 import { ProgressBarStatus, type ProgressBarState } from "@tauri-apps/api/window";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createExportQueueStore,
   createExportStore,
+  exportBatchContinues,
+  exportBatchEndsOf,
+  exportBatchHasFailure,
+  type ExportBatchQueueState,
   type ExportProgressEvent,
+  type ExportRequest,
   type ExportSubmission,
   type ExportState,
+  type ExportStoreState,
 } from "@/features/export";
+import type { StoreApi } from "zustand/vanilla";
 import type { Pts } from "@/types/project";
 import type { TaskbarProgressInput } from "./taskbarProgressSync";
 import {
@@ -47,6 +55,11 @@ function flushPromises(): Promise<void> {
 
 function callsOf(spy: ReturnType<typeof createSpy>): ProgressBarState[] {
   return spy.mock.calls.map(([state]) => state);
+}
+
+function lastCallOf(spy: ReturnType<typeof createSpy>): ProgressBarState | undefined {
+  const calls = callsOf(spy);
+  return calls[calls.length - 1];
 }
 
 describe("resolveTaskbarProgress", () => {
@@ -163,6 +176,46 @@ describe("resolveTaskbarProgress", () => {
     expect(resolve({ status: "failed", tracking: true, frame: null })).toEqual({
       status: ProgressBarStatus.Normal,
       progress: 0,
+    });
+  });
+
+  it.each(["finished", "failed", "canceled", "idle"] as const)(
+    "shows an indeterminate bar for %s while the batch goes on",
+    (status) => {
+      expect(resolve({ status, tracking: false, batchContinues: true })).toEqual({
+        status: ProgressBarStatus.Indeterminate,
+      });
+      expect(
+        resolveTaskbarProgress(
+          createInput({ status, tracking: false, batchContinues: true }),
+          RESET,
+        ),
+      ).toEqual({ status: ProgressBarStatus.Indeterminate, progress: 0 });
+    },
+  );
+
+  it("shows the error state at the end of a batch with a failed run", () => {
+    for (const status of ["finished", "canceled", "failed", "idle"] as const) {
+      expect(resolve({ status, tracking: false, batchFailed: true })).toEqual({
+        status: ProgressBarStatus.Error,
+        progress: 100,
+      });
+    }
+    // Between two runs, the bar shows no end.
+    expect(
+      resolve({
+        status: "failed",
+        tracking: false,
+        batchContinues: true,
+        batchFailed: true,
+      }),
+    ).toEqual({ status: ProgressBarStatus.Indeterminate });
+  });
+
+  it("shows the progress of a live run while the batch goes on", () => {
+    expect(resolve({ frame: 50, batchContinues: true })).toEqual({
+      status: ProgressBarStatus.Normal,
+      progress: 50,
     });
   });
 
@@ -479,5 +532,243 @@ describe("startTaskbarProgressSync", () => {
     release();
     await flushPromises();
     expect(setProgressBar).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("startTaskbarProgressSync with a batch of runs", () => {
+  function request(outputPath: string): ExportRequest {
+    return {
+      sourcePath: "/media/source.mp4",
+      outputPath,
+      segments: [{ inPts: "0" as Pts, outPts: "1000" as Pts }],
+      preset: createPresetDraft("mp4-h264", "Test preset"),
+      streams: "videoAndAudio",
+      audioMode: "encode",
+    };
+  }
+
+  /** A real export store and queue store that share one fake backend. */
+  async function setupBatch(outputPaths: readonly string[]) {
+    const handlers: Array<(event: ExportProgressEvent) => void> = [];
+    const subscribe = (handler: (event: ExportProgressEvent) => void) => {
+      handlers.push(handler);
+      return Promise.resolve(() => {});
+    };
+    let nextRun = 1;
+    const start = (): Promise<ExportSubmission> => {
+      const runId = `run-${nextRun++}`;
+      return Promise.resolve({ runId, queued: runId !== "run-1" });
+    };
+    const cancel = () => Promise.resolve(true);
+    const store = createExportStore({
+      subscribeExportProgress: subscribe,
+      startExport: start,
+      cancelExport: cancel,
+    });
+    const queueStore = createExportQueueStore({
+      exportStore: store,
+      startExport: start,
+      cancelExport: cancel,
+      subscribeExportProgress: subscribe,
+    });
+    for (const path of outputPaths) {
+      await queueStore.getState().submit(request(path));
+    }
+    const emit = (event: ExportProgressEvent) => {
+      for (const handler of handlers) handler(event);
+    };
+    const setProgressBar = createSpy();
+    const stop = startTaskbarProgressSync({
+      store,
+      queueStore,
+      setProgressBar,
+      resetIndeterminateValue: false,
+    });
+    return { store, queueStore, emit, setProgressBar, stop };
+  }
+
+  /**
+   * The sync sends one call at a time, so it can skip a short state. This reads the resolved
+   * state at each change of either store instead, as the sync resolves it.
+   */
+  function recordResolved(
+    store: StoreApi<ExportStoreState>,
+    queueStore: StoreApi<ExportBatchQueueState>,
+  ) {
+    const states: ProgressBarState[] = [];
+    const record = () => {
+      const state = store.getState();
+      const queue = queueStore.getState();
+      states.push(
+        resolveTaskbarProgress(
+          {
+            ...state,
+            batchContinues: exportBatchContinues(queue, state),
+            batchFailed: exportBatchHasFailure(exportBatchEndsOf(queue, state)),
+          },
+          KEEP,
+        ),
+      );
+    };
+    const stopExport = store.subscribe(record);
+    const stopQueue = queueStore.subscribe(record);
+    return {
+      states,
+      stop: () => {
+        stopExport();
+        stopQueue();
+      },
+    };
+  }
+
+  function started(runId: string, outputPath: string): ExportProgressEvent {
+    return {
+      event: "started",
+      runId,
+      outputPath,
+      segmentCount: 1,
+      totalDurationUs: 4_000_000,
+      expectedFrames: 100,
+    };
+  }
+
+  it("shows no error between two runs after a failed run in the middle", async () => {
+    const { emit, setProgressBar, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    await flushPromises();
+    emit(started("run-1", "/out/a.mp4"));
+    await flushPromises();
+    emit({ event: "failed", runId: "run-1", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    emit({ event: "preparing", runId: "run-2" });
+    await flushPromises();
+    emit(started("run-2", "/out/b.mp4"));
+    await flushPromises();
+    emit({ event: "progress", runId: "run-2", frame: 30 });
+    await flushPromises();
+    emit({ event: "finished", runId: "run-2", outputPath: "/out/b.mp4", frames: 100 });
+    await flushPromises();
+
+    expect(callsOf(setProgressBar)).toEqual([
+      { status: ProgressBarStatus.Indeterminate },
+      { status: ProgressBarStatus.Normal, progress: 0 },
+      // The failure of run-1 while run-2 waits, and the preparation of run-2. No error.
+      { status: ProgressBarStatus.Indeterminate },
+      { status: ProgressBarStatus.Normal, progress: 0 },
+      { status: ProgressBarStatus.Normal, progress: 30 },
+      // The end of the batch: run-2 finished, but run-1 failed.
+      { status: ProgressBarStatus.Error, progress: 100 },
+    ]);
+    stop();
+  });
+
+  it("shows None at the end of a batch with no failed run", async () => {
+    const { emit, setProgressBar, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "finished", runId: "run-1", outputPath: "/out/a.mp4", frames: 100 });
+    emit({ event: "preparing", runId: "run-2" });
+    emit({ event: "finished", runId: "run-2", outputPath: "/out/b.mp4", frames: 100 });
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({ status: ProgressBarStatus.None });
+    stop();
+  });
+
+  it("resolves no end state through the adoption after a reset while runs waited", async () => {
+    const { store, queueStore, emit, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "finished", runId: "run-1", outputPath: "/out/a.mp4", frames: 100 });
+    // The Close of the dialog resets the result while run-2 waits.
+    store.getState().reset();
+    const resolved = recordResolved(store, queueStore);
+    emit({ event: "preparing", runId: "run-2" });
+    expect(resolved.states.length).toBeGreaterThan(0);
+    expect(
+      resolved.states.every(
+        (state) => state.status === ProgressBarStatus.Indeterminate,
+      ),
+    ).toBe(true);
+    resolved.stop();
+    stop();
+  });
+
+  it("shows the error state when the last waiting run fails after a reset", async () => {
+    const { store, emit, setProgressBar, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "finished", runId: "run-1", outputPath: "/out/a.mp4", frames: 100 });
+    store.getState().reset();
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({
+      status: ProgressBarStatus.Indeterminate,
+    });
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({
+      status: ProgressBarStatus.Error,
+      progress: 100,
+    });
+    stop();
+  });
+
+  it("resolves no end state at any change of the adoption of the next run", async () => {
+    const { store, queueStore, emit, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit(started("run-1", "/out/a.mp4"));
+    const resolved = recordResolved(store, queueStore);
+    emit({ event: "failed", runId: "run-1", code: "ffmpegProcessFailed" });
+    emit({ event: "preparing", runId: "run-2" });
+    expect(resolved.states.length).toBeGreaterThan(2);
+    expect(
+      resolved.states.every(
+        (state) => state.status === ProgressBarStatus.Indeterminate,
+      ),
+    ).toBe(true);
+    resolved.stop();
+    stop();
+  });
+
+  it("shows the error state when the last run of the batch fails", async () => {
+    const { emit, setProgressBar, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "finished", runId: "run-1", outputPath: "/out/a.mp4", frames: 100 });
+    emit({ event: "preparing", runId: "run-2" });
+    emit({ event: "failed", runId: "run-2", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({
+      status: ProgressBarStatus.Error,
+      progress: 100,
+    });
+    stop();
+  });
+
+  it("shows the end when the removal of the last waiting run ends the batch", async () => {
+    const { emit, queueStore, setProgressBar, stop } = await setupBatch([
+      "/out/a.mp4",
+      "/out/b.mp4",
+    ]);
+    emit({ event: "failed", runId: "run-1", code: "ffmpegProcessFailed" });
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({
+      status: ProgressBarStatus.Indeterminate,
+    });
+    await queueStore.getState().remove("run-2");
+    emit({ event: "failed", runId: "run-2", code: "canceled" });
+    await flushPromises();
+    expect(lastCallOf(setProgressBar)).toEqual({
+      status: ProgressBarStatus.Error,
+      progress: 100,
+    });
+    stop();
   });
 });

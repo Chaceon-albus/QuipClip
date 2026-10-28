@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -28,6 +29,7 @@ import {
   selectExportOutputAction,
   useExportOutputActionStore,
   useExportPanelStore,
+  useExportQueueStore,
   useExportStore,
   type ExportError,
 } from "@/features/export";
@@ -36,6 +38,7 @@ import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
   announcementKeyOf,
+  batchInputOf,
   decideFocusRestore,
   focusInsideAfterBlur,
   formatIndicatorLine,
@@ -43,6 +46,7 @@ import {
   presentExportIndicator,
   presentStopFailureAnnouncement,
   resultLabelKey,
+  type ExportBatchSummary,
   type ExportIndicatorView,
   type ExportResultKind,
   type IndicatorSlot,
@@ -109,9 +113,14 @@ const SLOT_CLASS: Record<IndicatorSlot, string> = {
  *
  * The polite live region is always mounted, because a screen reader announces a change of
  * its content and not a region that appears with its content. It receives the result of a
- * run that ended while the dialog was hidden, and each failed Stop request that the dialog
+ * batch that ended while the dialog was hidden, and each failed Stop request that the dialog
  * did not show (`presentStopFailureAnnouncement`). No progress change is announced. It holds
  * text only, no control.
+ *
+ * The indicator also shows the queue (ADR 049). The active item gives the number of waiting
+ * runs. Between two runs of a batch it stays active, so the result of a run in the middle of
+ * the batch is not shown or announced. The result of a batch of more than one run adds a
+ * summary, and the live region announces the result and the summary once.
  */
 export function ExportStatusIndicator() {
   const { t } = useTranslation();
@@ -125,6 +134,25 @@ export function ExportStatusIndicator() {
   };
   const reset = useExportStore((state) => state.reset);
   const runId = useExportStore((state) => state.runId);
+  const queue = useExportQueueStore(
+    useShallow((state) => ({
+      jobs: state.jobs,
+      order: state.order,
+      waiting: state.waiting,
+      removing: state.removing,
+      seenEndedCount: state.seenEndedCount,
+      submitting: state.submitting,
+      ended: state.ended,
+    })),
+  );
+  const dismissEndedBatch = useExportQueueStore((state) => state.dismissEndedBatch);
+  // The reset ends the result of the export store. A batch that ended while the export store
+  // was idle keeps its rows in the queue, and the second call drops them.
+  const dismiss = () => {
+    reset();
+    dismissEndedBatch();
+  };
+  const batch = useMemo(() => batchInputOf(queue, { runId }), [queue, runId]);
 
   const exportData = useExportStore(
     useShallow((state) => ({
@@ -145,8 +173,9 @@ export function ExportStatusIndicator() {
       presentExportIndicator({
         ...exportData,
         panelOpen,
+        batch,
       }),
-    [exportData, panelOpen],
+    [exportData, panelOpen, batch],
   );
 
   // The failure of a Stop request while the run continues. It is one error instance for one
@@ -166,6 +195,8 @@ export function ExportStatusIndicator() {
   }
 
   const announcementKey = announcementKeyOf(view) ?? stopFailureAnnouncement.key;
+  const announcedSummary =
+    view !== null && view.kind !== "active" ? view.batchSummary : null;
 
   // The keyed wrapper remounts when the view kind changes, and the focused button goes with
   // it. The browser then puts the focus on the body, and a keyboard user loses the place.
@@ -222,8 +253,11 @@ export function ExportStatusIndicator() {
 
   return (
     <>
+      {/* The result and the summary are two sentences of their own. A space keeps them
+          apart, and the region reads them in order as one announcement. */}
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcementKey !== null ? t(announcementKey) : ""}
+        {announcedSummary !== null && <> {formatBatchSummary(t, announcedSummary)}</>}
       </span>
       {view !== null && (
         <>
@@ -240,10 +274,12 @@ export function ExportStatusIndicator() {
               <ExportResultItem
                 kind={view.kind}
                 outputName={view.outputName}
+                batchSummary={view.batchSummary}
+                lastRunFinished={view.lastRunFinished}
                 canDismiss={view.canDismiss}
                 runId={runId}
                 onShow={show}
-                onDismiss={reset}
+                onDismiss={dismiss}
               />
             )}
           </div>
@@ -261,6 +297,22 @@ export function ExportStatusIndicator() {
 }
 
 type ActiveView = Extract<ExportIndicatorView, { kind: "active" }>;
+
+type Translate = ReturnType<typeof useTranslation>["t"];
+
+/** The text of the summary of a batch, such as "2 of 3 exports finished". */
+function formatBatchSummary(t: Translate, summary: ExportBatchSummary): string {
+  return t("statusBar.export.batchSummary", {
+    count: summary.count,
+    finished: summary.finished,
+  });
+}
+
+/**
+ * The quieter colour of a secondary status bar text while the window does not have the focus.
+ */
+const SECONDARY_TEXT_CLASS =
+  "whitespace-nowrap text-muted-foreground transition-colors window-inactive:text-muted-foreground-inactive";
 
 /** The progress bar, the percent, and the time estimate of a run behind the editor. */
 function ActiveExportItem({ view, onShow }: { view: ActiveView; onShow: () => void }) {
@@ -282,6 +334,7 @@ function ActiveExportItem({ view, onShow }: { view: ActiveView; onShow: () => vo
   );
 
   const { progress } = view;
+  const queuedId = useId();
   // The line keys take plain string values. This view of `t` accepts them without a cast
   // at each call, as in StatusBar.
   const line = formatIndicatorLine(view.line, t as IndicatorTranslate, (fraction) =>
@@ -295,6 +348,7 @@ function ActiveExportItem({ view, onShow }: { view: ActiveView; onShow: () => vo
           type="button"
           onClick={onShow}
           aria-label={line.label}
+          aria-describedby={view.queuedCount > 0 ? queuedId : undefined}
           className={cn(statusBarItem({ interactive: true }), "gap-2")}
         >
           <ProgressBar
@@ -315,6 +369,11 @@ function ActiveExportItem({ view, onShow }: { view: ActiveView; onShow: () => vo
               ),
             )}
           </span>
+          {view.queuedCount > 0 && (
+            <span id={queuedId} className={cn(SECONDARY_TEXT_CLASS, "tabular-nums")}>
+              {t("statusBar.export.queued", { count: view.queuedCount })}
+            </span>
+          )}
         </button>
       </TooltipTrigger>
       <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
@@ -366,6 +425,8 @@ const INACTIVE_ICON_BUTTON_CLASS = "window-inactive:text-muted-foreground-inacti
 function ExportResultItem({
   kind,
   outputName,
+  batchSummary,
+  lastRunFinished,
   canDismiss,
   runId,
   onShow,
@@ -373,6 +434,8 @@ function ExportResultItem({
 }: {
   kind: ExportResultKind;
   outputName: string | null;
+  batchSummary: ExportBatchSummary | null;
+  lastRunFinished: boolean;
   canDismiss: boolean;
   runId: string | null;
   onShow: () => void;
@@ -385,7 +448,8 @@ function ExportResultItem({
   const revealOutput = useExportOutputActionStore((state) => state.reveal);
 
   const revealLabel = t(revealLabelKey(isMacOS()));
-  const canReveal = kind === "finished" && runId !== null;
+  // The file of the last run, also when a failed run of the batch gives the failed tone.
+  const canReveal = lastRunFinished && runId !== null;
 
   // The status bar has no room for an error message. A failed request opens the dialog,
   // which shows the message inline for this run.
@@ -425,7 +489,19 @@ function ExportResultItem({
             )}
           >
             {RESULT_ICON[kind]}
-            <span className="whitespace-nowrap">{t(resultLabelKey(kind))}</span>
+            {/* The space between the result and the summary is text, so the accessible
+                name of the button keeps the two sentences apart. */}
+            <span className="whitespace-nowrap">
+              {t(resultLabelKey(kind))}
+              {batchSummary !== null && (
+                <>
+                  {" "}
+                  <span className={SECONDARY_TEXT_CLASS}>
+                    {formatBatchSummary(t, batchSummary)}
+                  </span>
+                </>
+              )}
+            </span>
           </button>
         </TooltipTrigger>
         <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">

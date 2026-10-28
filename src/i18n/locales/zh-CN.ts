@@ -327,6 +327,10 @@ export const zhCN: TranslationCatalog = {
       finished: "导出完成",
       failed: "导出失败",
       canceled: "导出已停止",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      queued_other: "另有 {{count}} 个排队中",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      batchSummary_other: "{{count}} 个导出中已完成 {{finished}} 个",
       output: "输出：{{name}}",
       showHint: "点击显示导出窗口。",
       dismiss: "关闭提示",
