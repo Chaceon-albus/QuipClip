@@ -18,6 +18,7 @@ import {
   ExportError,
   type ExportProgressEvent,
   type ExportRequest,
+  type ExportRunFacts,
   type ExportSubmission,
   type ExportState,
   type ExportStoreState,
@@ -343,6 +344,49 @@ export function createExportStore(
           encodeStarted: false,
           error: null,
         });
+      },
+
+      adoptRun: (
+        runId: string,
+        facts: ExportRunFacts,
+        events: readonly ExportProgressEvent[] = [],
+      ): void => {
+        // The queue calls this at the `preparing` event of a run that waited. The backend
+        // sends the last event of a run before it releases the slot, and the next run sends
+        // `preparing` only after it took the slot (ADR 049). So the run that the store
+        // tracked before has ended when this event arrives, and the store already holds its
+        // terminal event. Nothing of that run can arrive later, so the store can drop it.
+        //
+        // Precondition: no start of this store is in flight. The queue store sends its
+        // submissions to the backend one after another, and a run waits only when a run was
+        // live before it, so a direct start has its answer before a waiting run can take the
+        // slot. The function still supersedes a start in flight, as a defense: the counter
+        // makes the start discard its answer, and a Stop request that waits for the run id of
+        // that start settles with false.
+        latestRequestId++;
+        awaitingRunId = false;
+        pendingEvents = [];
+        dropDeferredCancel();
+        setTrackedRun(runId, {
+          status: "preparing",
+          runId,
+          outputPath: facts.outputPath,
+          segmentCount: facts.segmentCount,
+          frame: null,
+          expectedFrames: null,
+          fps: null,
+          speed: null,
+          cancelRequested: false,
+          encodeStarted: false,
+          error: null,
+        });
+        // Events of the run that came before the queue knew its run id, in their order. The
+        // store did not track the run when they arrived, so it applies them now.
+        for (const event of events) {
+          if (event.runId === runId) {
+            handleEvent(event);
+          }
+        }
       },
 
       cancelExport: async (): Promise<boolean> => {

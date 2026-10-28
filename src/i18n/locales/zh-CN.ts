@@ -781,6 +781,8 @@ export const zhCN: TranslationCatalog = {
     appDataUnavailable: "应用程序数据目录不可用。",
     invalidPreset: "所选导出预设中有无效的设置。",
     presetNotFound: "未找到所选的导出预设。",
+    outputAlreadyQueued:
+      "另一个正在运行或等待的导出会写入此文件。请选择其他名称或文件夹。",
     ffmpegPairMissing: "无法找到所需的 FFmpeg 或 ffprobe 程序。",
     ffprobeSpawnFailed: "无法启动 ffprobe 进程。",
     ffprobeProcessFailed: "ffprobe 无法检查该媒体文件。",

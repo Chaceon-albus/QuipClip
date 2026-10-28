@@ -351,6 +351,7 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   commandExecutionFailed: BACK,
   exportQueueClosed: null,
   dialogFailed: BACK,
+  outputAlreadyQueued: BACK,
   sourceRevisionChanged: null,
   unknown: BACK,
 };

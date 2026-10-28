@@ -64,6 +64,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   outputReadOnly: BACK_TO_SETUP,
   outputRenameFailed: BACK_TO_SETUP,
   dialogFailed: BACK_TO_SETUP,
+  // Another run of the batch writes to the file. Another name or folder can succeed.
+  outputAlreadyQueued: BACK_TO_SETUP,
 
   // The encode: another preset, or a second attempt, can succeed.
   ffmpegProcessFailed: BACK_TO_SETUP,

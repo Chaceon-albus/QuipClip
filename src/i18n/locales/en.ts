@@ -1005,6 +1005,8 @@ export const en = {
     appDataUnavailable: "The application data directory is unavailable.",
     invalidPreset: "The selected export preset has a setting that is not valid.",
     presetNotFound: "The selected export preset was not found.",
+    outputAlreadyQueued:
+      "Another export that runs or waits writes to this file. Choose another name or folder.",
     ffmpegPairMissing:
       "QuipClip could not find the required FFmpeg or ffprobe program.",
     ffprobeSpawnFailed: "QuipClip could not start the ffprobe process.",

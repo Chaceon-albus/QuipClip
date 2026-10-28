@@ -2241,4 +2241,139 @@ describe("Media Export Store", () => {
       expect(store.getState().cancelRequested).toBe(false);
     });
   });
+
+  describe("adoptRun", () => {
+    it("tracks a run that took the slot after it waited, with the facts of its request", async () => {
+      let emit: (event: ExportProgressEvent) => void = () => {};
+      const store = createExportStore({
+        subscribeExportProgress: (handler) => {
+          emit = handler;
+          return Promise.resolve(() => {});
+        },
+        startExport: () => Promise.resolve(createValidStartResult({ runId: "run-1" })),
+      });
+      await store.getState().startExport(createValidRequest());
+      emit({
+        event: "finished",
+        runId: "run-1",
+        outputPath: "/media/output.mp4",
+        frames: 30,
+      });
+      expect(store.getState().status).toBe("finished");
+
+      store
+        .getState()
+        .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 4 });
+
+      expect(store.getState()).toMatchObject({
+        status: "preparing",
+        runId: "run-2",
+        outputPath: "/media/next.mp4",
+        segmentCount: 4,
+        frame: null,
+        expectedFrames: null,
+        fps: null,
+        speed: null,
+        cancelRequested: false,
+        encodeStarted: false,
+        tracking: true,
+        error: null,
+      });
+
+      // Events of the old run change nothing, and events of the adopted run apply.
+      emit({ event: "failed", runId: "run-1", code: "canceled" });
+      expect(store.getState().status).toBe("preparing");
+      emit({
+        event: "started",
+        runId: "run-2",
+        outputPath: "/media/next.mp4",
+        segmentCount: 4,
+        totalDurationUs: 1_000_000,
+        expectedFrames: 30,
+      });
+      expect(store.getState()).toMatchObject({
+        status: "running",
+        encodeStarted: true,
+      });
+    });
+
+    // The queue store sends its submissions one after another, so no direct start is in
+    // flight at an adoption in normal use. This pins the defense for that case.
+    it("as a defense, supersedes a start in flight and settles its waiting Stop with false", async () => {
+      const startDeferred = createDeferred<ExportSubmission>();
+      const cancelFn = vi.fn().mockResolvedValue(true);
+      const startFn = vi.fn(() => startDeferred.promise);
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        startExport: startFn,
+        cancelExport: cancelFn,
+      });
+
+      const starting = store.getState().startExport(createValidRequest());
+      await vi.waitFor(() => {
+        expect(startFn).toHaveBeenCalledTimes(1);
+      });
+      const stopping = store.getState().cancelExport();
+
+      store
+        .getState()
+        .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 });
+      await expect(stopping).resolves.toBe(false);
+
+      // The answer of the old start is stale.
+      startDeferred.resolve(createValidStartResult({ runId: "run-1" }));
+      await expect(starting).resolves.toBeNull();
+      expect(store.getState()).toMatchObject({
+        status: "preparing",
+        runId: "run-2",
+        tracking: true,
+        cancelRequested: false,
+      });
+      expect(cancelFn).not.toHaveBeenCalled();
+    });
+
+    it("applies the events that came before the adoption, and ignores those of other runs", () => {
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+      });
+
+      store
+        .getState()
+        .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 }, [
+          {
+            event: "started",
+            runId: "run-2",
+            outputPath: "/media/next.mp4",
+            segmentCount: 1,
+            totalDurationUs: 1_000_000,
+            expectedFrames: 30,
+          },
+          { event: "failed", runId: "run-other", code: "canceled" },
+          { event: "failed", runId: "run-2", code: "sourceRevisionMismatch" },
+        ]);
+
+      expect(store.getState()).toMatchObject({
+        status: "failed",
+        runId: "run-2",
+        tracking: false,
+        encodeStarted: true,
+      });
+      expect(store.getState().error?.code).toBe("sourceRevisionMismatch");
+    });
+
+    it("stops the adopted run by its id", async () => {
+      const cancelFn = vi.fn().mockResolvedValue(true);
+      const store = createExportStore({
+        subscribeExportProgress: () => Promise.resolve(() => {}),
+        cancelExport: cancelFn,
+      });
+
+      store
+        .getState()
+        .adoptRun("run-2", { outputPath: "/media/next.mp4", segmentCount: 1 });
+
+      await expect(store.getState().cancelExport()).resolves.toBe(true);
+      expect(cancelFn).toHaveBeenCalledWith("run-2");
+    });
+  });
 });

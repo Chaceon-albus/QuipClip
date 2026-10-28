@@ -12,6 +12,7 @@ import {
   ExportError,
   FRONTEND_EXPORT_ERROR_CODES,
   type ExportActions,
+  type ExportRunFacts,
   type ExportProgressEvent,
   type ExportPublishingEvent,
   type ExportState,
@@ -229,6 +230,7 @@ describe("Export Types & Wire Constants", () => {
         "dialogFailed",
         "sourceRevisionChanged",
         "presetNotFound",
+        "outputAlreadyQueued",
       ]);
     });
 
@@ -392,6 +394,7 @@ describe("Export Types & Wire Constants", () => {
       // and ensure its parameter accepts unknown rather than pushing normalization to callers.
       const actions: ExportActions = {
         startExport: () => Promise.resolve(null),
+        adoptRun: (_runId: string, _facts: ExportRunFacts) => {},
         cancelExport: () => Promise.resolve(true),
         reset: () => {},
         ensureSubscribed: () => Promise.resolve(),
@@ -400,6 +403,7 @@ describe("Export Types & Wire Constants", () => {
       };
 
       expect(typeof actions.startExport).toBe("function");
+      expect(typeof actions.adoptRun).toBe("function");
       expect(typeof actions.cancelExport).toBe("function");
       expect(typeof actions.reset).toBe("function");
       expect(typeof actions.ensureSubscribed).toBe("function");
@@ -425,6 +429,7 @@ describe("Export Types & Wire Constants", () => {
         encodeStarted: false,
         error: null,
         startExport: () => Promise.resolve(null),
+        adoptRun: (_runId: string, _facts: ExportRunFacts) => {},
         cancelExport: () => Promise.resolve(true),
         reset: () => {},
         ensureSubscribed: () => Promise.resolve(),

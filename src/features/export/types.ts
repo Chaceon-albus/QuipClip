@@ -149,11 +149,16 @@ export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number]
  * `presetNotFound` comes from the START step of the export flow, when the settings hold no
  * preset with the chosen id. The request carries the whole preset, so the backend never looks
  * a preset up (ADR 049).
+ *
+ * `outputAlreadyQueued` comes from the export queue store. It refuses an export whose output
+ * path is the path of the live run or of a waiting run, without regard to letter case, so two
+ * runs of one batch never write one file (ADR 049).
  */
 export const FRONTEND_EXPORT_ERROR_CODES = [
   "dialogFailed",
   "sourceRevisionChanged",
   "presetNotFound",
+  "outputAlreadyQueued",
 ] as const;
 
 export type FrontendExportErrorCode = (typeof FRONTEND_EXPORT_ERROR_CODES)[number];
@@ -407,6 +412,12 @@ export type ExportState = {
   error: ExportError | null;
 };
 
+/** The facts of a run that the export store shows before its `started` event. */
+export type ExportRunFacts = {
+  outputPath: string;
+  segmentCount: number;
+};
+
 /**
  * Actions provided by the export store.
  */
@@ -418,6 +429,25 @@ export type ExportActions = {
    * @returns The answer of the backend with the run id, or null on failure.
    */
   startExport: (request: ExportRequest) => Promise<ExportSubmission | null>;
+  /**
+   * Makes the store track a run that waited in the queue of the backend and took the slot.
+   * The export queue store calls it when the `preparing` event of that run arrives (ADR 049).
+   *
+   * It drops the start in flight, if any, and a Stop request that waits for its run id, which
+   * it settles with false. The store then shows `preparing` for the run, with the facts that
+   * the queue recorded when the user submitted it.
+   *
+   * @param runId The id that `start_export` answered for the run.
+   * @param facts The output path and the segment count of the request of the run.
+   * @param events Events of the run that came after its `preparing` event and before the
+   *   queue knew its run id, in their order. The store applies them after the adoption.
+   *   Events of other runs are ignored.
+   */
+  adoptRun: (
+    runId: string,
+    facts: ExportRunFacts,
+    events?: readonly ExportProgressEvent[],
+  ) => void;
   /**
    * Signals the backend to cancel the active export run.
    *
