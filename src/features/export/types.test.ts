@@ -228,6 +228,7 @@ describe("Export Types & Wire Constants", () => {
         "exportQueueClosed",
         "workDirectoryUnavailable",
         "graphFileUnsupported",
+        "piecesOutOfOrder",
       ]);
     });
 

@@ -63,7 +63,7 @@ pub struct PlanSource<'a> {
 /// `segments` carries request order, and [`ExportPlan::segments`] preserves that order
 /// exactly: ADR 014's "The command" section concatenates the rendered pieces in project
 /// array order, so this function must never reorder or deduplicate them. Concat order need
-/// not match source-PTS order; see [`ExportPlan::single_input_seek_seconds`] for a case
+/// not match source-PTS order; see [`ExportPlan::input_seek_seconds`] for a case
 /// where that distinction matters.
 pub struct PlanRequest<'a> {
     /// The sources of the pieces, in the order of their first piece. Every source has a piece.
@@ -177,8 +177,10 @@ pub enum PathFacts {
 ///    [`ExportErrorCode::TooManySegments`].
 /// 3. Any segment has `in_pts >= out_pts` -- [`ExportErrorCode::InvalidSegment`]. Then
 ///    `sources` is empty, a piece names a source index out of range, or a source has no piece --
-///    [`ExportErrorCode::InvalidSources`]. `commands::export` refuses such a request before the
-///    plan; this check holds the precondition for any other caller.
+///    [`ExportErrorCode::InvalidSources`]. Then the pieces need more runs in source order than
+///    [`super::inputs::MAX_EXPORT_INPUTS`] -- [`ExportErrorCode::PiecesOutOfOrder`]
+///    ([`super::inputs::check_runs`], ADR 055). `commands::export` refuses such a request before
+///    the plan; these checks hold the precondition for any other caller.
 /// 4. A source path is empty, contains a NUL byte, or is not absolute --
 ///    [`ExportErrorCode::SourcePathInvalid`]. Checks 4 to 6 run for each source in turn.
 /// 5. A source does not exist -- [`ExportErrorCode::SourceNotFound`].
@@ -301,6 +303,7 @@ pub fn build_plan(
     {
         return Err(ExportErrorCode::InvalidSources);
     }
+    super::inputs::check_runs(segments)?;
 
     let mut source_identities = Vec::with_capacity(sources.len());
     for source in sources {
@@ -1258,7 +1261,7 @@ fn round_rational_to_i128(value: Rational) -> Option<i128> {
 mod tests {
     use super::*;
     use crate::ffmpeg::export::copy::CopyRefusal;
-    use crate::ffmpeg::export::{CopiedAudio, MAX_EXPORT_SEGMENTS};
+    use crate::ffmpeg::export::{CopiedAudio, MAX_EXPORT_INPUTS, MAX_EXPORT_SEGMENTS};
     use crate::ffmpeg::probe::AudioProbe;
     use crate::project::Resolution;
     use crate::settings::{AudioChannels, Container, Quality, QualityKind};
@@ -2088,13 +2091,13 @@ mod tests {
         );
     }
 
-    // -- computation: the second graph shape's single seek ---------------------------------
+    // -- computation: the seek of an input of several pieces -----------------------------------
 
     #[test]
-    fn single_input_seek_seconds_uses_the_earliest_segment_by_in_pts_not_array_order() {
+    fn input_seek_seconds_uses_the_earliest_segment_by_in_pts_not_array_order() {
         // Concat order deliberately reverses source order here: the first segment in the
         // array starts later in the source than the second. A naive implementation that
-        // reused `segments[0].seek_seconds` for ADR 014's second graph shape would seek to
+        // reused `segments[0].seek_seconds` for an input of both pieces would seek to
         // 5 seconds in, skipping past the second segment's material, which starts at 1
         // second.
         let mut probe = sample_probe();
@@ -2106,7 +2109,7 @@ mod tests {
             Some(Rational::new(5, 1).unwrap())
         );
         assert_eq!(plan.segments[1].seek_seconds, None);
-        assert_eq!(plan.single_input_seek_seconds(&[0, 1]), None);
+        assert_eq!(plan.input_seek_seconds(&[0, 1]), None);
     }
 
     // -- computation: audio ticks ----------------------------------------------------------
@@ -3141,15 +3144,15 @@ mod tests {
         // The first sample is at 60.5 s. The 16 pieces with the longest silence, 10.5 s each, get
         // a prefix, and the fill of each holds only the margin of 0.25 s: 4 s together. The other
         // pieces get no prefix, because at most 16 pieces of an export have one, and their fills
-        // hold all of their silence: 74 pieces of 0.7 s and one of 4.2 s fill the 56 s left. So
-        // the most pieces an export holds fill exactly the bound of 60 s, and one more hundredth
-        // of a second goes over it.
+        // hold all of their silence: 68 pieces of 0.7 s and one of 8.4 s fill the 56 s left. So
+        // the most pieces that overlap one another in one export, one run each (ADR 055), fill
+        // exactly the bound of 60 s, and one more hundredth of a second goes over it.
         for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
             let mut full: Vec<SegmentBoundary> =
                 (0..16).map(|_| seconds_boundary("50", "61")).collect();
-            full.extend((0..74).map(|_| seconds_boundary("59.8", "61")));
-            full.push(seconds_boundary("56.3", "61"));
-            assert_eq!(full.len(), MAX_EXPORT_SEGMENTS);
+            full.extend((0..68).map(|_| seconds_boundary("59.8", "61")));
+            full.push(seconds_boundary("52.1", "61"));
+            assert_eq!(full.len(), MAX_EXPORT_INPUTS);
             let plan = plan_late_audio(streams, &full).unwrap();
             let prefixes = plan
                 .segments
@@ -3158,7 +3161,7 @@ mod tests {
                 .count();
             assert_eq!(prefixes, MAX_AUDIO_PREFIXES, "{streams:?}");
             let mut over = full.clone();
-            over[MAX_EXPORT_SEGMENTS - 1] = seconds_boundary("56.29", "61");
+            over[MAX_EXPORT_INPUTS - 1] = seconds_boundary("52.09", "61");
             assert_eq!(
                 plan_late_audio(streams, &over).unwrap_err(),
                 ExportErrorCode::AudioGapTooLong,
@@ -4670,7 +4673,7 @@ mod tests {
         assert_eq!(plan.sources[1].audio.as_ref().unwrap().stream_index, 0);
         assert_eq!(plan.sources[1].path, PathBuf::from(SOURCES[1]));
         // The single input of a source seeks for the pieces of that source only.
-        assert_eq!(plan.single_input_seek_seconds(&[1]), Rational::new(5, 1));
+        assert_eq!(plan.input_seek_seconds(&[1]), Rational::new(5, 1));
     }
 
     #[test]
@@ -4996,11 +4999,47 @@ mod tests {
     }
 
     #[test]
+    fn pieces_too_far_out_of_order_are_refused_after_the_checks_of_the_sources() {
+        // ADR 055: more pieces than `MAX_EXPORT_INPUTS` in reverse source order need one run each.
+        let probes = [sample_probe()];
+        let reversed: Vec<SegmentBoundary> = (0..=MAX_EXPORT_INPUTS)
+            .rev()
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                piece(0, start, start + 90_000)
+            })
+            .collect();
+        let refusal = |pieces: &[SegmentBoundary]| {
+            plan_sources(ExportStreams::VideoOnly, &probes, pieces, &sample_preset()).unwrap_err()
+        };
+        assert_eq!(refusal(&reversed), ExportErrorCode::PiecesOutOfOrder);
+        let mut unknown = reversed.clone();
+        unknown[0].source = 1;
+        assert_eq!(refusal(&unknown), ExportErrorCode::InvalidSources);
+        let mut empty = reversed.clone();
+        empty[1].out_pts = empty[1].in_pts;
+        assert_eq!(refusal(&empty), ExportErrorCode::InvalidSegment);
+        let mut ordered = reversed;
+        ordered.reverse();
+        assert!(plan_sources(
+            ExportStreams::VideoOnly,
+            &probes,
+            &ordered,
+            &sample_preset()
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn the_limit_counts_pieces_and_lowers_with_each_source() {
         // Two sources may hold one piece less than one source.
         let probes = [sample_probe(), sample_probe()];
+        // The pieces are in source order, so their runs fit (ADR 055).
         let pieces: Vec<SegmentBoundary> = (0..MAX_EXPORT_SEGMENTS)
-            .map(|index| piece(index % 2, 0, 90_000))
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                piece(index % 2, start, start + 90_000)
+            })
             .collect();
         assert_eq!(max_export_pieces(2), MAX_EXPORT_SEGMENTS - 1);
         assert_eq!(

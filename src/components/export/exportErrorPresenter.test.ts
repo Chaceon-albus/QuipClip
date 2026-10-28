@@ -93,6 +93,28 @@ describe("presentExportError", () => {
     }
   });
 
+  it("names the limit of runs for piecesOutOfOrder when the frontend sets one", () => {
+    const view = presentExportError(
+      new ExportError({ code: "piecesOutOfOrder", inputLimit: 85 }),
+    );
+
+    expect(view).toStrictEqual({
+      key: "exportError.piecesOutOfOrderLimit",
+      values: { limit: 85 },
+    });
+    for (const catalog of [en, zhCN]) {
+      expect(resolveCatalogKey(catalog, view!.key)).toEqual(
+        expect.stringContaining("{{limit}}"),
+      );
+    }
+    // The backend sends no limit, and its refusal takes the message of its code.
+    expect(
+      presentExportError(new ExportError({ code: "piecesOutOfOrder" })),
+    ).toStrictEqual({
+      key: "exportError.piecesOutOfOrder",
+    });
+  });
+
   it("falls back to exportError.unknown for a code absent from the catalog", () => {
     const error = new ExportError({
       code: "notARealCode" as unknown as ExportErrorCode,
@@ -356,6 +378,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   preparationTimedOut: BACK,
   noSegments: null,
   tooManySegments: null,
+  // The segments must come nearer to the order of their source on the timeline.
+  piecesOutOfOrder: null,
   invalidSources: null,
   invalidSegmentCount: null,
   invalidSegment: null,

@@ -98,6 +98,8 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   ffprobeParseFailed: null,
   noSegments: null,
   tooManySegments: null,
+  // The segments must come nearer to the order of their source on the timeline (ADR 055).
+  piecesOutOfOrder: null,
   invalidSources: null,
   invalidSegmentCount: null,
   invalidSegment: null,
@@ -147,9 +149,11 @@ export function presentExportErrorRecovery(
  * The error's `code` is re-narrowed against `EXPORT_ERROR_CODES` defensively at this
  * boundary, falling back to the literal `"unknown"` if absent from the catalog.
  *
- * One message has a value: `tooManySegments` with the `pieceLimit` that the OPEN step computed
+ * Two messages have a value. `tooManySegments` with the `pieceLimit` that the OPEN step computed
  * for the sources of the export takes `exportError.tooManySegmentsLimit`, which names that
- * limit. The same code from the backend has no limit and takes the message of its code. The
+ * limit. `piecesOutOfOrder` with an `inputLimit` takes `exportError.piecesOutOfOrderLimit`, which
+ * names the most runs of an export (ADR 055). The same codes from the backend have no limit and
+ * take the message of their code. The
  * optional `detail`, `exitCode` and `encoder` fields feed no message, and the error dialog
  * already shows `detail` raw. Every other code returns the key alone, matching
  * `settingsErrorPresenter`.
@@ -164,6 +168,12 @@ export function presentExportError(error: ExportError | null): ExportErrorView |
     return {
       key: "exportError.tooManySegmentsLimit",
       values: { limit: error.pieceLimit },
+    };
+  }
+  if (code === "piecesOutOfOrder" && error.inputLimit !== undefined) {
+    return {
+      key: "exportError.piecesOutOfOrderLimit",
+      values: { limit: error.inputLimit },
     };
   }
   return { key: `exportError.${code}` };

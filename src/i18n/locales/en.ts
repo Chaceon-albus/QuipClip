@@ -1123,6 +1123,9 @@ export const en = {
       "QuipClip could not create the work folder of the export in the application cache folder.",
     graphFileUnsupported:
       "This FFmpeg build cannot read a filter graph from a file. Install another FFmpeg build.",
+    piecesOutOfOrder: "The segments are too far out of the order of their source.",
+    piecesOutOfOrderLimit:
+      "The segments are too far out of the order of their source. One export can read at most {{limit}} groups of parts that follow the order of their source.",
     dialogFailed: "QuipClip could not open the export save dialog.",
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",

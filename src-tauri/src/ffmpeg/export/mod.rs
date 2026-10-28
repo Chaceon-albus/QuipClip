@@ -9,8 +9,7 @@
 //! requested pieces (ADR 053): it resolves the output frame rate, frame size and audio output
 //! format, computes each piece's exact duration and seek position with the probe of its own
 //! source, and converts video PTS into audio ticks. [`ExportPlan`] also
-//! exposes [`ExportPlan::single_input_seek_seconds`], the one extra value ADR 014's second
-//! graph shape (one input for the whole source) needs beyond the per-segment plan, and
+//! exposes [`ExportPlan::input_seek_seconds`], the seek of an input that several pieces read, and
 //! [`ExportPlan::separate_audio_process`], which writes the audio of an export with video in a
 //! second `ffmpeg` (ADR 043). A plan of one segment can copy the packets of the source audio
 //! instead ([`CopiedAudio`], ADR 048), and [`ExportPlan::separate_copy_process`] says when that
@@ -21,10 +20,15 @@
 //! read a platform identity for it, so a destination that spells the source a second way -- a hard
 //! link, a symlink, a case-insensitive volume -- cannot pass the same-file check.
 //!
+//! [`inputs`] chooses the inputs of the processes of an export from its pieces alone (ADR 055): one
+//! input for each piece up to [`inputs::MAX_EXPORT_INPUTS`] pieces, and otherwise the fewest runs
+//! of pieces in source order, each run one input. It is a pure function, and the tests of
+//! [`arguments`] prove that each of its answers fits the Windows command-line budget.
+//!
 //! [`graph`] renders a finished plan into ADR 014's `-filter_complex` string: one
 //! `trim`/`atrim` chain for each segment, cut on absolute stream indices at integer
-//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, in whichever of the
-//! [`GraphShape`] variants the argument builder's command-line budget allows.
+//! `start_pts`/`end_pts` boundaries, joined by `concat` in plan order, with the inputs of an
+//! [`inputs::InputAssignment`]: `split` and `asplit` divide an input among its pieces.
 //!
 //! [`graph_file`] holds the graph files of ADR 055: the export writes each graph into a file of
 //! its work directory, and a command names the file with `-/filter_complex` (FFmpeg 7.0 and
@@ -33,10 +37,10 @@
 //! process.
 //!
 //! [`arguments`] builds the ffmpeg argument vector from a plan, the name of its graph file, and
-//! the reserved output path, in the order ADR 014's "The command" section gives. This module also
-//! holds the command-line budget, which the inputs of a command spend now that the graph is in a
-//! file. [`arguments::choose_graph_shape`] decides whether one input for each segment stays inside
-//! that budget, and [`graph`] does not. Two of the arguments are mandatory. Without `-f`,
+//! the reserved output path, in the order ADR 014's "The command" section gives, with the inputs
+//! of the same [`inputs::InputAssignment`] as the graph. This module also holds the command-line
+//! budget, which the inputs of a command spend now that the graph is in a file, and the check that
+//! refuses a command longer than that budget. Two of the arguments are mandatory. Without `-f`,
 //! ffmpeg cannot select a muxer for the reserved name, and it stops with an error. Without
 //! `-y`, ffmpeg does not write the reserved file, and it exits with code 0. That second
 //! failure is silent, and [`output`] holds the measurement.
@@ -81,6 +85,7 @@ pub mod flv_input;
 pub mod fsinspect;
 pub mod graph;
 pub mod graph_file;
+pub mod inputs;
 pub mod output;
 pub mod plan;
 pub mod process;
@@ -90,11 +95,12 @@ pub mod verify;
 pub mod work_directory;
 
 pub use arguments::{
-    build_arguments, build_audio_arguments, build_copy_arguments, choose_audio_graph_shape,
-    choose_graph_shape, encoder_graph, CopyOutput,
+    build_arguments, build_audio_arguments, build_copy_arguments, check_command_line,
+    encoder_graph, CopyOutput,
 };
 pub use fsinspect::inspect_path;
-pub use graph::{build_audio_graph, build_filter_graph, build_video_graph, GraphShape};
+pub use graph::{build_audio_graph, build_filter_graph, build_video_graph};
+pub use inputs::{assign_inputs, InputAssignment, MAX_EXPORT_INPUTS};
 pub use output::PendingOutput;
 pub use plan::{build_plan, PathFacts, PathIdentity, PlanRequest, PlanSource, SegmentBoundary};
 pub use process::{
@@ -173,14 +179,15 @@ pub enum ExportAudioMode {
 /// The largest sum of the pieces and the sources of one export request. An export of `n` sources
 /// joins at most `EXPORT_PIECE_BUDGET - n` pieces ([`max_export_pieces`]).
 ///
-/// ADR 053 makes the limit of ADR 014 count pieces: each piece is one chain and, in the shape
-/// with one input for each piece, one input. A segment across clips gives one piece for each
+/// ADR 053 makes the limit of ADR 014 count pieces: each piece is one chain, and up to
+/// [`inputs::MAX_EXPORT_INPUTS`] pieces each piece is one input. A segment across clips gives one piece for each
 /// clip, so the limit can stop an export of fewer segments than pieces.
 ///
 /// This was a command-line budget, not a sanity bound. Until ADR 055 the filter graph rode inline
 /// as the value of `-filter_complex`, and it competed with the arguments for the one command-line
 /// budget Windows allows. ADR 014 measurement 15 measured what that cost: the graph grows by about
-/// the same amount for each added piece in *both* [`GraphShape`] variants. The value was the
+/// the same amount for each added piece, whether each piece had an input of its own or the pieces
+/// of a source shared one through `split`. The value was the
 /// largest at which the widest command the settings permit fit the Windows budget, for the
 /// encoder and for the audio process of ADR 043, for every count of sources at the longest
 /// Windows path. The frontend states the same rule in the message of
@@ -188,8 +195,10 @@ pub enum ExportAudioMode {
 ///
 /// Since ADR 055 the graph is in a file of the work directory, read through `-/filter_complex
 /// <file>` on FFmpeg 7.0 and later or `-filter_complex_script <file>` on older builds
-/// ([`graph_file`]). A command line now holds the fixed arguments and the inputs. The tests of
-/// `arguments.rs` still prove that every command fits at this value. A later unit of ADR 055
+/// ([`graph_file`]). A command line now holds the fixed arguments and the inputs, and [`inputs`]
+/// chooses the inputs from the pieces so that no command opens more than
+/// [`inputs::MAX_EXPORT_INPUTS`]. The tests of `arguments.rs` prove that every command fits at
+/// that count, so this value no longer protects the command line. A later unit of ADR 055
 /// replaces this rule with the limits of that record.
 ///
 /// ffmpeg itself is not the constraint here: measurement 14 found that many inputs of one
@@ -309,15 +318,13 @@ pub struct PlannedSegment {
     pub in_pts: Pts,
     /// The exclusive end of the segment, as a raw source video PTS.
     pub out_pts: Pts,
-    /// The input seek position for this segment's own `-i`, under ADR 014's first graph
-    /// shape (one input per segment), in seconds from the container start; `None` when the
-    /// computed value clamped to zero.
+    /// The input seek position for an input of this segment alone, in seconds from the container
+    /// start; `None` when the computed value clamped to zero.
     ///
-    /// ADR 014's second graph shape (one input for the whole source) needs a different,
-    /// single seek value instead of any one segment's own value here -- see
-    /// [`ExportPlan::single_input_seek_seconds`]. Concat order need not match source-PTS
-    /// order, so `segments[0].seek_seconds` is the wrong value to reuse for that shape
-    /// whenever the earliest segment (by `in_pts`) is not first in this array.
+    /// An input that several pieces read through `split` ([`inputs::ExportInput`]) is seeked
+    /// for the earliest of them -- see [`ExportPlan::input_seek_seconds`]. Concat order need not
+    /// match source-PTS order, so the seek of the first piece of the plan is not the seek of
+    /// every input.
     ///
     /// ADR 014's "The seek" section also requires the renderer to omit `-ss` entirely
     /// rather than emit a trailing `-ss 0`: measurement 7 found that idiom has no effect on
@@ -740,26 +747,22 @@ impl ExportPlan {
         self.video.as_ref().and_then(|video| video.expected_frames)
     }
 
-    /// The single input seek ADR 014's second graph shape needs for one source: one input for the
-    /// whole source, seeked once before the earliest frame that any of `pieces` requires, with
-    /// `split`/`asplit` dividing the decoded stream among each piece's own `trim` chain. `pieces`
-    /// are the pieces of one source that the input feeds (ADR 053).
+    /// The seek of an input that `pieces` read, all of one source: the seek of the piece with the
+    /// smallest `in_pts`, before the earliest frame that any of them requires (ADR 014's "The
+    /// seek"). `split`/`asplit` divide the decoded stream among the `trim` chain of each piece.
     ///
-    /// This is **not** the seek of the first of them. `segments` is in concat order, and
-    /// concat order need not match source-PTS order: an export can present its pieces out
-    /// of source order, so the first one is not necessarily the piece with the smallest
-    /// `in_pts`. Seeking to the first piece's position in that case can skip past material an
-    /// earlier-in-source, later-in-array piece still needs.
+    /// In an assignment of [`inputs::assign_inputs`] the pieces of an input are in source order, so
+    /// this is the seek of its first piece, and an input of one piece takes that piece's own seek.
+    /// The rule here does not depend on that order: concat order need not match source-PTS order,
+    /// and a seek to a later piece would skip material an earlier one needs.
     ///
-    /// The fix needs no new arithmetic. Every piece's own `seek_seconds` is a strictly
-    /// increasing function of its `in_pts` alone -- same time base, same
-    /// `format_start_time`, same margin, for every piece of one source and one plan -- so
-    /// the piece with the smallest `in_pts` already carries the correct single-input seek
-    /// in its own `seek_seconds` field, clamped exactly as ADR 014 requires. This method
-    /// only has to find that piece. It never compares the PTS of two sources: the pieces are
-    /// of one source.
+    /// Every piece's own `seek_seconds` is a strictly increasing function of its `in_pts` alone --
+    /// same time base, same `format_start_time`, same margin, for every piece of one source and one
+    /// plan -- so the piece with the smallest `in_pts` already carries the correct seek, clamped
+    /// exactly as ADR 014 requires. This method only has to find that piece. It never compares the
+    /// PTS of two sources: the pieces are of one source.
     #[must_use]
-    pub fn single_input_seek_seconds(&self, pieces: &[usize]) -> Option<Rational> {
+    pub fn input_seek_seconds(&self, pieces: &[usize]) -> Option<Rational> {
         debug_assert!(
             pieces
                 .windows(2)
@@ -951,7 +954,9 @@ export_error_codes! {
     EncoderUnavailable => "encoderUnavailable",
     /// Produced by `commands::export::run_export_with`: the `ffmpeg` child process failed
     /// to start. Also produced by [`graph_file::probe_graph_file_option`], when the process of
-    /// the option probe fails to start (ADR 055).
+    /// the option probe fails to start, and by `commands::export::prepare_export_with`, when a
+    /// command is longer than the command-line budget of the platform
+    /// ([`arguments::check_command_line`]), with the lengths in the detail (ADR 055).
     FfmpegSpawnFailed => "ffmpegSpawnFailed",
     /// Produced by `commands::export::run_export_with`: `ffmpeg` exited unsuccessfully. Also
     /// produced by [`graph_file::probe_graph_file_option`], when the option probe fails for a
@@ -995,6 +1000,12 @@ export_error_codes! {
     /// filter graph from a file with neither `-/filter_complex` nor `-filter_complex_script`
     /// (ADR 055). The detail carries the stderr tail of the second run.
     GraphFileUnsupported => "graphFileUnsupported",
+    /// Produced by `commands::export::resolve_request` and [`plan::build_plan`]: the pieces need
+    /// more runs in source order than [`inputs::MAX_EXPORT_INPUTS`] ([`inputs::check_runs`],
+    /// ADR 055). A run is the pieces of one source that one input can feed through `split` without
+    /// a piece that waits. The check comes after the checks of the sources and the segments,
+    /// because the count of runs needs valid source ids and In points before Out points.
+    PiecesOutOfOrder => "piecesOutOfOrder",
 }
 
 #[cfg(test)]
@@ -1055,6 +1066,7 @@ mod tests {
                 "outputReadOnly",
                 "outputRenameFailed",
                 "outputStreamsMismatch",
+                "piecesOutOfOrder",
                 "preparationTimedOut",
                 "sourceAudioRateUnknown",
                 "sourceFrameRateUnknown",

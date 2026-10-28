@@ -314,8 +314,8 @@ mod tests {
     use crate::ffmpeg::export::graph_file::{GraphFile, GraphFileOption};
     use crate::ffmpeg::export::{
         build_arguments, build_audio_arguments, build_audio_graph, build_plan, encoder_graph,
-        ExportPlan, ExportStreams, GraphShape, PathFacts, PathIdentity, PlanRequest, PlanSource,
-        SegmentBoundary,
+        ExportPlan, ExportStreams, InputAssignment, PathFacts, PathIdentity, PlanRequest,
+        PlanSource, SegmentBoundary,
     };
     use crate::ffmpeg::{AudioProbe, MediaProbe};
     use crate::settings::{
@@ -580,11 +580,17 @@ mod tests {
         };
         let arguments = build_arguments(
             &plan,
-            GraphShape::InputPerSegment,
+            &InputAssignment::one_per_piece(&vec![0; plan.segments.len()]),
             file,
             Path::new(RESERVATION),
         );
-        (arguments, encoder_graph(&plan, GraphShape::InputPerSegment))
+        (
+            arguments,
+            encoder_graph(
+                &plan,
+                &InputAssignment::one_per_piece(&vec![0; plan.segments.len()]),
+            ),
+        )
     }
 
     /// The plan of [`command_of`].
@@ -746,13 +752,20 @@ mod tests {
         for preset in default_presets() {
             let plan = plan_of(&preset);
             assert_eq!(
-                build_audio_arguments(&plan, GraphShape::InputPerSegment, file),
+                build_audio_arguments(
+                    &plan,
+                    &InputAssignment::one_per_piece(&vec![0; plan.segments.len()]),
+                    file
+                ),
                 golden,
                 "{}",
                 preset.id
             );
             assert_eq!(
-                build_audio_graph(&plan, GraphShape::InputPerSegment),
+                build_audio_graph(
+                    &plan,
+                    &InputAssignment::one_per_piece(&vec![0; plan.segments.len()])
+                ),
                 golden_graph,
                 "{}",
                 preset.id

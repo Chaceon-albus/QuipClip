@@ -329,8 +329,8 @@ impl Ord for Rational {
 ///
 /// The export renderer (ADR 014) computes an input seek as
 /// `inPts * videoTimeBase - formatStartTime - margin`, clamped to zero, and the renderer
-/// omits `-ss` entirely when that clamped result is zero; its second graph shape uses one
-/// such seek before the first segment rather than one per input. It also converts video
+/// omits `-ss` entirely when that clamped result is zero; an input that several segments read
+/// uses one such seek, before the earliest of them. It also converts video
 /// PTS into audio ticks as `round(pts * videoTimeBase * sampleRate)`. Both computations
 /// start by multiplying a `Pts` by its stream `time_base`. This helper composes that step
 /// once so a caller does not rebuild `Rational::new(pts.value(), 1)` by hand and risk

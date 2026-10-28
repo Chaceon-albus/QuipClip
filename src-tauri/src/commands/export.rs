@@ -42,17 +42,17 @@
 //!    obligation from the other side: the reservation succeeds on it too, because it only
 //!    touches the parent directory, and `build_plan` rejects it as `outputReadOnly` rather than
 //!    letting the rename discard a finished encode.
-//! 2. [`choose_graph_shape`] and [`build_arguments`] both receive [`PendingOutput::path`],
-//!    never `plan.destination`, and so does [`build_copy_arguments`] for an export without video
-//!    that copies its audio (ADR 048). ffmpeg writes the reservation, and the rename that
-//!    publishes the destination happens after the process has exited.
-//! 3. [`choose_graph_shape`] is called once and its result is passed to **both**
-//!    [`encoder_graph`] and [`build_arguments`]. The shapes disagree about how many
-//!    inputs the graph's labels refer to, so a mismatch produces a command ffmpeg rejects. The
-//!    command of an audio process (ADR 043) follows the same rule with its own shape:
-//!    [`choose_audio_graph_shape`], [`build_audio_graph`] and [`build_audio_arguments`]. A command
-//!    that copies the audio (ADR 048) has no graph and no shape: it opens the one input of its one
-//!    segment.
+//! 2. [`build_arguments`] receives [`PendingOutput::path`], never `plan.destination`, and so
+//!    does [`build_copy_arguments`] for an export without video that copies its audio (ADR 048).
+//!    ffmpeg writes the reservation, and the rename that publishes the destination happens after
+//!    the process has exited.
+//! 3. [`assign_inputs`] is called once, and its result is passed to the FLV step, to
+//!    [`encoder_graph`] and [`build_arguments`], and to [`build_audio_graph`] and
+//!    [`build_audio_arguments`] of the audio process (ADR 043, ADR 055). Two assignments can
+//!    disagree about how many inputs the graph's labels refer to, so a mismatch produces a command
+//!    ffmpeg rejects, and the slice check of an FLV source must check the slices that the commands
+//!    open. A command that copies the audio (ADR 048) has no graph: it opens the one input of its
+//!    one segment.
 //! 4. A zero exit status is not a successful export. `reserve` creates the reserved file
 //!    before ffmpeg starts, so ADR 014 requires `-y`; without it ffmpeg refuses the existing
 //!    file, writes nothing, and still exits zero. [`verified_frame_count`] is what separates
@@ -76,15 +76,16 @@ use crate::ffmpeg::export::graph_file::{
     probe_graph_file_option, GraphFile, GraphFileOption, GraphFileProbeError, AUDIO_GRAPH_FILE,
     ENCODER_GRAPH_FILE,
 };
+use crate::ffmpeg::export::inputs::check_runs;
 use crate::ffmpeg::export::work_directory::{remove_stale_work_directories, ExportWorkDirectory};
 use crate::ffmpeg::export::{
-    build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments, build_plan,
-    choose_audio_graph_shape, choose_graph_shape, encoder_graph, inspect_path, max_export_pieces,
+    assign_inputs, build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments,
+    build_plan, check_command_line, encoder_graph, inspect_path, max_export_pieces,
     run_export_process, verify_audio_output, verify_copied_audio_output, verify_copy_streams,
     AudioOutputMismatch, CopyOutput, ExportAudioMode, ExportErrorCode, ExportPlan,
     ExportProcessOutcome, ExportProcessRequest, ExportProcessStatus, ExportRegistry, ExportSlot,
-    ExportStreams, PendingOutput, PlanRequest, PlanSource, ProgressSnapshot, SegmentBoundary,
-    Submission, WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS,
+    ExportStreams, InputAssignment, PendingOutput, PlanRequest, PlanSource, ProgressSnapshot,
+    SegmentBoundary, Submission, WaitingRun, AUDIO_FILL_MIN_GAP_MILLISECONDS, MAX_EXPORT_SEGMENTS,
     SEEK_MARGIN_SECONDS,
 };
 use crate::ffmpeg::preview::PreviewWindows;
@@ -227,8 +228,12 @@ impl ResolvedRequest<'_> {
 ///    the detail (ADR 011: a diagnostic, not a sentence for the user).
 /// 4. A `segmentCount` of 0, or larger than the number of pieces -- `invalidSegmentCount`.
 /// 5. A piece whose In point is not before its Out point -- `invalidSegment`.
+/// 6. Pieces that need more runs in source order than
+///    [`MAX_EXPORT_INPUTS`](crate::ffmpeg::export::MAX_EXPORT_INPUTS) -- `piecesOutOfOrder`
+///    ([`check_runs`], ADR 055). The count of runs needs valid source ids and In points before Out
+///    points, so it comes last.
 ///
-/// [`build_plan`] checks 1, 2 and 5 again for any other caller. The order of the sources is the
+/// [`build_plan`] checks 1, 2, 5 and 6 again for any other caller. The order of the sources is the
 /// order of their first piece, so preparation runs once for each source in that order, and the
 /// plan breaks a tie of the canvas in favour of the earlier piece (ADR 053).
 fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, ExportCommandError> {
@@ -297,6 +302,7 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
     if pieces.iter().any(|piece| piece.in_pts >= piece.out_pts) {
         return Err(ExportCommandError::new(ExportErrorCode::InvalidSegment));
     }
+    check_runs(&pieces).map_err(ExportCommandError::new)?;
     Ok(ResolvedRequest { sources, pieces })
 }
 
@@ -739,17 +745,17 @@ where
         )
     })?;
 
-    // The bounded steps run once for each source, in the order of its first piece (ADR 053):
-    // the revision check, the re-probe, the correction of the audio, the FLV input and the read
-    // of the gaps. `run_export_job_with` multiplies the time limit of preparation by the number of
-    // sources (ADR 050).
+    // The bounded steps run once for each source, in the order of its first piece (ADR 053), in
+    // two passes. The first pass checks the revision, re-probes, and corrects the audio of each
+    // source. The inputs of the export come next: they need the time base of each source from its
+    // re-probe, and the second pass needs them. That pass locates the FLV input of each source,
+    // whose slice check decodes only the slices that start an input, and reads the gaps of its
+    // audio (ADR 055). `run_export_job_with` multiplies the time limit of preparation by the
+    // number of sources (ADR 050).
     let mut paths: Vec<PathBuf> = Vec::with_capacity(resolved.sources.len());
     let mut probes: Vec<MediaProbe> = Vec::with_capacity(resolved.sources.len());
-    let mut frames: Vec<AudioFrames> = Vec::with_capacity(resolved.sources.len());
-    let mut flv_inputs: Vec<Option<FlvInput>> = Vec::with_capacity(resolved.sources.len());
     for (index, wire) in resolved.sources.iter().enumerate() {
         let source = PathBuf::from(&wire.path);
-        let pieces = resolved.pieces_of(index);
 
         // Before the re-probe, the first of the steps here that can spend tens of seconds.
         if canceled() {
@@ -791,13 +797,32 @@ where
                 &mut audio_sample_rate_at,
             )?;
         }
+        paths.push(source);
+        probes.push(source_probe);
+    }
+
+    // ADR 055: the inputs of every process, from the pieces and the time base of each source. The
+    // request passed the count of runs (`resolve_request`), so this does not refuse it. The graphs,
+    // the commands and the FLV step below all read this one assignment.
+    let time_bases: Vec<Rational> = probes.iter().map(|probe| probe.video_time_base).collect();
+    let inputs = assign_inputs(&resolved.pieces, &time_bases).map_err(ExportCommandError::new)?;
+
+    let mut frames: Vec<AudioFrames> = Vec::with_capacity(resolved.sources.len());
+    let mut flv_inputs: Vec<Option<FlvInput>> = Vec::with_capacity(resolved.sources.len());
+    for (index, (source, source_probe)) in paths.iter().zip(&probes).enumerate() {
+        let pieces = resolved.pieces_of(index);
+        // After the reads of the first pass or of the source before, which can each spend tens of
+        // seconds.
+        if canceled() {
+            return Err(ExportCommandError::new(ExportErrorCode::Canceled));
+        }
         // ADR 046: an FLV source opens each input as its head and a slice from a keyframe, so
         // the reads of the export, the read of the audio gaps included, do not read it from its
         // start. The head goes into the work directory as `h<index>.flv`, where `index` is the
         // index of the source in the order of its first piece, which is its index in the plan.
         // One source of an export at most opens its inputs so (ADR 053); a later FLV source keeps
         // the input seek, which reads more and is correct.
-        stage.enter(PreparationStage::FlvInput);
+        stage.enter_for(PreparationStage::FlvInput, Some(index));
         let flv_input = if flv_inputs.iter().any(Option::is_some) {
             if source_probe.format_names.iter().any(|name| name == "flv") {
                 eprintln!("export: a second FLV source keeps the input seek");
@@ -806,9 +831,12 @@ where
         } else {
             flv_input_for(
                 &executables.ffprobe,
-                &source,
-                &source_probe,
-                &pieces,
+                source,
+                source_probe,
+                SourcePieces {
+                    pieces: &pieces,
+                    inputs: &input_ordinals(&inputs, &resolved.pieces, index),
+                },
                 request.streams,
                 FlvPlace {
                     app_data_directory,
@@ -822,16 +850,14 @@ where
         stage.enter(PreparationStage::AudioReads);
         let audio_frames = read_audio_gaps(
             &executables.ffprobe,
-            &source,
-            &source_probe,
+            source,
+            source_probe,
             &pieces,
             request.streams,
             flv_input.as_ref().map(|flv| (flv, work.path())),
             cancel,
             &mut audio_gaps,
         )?;
-        paths.push(source);
-        probes.push(source_probe);
         frames.push(audio_frames);
         flv_inputs.push(flv_input);
     }
@@ -922,36 +948,41 @@ where
 
     stage.enter(PreparationStage::Arguments);
 
-    // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and one shape
-    // decision serves both the graph and the arguments of each process. Each graph goes into its
-    // file in the work directory, and the command names the file (ADR 055).
+    // Obligations 2 and 3: ffmpeg writes the reservation, not the destination, and the one
+    // assignment of the inputs serves the graph and the arguments of each process. Each graph goes
+    // into its file in the work directory, and the command names the file (ADR 055).
     let arguments = match graph_option {
         None => build_copy_arguments(&plan, CopyOutput::File(pending.path()))
             .expect("a plan without video that copies its audio has a copy command"),
         Some(option) => {
-            let shape = choose_graph_shape(&plan, pending.path());
-            write_graph(&work, ENCODER_GRAPH_FILE, &encoder_graph(&plan, shape))?;
+            write_graph(&work, ENCODER_GRAPH_FILE, &encoder_graph(&plan, &inputs))?;
             let file = GraphFile {
                 option,
                 name: ENCODER_GRAPH_FILE,
             };
-            build_arguments(&plan, shape, file, pending.path())
+            build_arguments(&plan, &inputs, file, pending.path())
         }
     };
     // A plan with an audio process has video, so the probe ran for it.
     let audio_arguments = match graph_option {
         Some(option) if plan.separate_audio_process() => {
-            let shape = choose_audio_graph_shape(&plan);
-            write_graph(&work, AUDIO_GRAPH_FILE, &build_audio_graph(&plan, shape))?;
+            write_graph(&work, AUDIO_GRAPH_FILE, &build_audio_graph(&plan, &inputs))?;
             let file = GraphFile {
                 option,
                 name: AUDIO_GRAPH_FILE,
             };
-            Some(build_audio_arguments(&plan, shape, file))
+            Some(build_audio_arguments(&plan, &inputs, file))
         }
         _ if plan.separate_copy_process() => build_copy_arguments(&plan, CopyOutput::Pipe),
         _ => None,
     };
+    // ADR 055: a command longer than the budget of the platform does not start. The tests of the
+    // argument builder make this unreachable; the check gives the case a cause.
+    for command in std::iter::once(&arguments).chain(audio_arguments.as_ref()) {
+        check_command_line(command).map_err(|detail| {
+            ExportCommandError::with_detail(ExportErrorCode::FfmpegSpawnFailed, detail)
+        })?;
+    }
 
     Ok(PreparedExport {
         preset_id: preset.id.clone(),
@@ -1153,8 +1184,8 @@ where
 }
 
 /// The FLV input of `source` in an export (ADR 046), or `None` when the source keeps the input
-/// seek of ADR 014. `pieces` are the pieces of that source. The seek position of each is its In
-/// point less [`SEEK_MARGIN_SECONDS`], as the input seek would use it.
+/// seek of ADR 014. `pieces` holds the pieces of that source and its inputs. The seek position of
+/// each piece is its In point less [`SEEK_MARGIN_SECONDS`], as the input seek would use it.
 ///
 /// The locate reads the file, which on a share that stopped answering can hold a read, so a
 /// watcher copies the cancel flag of the run into the flag of the reader, which stops between two
@@ -1163,18 +1194,23 @@ where
 ///
 /// A slice that starts after a change of the decoder configuration that the reader has not seen
 /// would decode with the configuration of the head. So ffprobe decodes the first frame of each
-/// slice first ([`check_slices`]), and a slice that does not decode as the probe keeps the input
-/// seek for the whole export.
+/// slice that starts an input first ([`check_slices`]), and a slice that does not decode as the
+/// probe keeps the input seek for the whole export. A slice that starts no input is never opened:
+/// its piece reads the `split` of an input that starts earlier (ADR 055).
 fn flv_input_for(
     ffprobe: &Path,
     source: &Path,
     probe: &MediaProbe,
-    pieces: &[SegmentBoundary],
+    pieces: SourcePieces<'_>,
     streams: ExportStreams,
     place: FlvPlace<'_>,
     preview_windows: &PreviewWindows,
     cancel: &AtomicBool,
 ) -> Result<Option<FlvInput>, ExportCommandError> {
+    let SourcePieces {
+        pieces,
+        inputs: input_pieces,
+    } = pieces;
     // The plan refuses a request with too many pieces, so the locates of such a request would
     // be wasted.
     if !probe.format_names.iter().any(|name| name == "flv")
@@ -1239,9 +1275,26 @@ fn flv_input_for(
             .audio
             .as_ref()
             .is_some_and(|audio| !audio.holds_no_packets);
+    // The slice of each input: the earliest slice of its pieces, as the argument builder opens it.
+    let starts: Option<Vec<u64>> = input_pieces
+        .iter()
+        .map(|ordinals| {
+            ordinals
+                .iter()
+                .map(|ordinal| input.segment_offsets.get(*ordinal).copied())
+                .collect::<Option<Vec<u64>>>()?
+                .into_iter()
+                .min()
+        })
+        .collect();
+    let Some(starts) = starts else {
+        eprintln!("export: the FLV source keeps the input seek: an input has no slice");
+        return Ok(None);
+    };
     match check_slices(
         ffprobe,
         &input,
+        &starts,
         place.work_directory.path(),
         source,
         probe,
@@ -1255,6 +1308,36 @@ fn flv_input_for(
             Ok(None)
         }
     }
+}
+
+/// The pieces of one source of an export, in export order, and the inputs that read them: for each
+/// input of the source, in the order of the assignment, the positions of its pieces in `pieces`.
+#[derive(Clone, Copy)]
+struct SourcePieces<'a> {
+    pieces: &'a [SegmentBoundary],
+    inputs: &'a [Vec<usize>],
+}
+
+/// For each input of the source `source` in `inputs`, the positions of its pieces among the pieces
+/// of that source in export order: the positions in [`ResolvedRequest::pieces_of`] and in
+/// [`FlvInput::segment_offsets`].
+fn input_ordinals(
+    inputs: &InputAssignment,
+    pieces: &[SegmentBoundary],
+    source: usize,
+) -> Vec<Vec<usize>> {
+    let ordinal = |piece: usize| {
+        pieces[..piece]
+            .iter()
+            .filter(|earlier| earlier.source == source)
+            .count()
+    };
+    inputs
+        .inputs()
+        .iter()
+        .filter(|input| input.source == source)
+        .map(|input| input.pieces.iter().map(|piece| ordinal(*piece)).collect())
+        .collect()
 }
 
 /// Where the FLV input of a source keeps its files: the reader keeps its keyframe table in the
@@ -1311,8 +1394,9 @@ const AUDIO_TIMING_TOLERANCE_SHARE: f64 = 0.02;
 /// See [`AUDIO_TIMING_TOLERANCE_SHARE`].
 const AUDIO_TIMING_TOLERANCE_SECONDS: f64 = 0.003;
 
-/// Decode the start of each slice of `input` once, within one [`ffmpeg::PROBE_TIMEOUT`] for all
-/// of them, with one ffprobe run for each slice. The first video frame must decode with no error
+/// Decode the start of each slice of `input` from the offsets `starts`, the slices that start an
+/// input of the export (ADR 055), once, within one [`ffmpeg::PROBE_TIMEOUT`] for all of them,
+/// with one ffprobe run for each slice. The first video frame must decode with no error
 /// at the size of the probe. When `check_audio` is set, the audio frames must also match the
 /// probe ([`audio_matches`]): a raw AAC frame does not carry its rate, so the audio of a slice
 /// after a change of the rate that no read has seen decodes with no error at the rate of the
@@ -1329,6 +1413,7 @@ const AUDIO_TIMING_TOLERANCE_SECONDS: f64 = 0.003;
 fn check_slices(
     ffprobe: &Path,
     input: &FlvInput,
+    starts: &[u64],
     work_directory: &Path,
     source: &Path,
     probe: &MediaProbe,
@@ -1343,7 +1428,7 @@ fn check_slices(
         ));
     }
     let audio = probe.audio.as_ref().filter(|_| check_audio);
-    let mut offsets = input.segment_offsets.clone();
+    let mut offsets = starts.to_vec();
     offsets.sort_unstable();
     offsets.dedup();
     offsets.retain(|offset| *offset != input.first_frame_offset);
@@ -2565,7 +2650,7 @@ fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffmpeg::export::{OutputTiming, PlannedSegment, PlannedVideo};
+    use crate::ffmpeg::export::{OutputTiming, PlannedSegment, PlannedVideo, MAX_EXPORT_INPUTS};
     use crate::ffmpeg::ExecutableOrigin;
     use crate::settings::{
         AudioChannels, AudioSampleRateSetting, Container, FrameRateSetting, Quality, QualityKind,
@@ -2851,7 +2936,17 @@ mod tests {
         let cancel = AtomicBool::new(false);
 
         let (own, own_work) = real_input(&directory, "own", &small, &small);
-        assert!(check_slices(&ffprobe, &own, &own_work, &small, &probe, true, &cancel).is_ok());
+        assert!(check_slices(
+            &ffprobe,
+            &own,
+            &own.segment_offsets,
+            &own_work,
+            &small,
+            &probe,
+            true,
+            &cancel
+        )
+        .is_ok());
 
         // The head of another recording holds the decoder configuration of another picture
         // size, as the head of a file holds before a reconnect that no read has seen.
@@ -2860,6 +2955,7 @@ mod tests {
             check_slices(
                 &ffprobe,
                 &foreign,
+                &foreign.segment_offsets,
                 &foreign_work,
                 &small,
                 &probe,
@@ -2871,7 +2967,16 @@ mod tests {
 
         cancel.store(true, Ordering::SeqCst);
         assert!(matches!(
-            check_slices(&ffprobe, &own, &own_work, &small, &probe, true, &cancel),
+            check_slices(
+                &ffprobe,
+                &own,
+                &own.segment_offsets,
+                &own_work,
+                &small,
+                &probe,
+                true,
+                &cancel
+            ),
             Err(SliceCheck::Canceled)
         ));
     }
@@ -2894,12 +2999,23 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let high_probe = ffmpeg::probe_media(&ffprobe, &high).unwrap();
         let (own, own_work) = real_input(&directory, "own", &high, &high);
-        assert!(check_slices(&ffprobe, &own, &own_work, &high, &high_probe, true, &cancel).is_ok());
+        assert!(check_slices(
+            &ffprobe,
+            &own,
+            &own.segment_offsets,
+            &own_work,
+            &high,
+            &high_probe,
+            true,
+            &cancel
+        )
+        .is_ok());
         let low_probe = ffmpeg::probe_media(&ffprobe, &low).unwrap();
         let (foreign, foreign_work) = real_input(&directory, "foreign", &high, &low);
         let Err(SliceCheck::Refused(reason)) = check_slices(
             &ffprobe,
             &foreign,
+            &foreign.segment_offsets,
             &foreign_work,
             &high,
             &low_probe,
@@ -2914,6 +3030,7 @@ mod tests {
         assert!(check_slices(
             &ffprobe,
             &foreign,
+            &foreign.segment_offsets,
             &foreign_work,
             &high,
             &low_probe,
@@ -3023,7 +3140,10 @@ mod tests {
                 &ffprobe,
                 &source,
                 probe,
-                &pieces,
+                SourcePieces {
+                    pieces: &pieces,
+                    inputs: &[vec![0], vec![1]],
+                },
                 request.streams,
                 FlvPlace {
                     app_data_directory: &app_data,
@@ -3075,6 +3195,7 @@ mod tests {
         assert!(check_slices(
             &directory.path.join("no-ffprobe"),
             &input,
+            &input.segment_offsets,
             &directory.path,
             Path::new("/media/live.flv"),
             &probe,
@@ -3090,6 +3211,7 @@ mod tests {
             check_slices(
                 &directory.path.join("no-ffprobe"),
                 &later,
+                &later.segment_offsets,
                 &directory.path,
                 Path::new("/media/live.flv"),
                 &probe,
@@ -3098,6 +3220,57 @@ mod tests {
             ),
             Err(SliceCheck::Refused(_))
         ));
+        // ADR 055: only the slices that start an input are decoded. When the piece of the slice at
+        // byte 500 reads the `split` of the input that starts at the first frame, the check runs
+        // no process.
+        assert!(check_slices(
+            &directory.path.join("no-ffprobe"),
+            &later,
+            &[13],
+            &directory.path,
+            Path::new("/media/live.flv"),
+            &probe,
+            true,
+            &AtomicBool::new(false),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn each_input_of_a_source_gets_the_positions_of_its_pieces_among_that_source() {
+        // Pieces of sources 0, 1, 0, 0, 1: the pieces of source 0 are its pieces 0, 1 and 2, and
+        // of source 1 its pieces 0 and 1.
+        let piece = |source: usize, in_pts: i64| SegmentBoundary {
+            source,
+            in_pts: Pts::new(in_pts),
+            out_pts: Pts::new(in_pts + 1),
+        };
+        let pieces = [
+            piece(0, 0),
+            piece(1, 0),
+            piece(0, 5),
+            piece(0, 2),
+            piece(1, 9),
+        ];
+        let inputs = InputAssignment::from_inputs(vec![
+            crate::ffmpeg::export::inputs::ExportInput {
+                source: 0,
+                pieces: vec![0, 3],
+            },
+            crate::ffmpeg::export::inputs::ExportInput {
+                source: 1,
+                pieces: vec![1, 4],
+            },
+            crate::ffmpeg::export::inputs::ExportInput {
+                source: 0,
+                pieces: vec![2],
+            },
+        ]);
+        assert_eq!(
+            input_ordinals(&inputs, &pieces, 0),
+            vec![vec![0, 2], vec![1]]
+        );
+        assert_eq!(input_ordinals(&inputs, &pieces, 1), vec![vec![0, 1]]);
     }
 
     #[test]
@@ -7489,18 +7662,19 @@ mod tests {
         let encoder = &prepared.arguments;
         assert_eq!(value_of(encoder, "-/filter_complex"), "encoder.graph");
         assert!(!encoder.iter().any(|argument| argument == "-filter_complex"));
-        let shape = choose_graph_shape(plan, prepared.pending.path());
+        // A plan of fewer pieces than `MAX_EXPORT_INPUTS` gives each piece its own input.
+        let sources: Vec<usize> = plan.segments.iter().map(|segment| segment.source).collect();
+        let inputs = InputAssignment::one_per_piece(&sources);
         assert_eq!(
             graph_file_bytes(&prepared, "encoder.graph"),
-            encoder_graph(plan, shape).into_bytes()
+            encoder_graph(plan, &inputs).into_bytes()
         );
 
         let audio = prepared.audio_arguments.as_deref().unwrap();
         assert_eq!(value_of(audio, "-/filter_complex"), "audio.graph");
-        let shape = choose_audio_graph_shape(plan);
         assert_eq!(
             graph_file_bytes(&prepared, "audio.graph"),
-            build_audio_graph(plan, shape).into_bytes()
+            build_audio_graph(plan, &inputs).into_bytes()
         );
     }
 
@@ -8886,8 +9060,12 @@ mod tests {
         );
         // Each further source lowers the limit by one (ADR 053): the pieces that one source may
         // hold are too many for two.
+        // The pieces are in source order, so their runs fit (ADR 055).
         let two: Vec<(&str, i64, i64)> = (0..max_export_pieces(1))
-            .map(|index| (["a", "b"][index % 2], 0, 90_000))
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                (["a", "b"][index % 2], start, start + 90_000)
+            })
             .collect();
         assert_eq!(
             refused(request_of(&[("a", a), ("b", b)], &two)).code,
@@ -8934,6 +9112,48 @@ mod tests {
         assert_eq!(
             refused(request_of(&[("a", a)], &[("a", 5, 5)])).code,
             ExportErrorCode::InvalidSegment
+        );
+
+        // ADR 055: pieces that need more runs than `MAX_EXPORT_INPUTS` come last, because the
+        // count of runs needs valid sources and In points before Out points. More pieces than the
+        // limit of inputs, in reverse source order, need one run each.
+        let reversed: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_INPUTS)
+            .rev()
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                ("a", start, start + 90_000)
+            })
+            .collect();
+        assert_eq!(
+            refused(request_of(&[("a", a)], &reversed)).code,
+            ExportErrorCode::PiecesOutOfOrder
+        );
+        // Each earlier check wins over it.
+        let mut with_invalid = reversed.clone();
+        with_invalid[3] = ("a", 7, 7);
+        assert_eq!(
+            refused(request_of(&[("a", a)], &with_invalid)).code,
+            ExportErrorCode::InvalidSegment
+        );
+        let mut count = request_of(&[("a", a)], &reversed);
+        count.segment_count = 0;
+        assert_eq!(refused(count).code, ExportErrorCode::InvalidSegmentCount);
+        let mut unknown = reversed.clone();
+        unknown[0] = ("c", 0, 1);
+        assert_eq!(
+            refused(request_of(&[("a", a)], &unknown)),
+            invalid("unknown source id: c")
+        );
+        let too_many: Vec<(&str, i64, i64)> = (0..=MAX_EXPORT_SEGMENTS)
+            .rev()
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                ("a", start, start + 90_000)
+            })
+            .collect();
+        assert_eq!(
+            refused(request_of(&[("a", a)], &too_many)).code,
+            ExportErrorCode::TooManySegments
         );
     }
 
@@ -9025,6 +9245,122 @@ mod tests {
         assert_eq!(prepared.segment_count, 2);
         assert_eq!(start_payload("1-0", &prepared).segment_count, 2);
         assert_eq!(prepared.plan.segments.len(), 3);
+    }
+
+    #[test]
+    fn preparation_reads_every_source_before_the_flv_input_and_the_gaps_of_any() {
+        // ADR 055: the inputs need the time base of every source, and the FLV step of each source
+        // needs the inputs. So the revision check, the re-probe and the correction of the audio run
+        // for every source first, and the FLV input and the read of the gaps then run for each
+        // source, in the order of its first piece, with the stage of that source.
+        let directory = TestDirectory::new();
+        let first = directory.path.join("first.mp4");
+        let second = directory.path.join("second.mov");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second media").unwrap();
+        let mut request = request_of(
+            &[("first", &first), ("second", &second)],
+            &[
+                ("second", 0, 90_000),
+                ("first", 0, 90_000),
+                ("second", 90_000, 180_000),
+            ],
+        );
+        request.segment_count = 2;
+        let stage = PreparationStageCell::default();
+        let seen: RefCell<Vec<(&str, PreparationStage, Option<usize>)>> = RefCell::new(Vec::new());
+        let note = |step: &'static str| {
+            let (current, source) = stage.read();
+            seen.borrow_mut().push((step, current, source));
+        };
+
+        prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &stage,
+                graph_file: &slash_graph_file,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            |_, _, _| {
+                note("probe");
+                Ok(sample_probe_with_audio())
+            },
+            |ffprobe, source, index, cancel| {
+                note("packet");
+                first_packet_unread(ffprobe, source, index, cancel)
+            },
+            sample_rate_not_read,
+            |_, _, _, _| {
+                note("gaps");
+                Ok(AudioFrames::default())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                ("probe", PreparationStage::ReProbe, Some(0)),
+                ("packet", PreparationStage::AudioReads, Some(0)),
+                ("probe", PreparationStage::ReProbe, Some(1)),
+                ("packet", PreparationStage::AudioReads, Some(1)),
+                ("gaps", PreparationStage::AudioReads, Some(0)),
+                ("gaps", PreparationStage::AudioReads, Some(1)),
+            ]
+        );
+        assert_eq!(stage.current(), PreparationStage::Arguments);
+    }
+
+    #[test]
+    fn pieces_out_of_order_are_refused_before_ffmpeg_is_discovered() {
+        // More pieces than `MAX_EXPORT_INPUTS`, in reverse source order: one run for each piece.
+        let directory = TestDirectory::new();
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let mut request = request_expecting(&source, None);
+        request.pieces = (0..=MAX_EXPORT_INPUTS)
+            .rev()
+            .map(|index| {
+                let start = i64::try_from(index).unwrap() * 90_000;
+                piece("source", start, start + 90_000)
+            })
+            .collect();
+        let error = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
+            },
+            |_| -> Result<FfmpegPaths, LocateError> {
+                panic!("a refused request discovers no ffmpeg")
+            },
+            |_, _, _| -> Result<MediaProbe, ProbeError> {
+                panic!("a refused request probes nothing")
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::PiecesOutOfOrder);
+        assert_eq!(error.detail, None);
+        // The same pieces in source order read one input.
+        request.pieces.reverse();
+        assert!(resolve_request(&request).is_ok());
     }
 
     #[test]

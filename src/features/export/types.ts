@@ -168,6 +168,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "exportQueueClosed",
   "workDirectoryUnavailable",
   "graphFileUnsupported",
+  "piecesOutOfOrder",
 ] as const;
 
 export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number];
@@ -223,6 +224,7 @@ export type ExportErrorOptions = {
   measuredDurationUs?: number;
   expectedDurationUs?: number;
   pieceLimit?: number;
+  inputLimit?: number;
 };
 
 /**
@@ -249,6 +251,11 @@ export class ExportError extends Error {
    * (`maxExportPieces`). The OPEN step of the export sets it. The backend sends no limit.
    */
   declare readonly pieceLimit?: number;
+  /**
+   * For `piecesOutOfOrder`: the most runs of pieces in source order that one export reads
+   * (ADR 055). Only a check of the frontend sets it. The backend sends no limit.
+   */
+  declare readonly inputLimit?: number;
 
   constructor(options: ExportErrorOptions) {
     super(options.detail ? `${options.code}: ${options.detail}` : options.code);
@@ -271,6 +278,9 @@ export class ExportError extends Error {
     }
     if (options.pieceLimit !== undefined) {
       this.pieceLimit = options.pieceLimit;
+    }
+    if (options.inputLimit !== undefined) {
+      this.inputLimit = options.inputLimit;
     }
     Object.setPrototypeOf(this, new.target.prototype);
   }

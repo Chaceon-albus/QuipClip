@@ -864,6 +864,9 @@ export const zhCN: TranslationCatalog = {
     workDirectoryUnavailable: "无法在应用程序缓存目录中创建导出的工作目录。",
     graphFileUnsupported:
       "此 FFmpeg 版本无法从文件读取滤镜图。请安装其他 FFmpeg 版本。",
+    piecesOutOfOrder: "片段与其在源中的顺序相差太大。",
+    piecesOutOfOrderLimit:
+      "片段与其在源中的顺序相差太大。一次导出最多读取 {{limit}} 组按源内顺序排列的部分。",
     dialogFailed: "无法打开导出保存对话框。",
     sourceRevisionChanged:
       "打开之后，磁盘上的视频文件已更改。已标记的片段可能不再指向相同的帧。",

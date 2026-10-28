@@ -43,7 +43,8 @@ pub fn head_name(index: usize) -> String {
     format!("h{index}.flv")
 }
 
-/// The FLV input of an export: one slice for each segment, all with the same head.
+/// The FLV input of an export: one slice for each segment, all with the same head. Each input of
+/// the source opens the slice of its earliest piece (`arguments::flv_offset`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlvInput {
     /// The file name of the head in the work directory of the export, where FFmpeg runs:
@@ -60,13 +61,6 @@ pub struct FlvInput {
 }
 
 impl FlvInput {
-    /// The offset of the single input of [`super::GraphShape::SingleInput`]: the earliest slice,
-    /// which every segment can read from.
-    #[must_use]
-    pub fn single_offset(&self) -> Option<u64> {
-        self.segment_offsets.iter().copied().min()
-    }
-
     /// The input of a slice from `offset` of `source`, with the head named `head`: its file name,
     /// [`Self::head_name`], for FFmpeg, which runs in the work directory, or [`Self::head_path`]
     /// for a read of preparation.
@@ -134,6 +128,11 @@ fn target_ms(seconds: Rational) -> Option<i64> {
 }
 
 /// Find the slices of an export of an FLV source and write its head.
+///
+/// The head is the head of the earliest slice of all the pieces of the source. That slice starts an
+/// input in every assignment of `inputs::assign_inputs`: each piece reads one input, and an input
+/// opens the earliest slice of its pieces, so the earliest slice of all is the earliest slice that
+/// starts an input (ADR 055).
 pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvInputFallback> {
     if !request.probe.format_names.iter().any(|name| name == "flv") {
         return Err(FlvInputFallback::NotFlv);
@@ -355,7 +354,6 @@ mod tests {
             input.segment_offsets,
             vec![key(10_067), key(2_067), key(2_067)]
         );
-        assert_eq!(input.single_offset(), Some(key(2_067)));
         assert_eq!(input.source_size, recording.bytes.len() as u64);
         assert_eq!(input.head_name, "h3.flv");
         assert_eq!(input.head_path(work.path()), work.file_path("h3.flv"));
