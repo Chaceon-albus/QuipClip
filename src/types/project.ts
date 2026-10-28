@@ -80,6 +80,11 @@ export type PersistedSource = {
   videoTimeBase: Rational;
   /** Presentation timestamp of the initial presented frame, or null if unstated. */
   videoStartPts: Pts | null;
+  /**
+   * The PTS that follows the last presented frame, the end of the clip range, or null when the
+   * probe could not read it (ADR 052).
+   */
+  videoEndPts: Pts | null;
   /** Reported stream duration in video time base ticks, or null if indeterminate. */
   videoDurationTicks: TickCount | null;
   /** Approximate duration in seconds for UI layout and seek estimates, or null if unavailable. */
@@ -125,6 +130,7 @@ export type Source = {
   videoStreamIndex: number;
   videoTimeBase: Rational;
   videoStartPts: Pts | null;
+  videoEndPts: Pts | null;
   videoDurationTicks: TickCount | null;
   approximateDurationSeconds: number | null;
   avgFrameRate: Rational | null;
@@ -152,6 +158,7 @@ export function toPersistedSource(source: Source): PersistedSource {
     videoStreamIndex: source.videoStreamIndex,
     videoTimeBase: source.videoTimeBase,
     videoStartPts: source.videoStartPts,
+    videoEndPts: source.videoEndPts,
     videoDurationTicks: source.videoDurationTicks,
     approximateDurationSeconds: source.approximateDurationSeconds,
     avgFrameRate: source.avgFrameRate,
@@ -221,7 +228,8 @@ export type SequenceSegment = {
 
 /**
  * QuipClip project document format (.qcproj).
- * Holds render settings, imported sources, ordered timeline segments, and active source selection (ADR 007, ADR 010).
+ * Holds render settings, imported sources, the clips of the sequence, and the ordered segments (ADR 007,
+ * ADR 010, ADR 052).
  */
 export type Project = {
   /** Format schema version, identifying the serialization structure (schemaVersion 1). */
@@ -230,8 +238,8 @@ export type Project = {
   renderSettings: RenderSettings;
   /** List of imported media sources in their persisted document shape (ADR 010). */
   sources: PersistedSource[];
-  /** Ordered list of timeline segments; array order determines export sequence (ADR 007). */
-  segments: Segment[];
-  /** Identifier of the source currently selected and displayed on the source ruler. */
-  activeSourceId: string;
+  /** The sequence: each clip places one source, in sequence order (ADR 052). */
+  clips: Clip[];
+  /** Ordered list of segments; array order determines export sequence (ADR 007, ADR 052). */
+  segments: SequenceSegment[];
 };

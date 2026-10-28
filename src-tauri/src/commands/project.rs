@@ -264,13 +264,22 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
             field: Some(format!("segments[{index}].id")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
-        ProjectValidationError::UnknownActiveSource { .. } => ProjectCommandError {
-            field: Some("activeSourceId".to_owned()),
+        ProjectValidationError::EmptyClipId { index }
+        | ProjectValidationError::DuplicateClipId { index } => ProjectCommandError {
+            field: Some(format!("clips[{index}].id")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
-        ProjectValidationError::UnknownSegmentSource { index, .. }
-        | ProjectValidationError::MissingSegmentStartPts { index, .. } => ProjectCommandError {
-            field: Some(format!("segments[{index}].sourceId")),
+        ProjectValidationError::UnknownClipSource { index, .. } => ProjectCommandError {
+            field: Some(format!("clips[{index}].sourceId")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::UnknownSegmentClip { index, field, .. } => ProjectCommandError {
+            field: Some(format!("segments[{index}].{field}")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::MissingSegmentStartPts { index, .. }
+        | ProjectValidationError::SegmentCrossesUnknownEnd { index, .. } => ProjectCommandError {
+            field: Some(format!("segments[{index}]")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
     }
@@ -279,7 +288,7 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{RenderSettings, Resolution, Segment, Source};
+    use crate::project::{Clip, RenderSettings, Resolution, Segment, Source};
     use crate::time::{FrameCount, Pts, Rational, TickCount};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -508,6 +517,54 @@ mod tests {
         tauri::async_runtime::block_on(future)
     }
 
+    #[test]
+    fn maps_the_clip_and_segment_validation_errors_to_fields() {
+        let cases = [
+            (
+                ProjectValidationError::EmptyClipId { index: 1 },
+                "clips[1].id",
+            ),
+            (
+                ProjectValidationError::DuplicateClipId { index: 2 },
+                "clips[2].id",
+            ),
+            (
+                ProjectValidationError::UnknownClipSource {
+                    index: 0,
+                    source_id: "s9".to_owned(),
+                },
+                "clips[0].sourceId",
+            ),
+            (
+                ProjectValidationError::UnknownSegmentClip {
+                    index: 3,
+                    field: "inClipId",
+                    clip_id: "c9".to_owned(),
+                },
+                "segments[3].inClipId",
+            ),
+            (
+                ProjectValidationError::MissingSegmentStartPts {
+                    index: 4,
+                    source_id: "s1".to_owned(),
+                },
+                "segments[4]",
+            ),
+            (
+                ProjectValidationError::SegmentCrossesUnknownEnd {
+                    index: 5,
+                    clip_id: "c1".to_owned(),
+                },
+                "segments[5]",
+            ),
+        ];
+        for (error, field) in cases {
+            let mapped = map_validation_error(error);
+            assert_eq!(mapped.code, ProjectCommandErrorCode::InvalidProject);
+            assert_eq!(mapped.field.as_deref(), Some(field));
+        }
+    }
+
     fn example_project() -> ProjectFile {
         ProjectFile {
             schema_version: 1,
@@ -524,19 +581,24 @@ mod tests {
                 video_stream_index: 0,
                 video_time_base: Rational::new(1, 90_000).unwrap(),
                 video_start_pts: Some(Pts::new(0)),
+                video_end_pts: Some(Pts::new(900_000)),
                 video_duration_ticks: Some(TickCount::new(900_000).unwrap()),
                 approximate_duration_seconds: Some(10.0),
                 avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
                 r_frame_rate: Some(Rational::new(30, 1).unwrap()),
                 reported_frame_count: Some(FrameCount::new(300).unwrap()),
             }],
+            clips: vec![Clip {
+                id: "c1".to_owned(),
+                source_id: "s1".to_owned(),
+            }],
             segments: vec![Segment {
                 id: "g1".to_owned(),
-                source_id: "s1".to_owned(),
+                in_clip_id: "c1".to_owned(),
                 in_pts: Pts::new(10),
+                out_clip_id: "c1".to_owned(),
                 out_pts: Pts::new(20),
             }],
-            active_source_id: "s1".to_owned(),
         }
     }
 

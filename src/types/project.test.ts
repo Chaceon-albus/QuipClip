@@ -8,6 +8,8 @@ import {
   type Pts,
   type Rational,
   type Segment,
+  type SequenceSegment,
+  type Clip,
   type Source,
   type SourceProxy,
   type TickCount,
@@ -31,16 +33,19 @@ describe("project type definitions and schema", () => {
       videoStreamIndex: 0,
       videoTimeBase,
       videoStartPts: "-1800" as Pts,
+      videoEndPts: "32368200" as Pts,
       videoDurationTicks: "32370000" as TickCount,
       approximateDurationSeconds: 359.666667,
       avgFrameRate,
       rFrameRate,
       reportedFrameCount: null,
     };
-    const segment: Segment = {
+    const clip: Clip = { id: "c1", sourceId: "s1" };
+    const segment: SequenceSegment = {
       id: "g1",
-      sourceId: "s1",
+      inClipId: "c1",
       inPts: "9000" as Pts,
+      outClipId: "c1",
       outPts: "27000" as Pts,
     };
     const project: Project = {
@@ -50,8 +55,8 @@ describe("project type definitions and schema", () => {
         resolution: { w: 1920, h: 1080 },
       },
       sources: [persisted],
+      clips: [clip],
       segments: [segment],
-      activeSourceId: "s1",
     };
 
     expect(project.schemaVersion).toBe(1);
@@ -63,7 +68,9 @@ describe("project type definitions and schema", () => {
     expect(project.sources[0].reportedFrameCount).toBeNull();
     expect(project.segments[0].inPts).toBe("9000");
     expect(project.segments[0].outPts).toBe("27000");
-    expect(project.activeSourceId).toBe("s1");
+    expect(project.sources[0].videoEndPts).toBe("32368200");
+    expect(project.clips[0].sourceId).toBe("s1");
+    expect(project.segments[0].outClipId).toBe("c1");
   });
 
   it("runtime source permits proxy object", () => {
@@ -81,6 +88,7 @@ describe("project type definitions and schema", () => {
       videoStreamIndex: 0,
       videoTimeBase,
       videoStartPts: "0" as Pts,
+      videoEndPts: "90000" as Pts,
       videoDurationTicks: "90000" as TickCount,
       approximateDurationSeconds: 1.0,
       avgFrameRate: { n: 30, d: 1 },
@@ -114,6 +122,7 @@ describe("project type definitions and schema", () => {
         videoStreamIndex: 0,
         videoTimeBase: { n: 1, d: 90000 },
         videoStartPts: "-1800" as Pts,
+        videoEndPts: "32368200" as Pts,
         videoDurationTicks: "32370000" as TickCount,
         approximateDurationSeconds: 359.666667,
         avgFrameRate: { n: 30000, d: 1001 },
@@ -136,6 +145,7 @@ describe("project type definitions and schema", () => {
         videoStreamIndex: 0,
         videoTimeBase: { n: 1, d: 90000 },
         videoStartPts: "-1800",
+        videoEndPts: "32368200",
         videoDurationTicks: "32370000",
         approximateDurationSeconds: 359.666667,
         avgFrameRate: { n: 30000, d: 1001 },
@@ -154,6 +164,7 @@ describe("project type definitions and schema", () => {
           "videoStreamIndex",
           "videoTimeBase",
           "videoStartPts",
+          "videoEndPts",
           "videoDurationTicks",
           "approximateDurationSeconds",
           "avgFrameRate",
@@ -173,6 +184,7 @@ describe("project type definitions and schema", () => {
         videoStreamIndex: 1,
         videoTimeBase: { n: 1, d: 90000 },
         videoStartPts: null,
+        videoEndPts: null,
         videoDurationTicks: null,
         approximateDurationSeconds: null,
         avgFrameRate: null,
@@ -183,6 +195,7 @@ describe("project type definitions and schema", () => {
       const persisted = toPersistedSource(runtime);
 
       expect(persisted.videoStartPts).toBeNull();
+      expect(persisted.videoEndPts).toBeNull();
       expect(persisted.videoDurationTicks).toBeNull();
       expect(persisted.approximateDurationSeconds).toBeNull();
       expect(persisted.avgFrameRate).toBeNull();
@@ -202,6 +215,7 @@ describe("project type definitions and schema", () => {
       videoStreamIndex: number;
       videoTimeBase: Rational;
       videoStartPts: Pts | null;
+      videoEndPts: Pts | null;
       videoDurationTicks: TickCount | null;
       approximateDurationSeconds: number | null;
       avgFrameRate: Rational | null;
