@@ -70,6 +70,7 @@ document summarizes them and shows how the parts fit together.
 | [`047-show-the-source-of-each-build.md`](../.agents/decisions/047-show-the-source-of-each-build.md)                                         | The version shows with the commit and the branch of the build              |
 | [`048-copy-the-audio-of-one-segment.md`](../.agents/decisions/048-copy-the-audio-of-one-segment.md)                                         | An export of one segment can copy the packets of the source audio          |
 | [`049-queue-exports-in-the-backend.md`](../.agents/decisions/049-queue-exports-in-the-backend.md)                                           | Exports wait in a backend queue and start one after another                |
+| [`050-bound-the-preparation-of-an-export.md`](../.agents/decisions/050-bound-the-preparation-of-an-export.md)                               | Preparation of an export ends after a time limit or a Stop                 |
 
 ## Shape
 
@@ -278,7 +279,9 @@ See ADR 004 and ADR 014.
 ADR 004 gives the semantic steps. ADR 014 selects the command shape from measurements on
 ffmpeg 9.0.1. ADR 016 adds the orchestration. The renderer is written, and `start_export` and
 `cancel_export` are registered commands. `start_export` answers with the run id before the run
-prepares, and a failure of preparation is a `failed` event of the run. After a run finishes,
+prepares, and a failure of preparation is a `failed` event of the run. Preparation runs on a
+helper thread, and the export thread ends it after 180 seconds or about 2 seconds after a Stop
+(ADR 050). After a run finishes,
 `reveal_export_output` shows the file that the run wrote in the file manager. It takes the
 run identifier, never a path (ADR 029).
 

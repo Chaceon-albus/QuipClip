@@ -119,7 +119,8 @@ start the next run during the exit. A request after the close fails with `export
   slot until the list is empty.
 - A run that hangs in a step of preparation without a time limit, such as the discovery of
   ffmpeg on a share that stopped answering (ADR 016), holds the slot. The runs after it wait,
-  and a cancel takes effect only when that step returns.
+  and a cancel takes effect only when that step returns. (Changed on 2026-10-27: preparation
+  ends after 180 seconds, or about 2 seconds after a Stop, and the next run starts, ADR 050.)
 - The record of published runs keeps 64 runs (ADR 029), so Show File works for each run of a
   long batch.
 - The revision check has the limits of ADR 010. It does not see a replacement of the same size

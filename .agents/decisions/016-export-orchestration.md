@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050
 
 ## Context
 
@@ -195,6 +195,11 @@ inside that window waits in the queue behind the run, ADR 049.)
 the re-probe (ADR 014 measurements 24 and 25). Each read has `PROBE_TIMEOUT` and polls the flag
 while it runs, so a cancel stops it at once. Preparation can therefore last up to three times
 `PROBE_TIMEOUT` when no cancel arrives.
+
+(Changed on 2026-10-27.) The re-probe now stops on the cancel flag too. Preparation runs on a
+helper thread, and the export thread ends it after 180 seconds with `preparationTimedOut`, or
+about 2 seconds after a Stop, also when a call to the file system is blocked (ADR 050).
+Discovery is bounded by that limit.
 
 **Dismissing the dialog during preparation now cancels.** That phase stays dismissable, and the
 reason has inverted. It was dismissable because a cancel was impossible and refusing the

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027, ADR 043, ADR 046, ADR 049
+- Amended by: ADR 027, ADR 043, ADR 046, ADR 049, ADR 050
 
 ## Context
 
@@ -71,6 +71,11 @@ which would need a second path to resume the exit.
 queue: it refuses every later export and drops the exports that wait, with no event. Then it
 cancels the running export and waits for its slot, as above. Without the close, the release of
 the slot would start the next export, and the wait would watch an export that had just started.
+
+(Added on 2026-10-27.) A run that prepares can now release its slot while a helper thread is
+still blocked in a call to the file system (ADR 050). The helper starts no ffmpeg. It can hold a
+reserved temporary file until its call returns, and an exit in that time can leave the file
+behind. The 2-second grace of ADR 050 plus one poll fits inside `EXIT_CANCEL_BUDGET`.
 
 ## Consequences
 
