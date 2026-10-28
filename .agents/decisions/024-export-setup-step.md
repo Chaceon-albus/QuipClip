@@ -18,7 +18,9 @@ The user reported that an export started before they could choose a preset.
 The export action opens the export dialog first, at a setup step. The flow has four steps:
 
 1. The flow controller examines the state that makes an export impossible or doubtful:
-   - An export that is in progress. The dialog opens on that export.
+   - An export that is in progress. The dialog opens on that export. (Changed on 2026-10-27:
+     the dialog opens a new setup step, and the new export waits in the queue, ADR 049. The
+     checks of this step report into the state of that setup, not into the running export.)
    - No open media. The dialog reports `sourceNotFound`.
    - No segment for the active source. The dialog reports `noSegments`.
    - A source file that changed on disk. The dialog shows the `sourceRevisionChanged`

@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-27
 - Deciders: capric98
-- Amends: ADR 016, ADR 017, ADR 020, ADR 024, ADR 025, ADR 027, ADR 029, ADR 041
+- Amends: ADR 016, ADR 017, ADR 020, ADR 024, ADR 025, ADR 027, ADR 029, ADR 031, ADR 041
 
 ## Context
 
@@ -81,8 +81,19 @@ start the next run during the exit. A request after the close fails with `export
 
 ### The interface
 
-- The Export action, while a run is live or runs wait, opens the setup step for a new export.
-  Its button reads "Add to Queue…".
+- The Export action, while a run is live, runs wait, or a submission has no answer yet, opens
+  the setup step for a new export.
+  Its button reads "Add to Queue…". The run footer offers the same action as "New Export…".
+- That setup step keeps its own state. Its checks and a refused submission report there, and
+  never into the export store, so a setup never hides or resets the running export.
+- Cancel and Close leave the setup and show the run again, or close the dialog when the export
+  store is idle. The close control and Escape leave the setup and hide the dialog. Neither
+  resets the export store.
+- A new batch starts only when the export store is idle. While the export store shows the
+  result of a run that ended, the next submission goes through the queue of the backend, which
+  starts it at once when the slot is free. The run that ended stays in the list with Show File.
+- A refusal that comes after the user left the setup opens that setup again, so the user sees
+  why the export did not start.
 - The dialog lists the runs of the batch in the order of submission: the runs that ended, the
   run that holds the slot, and the runs that wait. A finished run keeps Show File (ADR 029). A
   waiting run can be removed.

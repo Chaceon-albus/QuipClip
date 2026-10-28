@@ -113,7 +113,9 @@ The status bar shows an indicator when the dialog is hidden and the export statu
 
 The result stays until the user acts. A dismissal of the dialog in a final status resets the
 store. A final status with a hidden dialog therefore always comes from a run that ended while
-it was hidden.
+it was hidden. (Changed on 2026-10-27: it can also come from a run that ended while the user
+set up another export, and then closed the dialog with the close control or Escape. The status
+bar then shows that result, ADR 049.)
 
 The indicator is a leaf component. It reads the progress fields itself, so a progress event
 does not render the whole status bar again.
@@ -168,7 +170,10 @@ phase and clear the error. No orphan is possible, so the statement above holds.
 1. **Close, the close control, Escape and the outside click of the dialog** hide the dialog
    while the run is live, and they do not reset the store.
 2. **File > Export and the title-bar Export** open the dialog on a live run. They reset a
-   final store only when the run is not live.
+   final store only when the run is not live. (Changed on 2026-10-27: while a run is live or
+   exports wait, they open a new setup step for an export that waits in the queue, ADR 049.
+   The run footer offers the same action as "New Export…". The setup step of an export that
+   joins the queue never resets the export store.)
 3. **The quit guard (ADR 027)** counts a live run as an export that a quit stops. A close or
    a quit therefore asks for confirmation, and a confirmed quit lets ADR 017 cancel the run
    that holds the export slot.
@@ -321,6 +326,8 @@ complete in that phase, and only the rename remains (ADR 016).
   stop the run must press Cancel.
 - The export action and the status bar indicator both open the dialog on the active run.
   The export action already did this (ADR 024).
+  (Changed on 2026-10-27: the export action opens a new setup step while a run is live, and the
+  status bar indicator still opens the dialog on the run, ADR 049.)
 - A quit during a hidden export still cancels the export (ADR 017). The user does not see
   the dialog at that time, so an accidental quit is more probable than before. A later unit
   can ask for a confirmation before a quit while an export runs. This decision does not add
