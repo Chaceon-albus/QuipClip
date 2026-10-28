@@ -2,10 +2,10 @@ import { useMemo } from "react";
 import {
   getDisplayedElapsedSeconds,
   isPlaybackPositionApproximate,
-  usePlaybackStore,
   type PlaybackStoreState,
 } from "@/features/playback";
 import type { Pts, Rational } from "@/types/project";
+import { useSequencePlaybackStore } from "@/features/sequence";
 
 const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
 const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
@@ -52,10 +52,10 @@ export function useDisplayedPlaybackPosition(
   videoStartPts: Pts | null | undefined,
   videoTimeBase: Rational | null | undefined,
 ): DisplayedPlaybackPosition {
-  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
-  const presentedFrame = usePlaybackStore(selectPresentedFrame);
-  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
-  const approximateBrowserTimeSeconds = usePlaybackStore(
+  const seekTargetSeconds = useSequencePlaybackStore(selectSeekTargetSeconds);
+  const presentedFrame = useSequencePlaybackStore(selectPresentedFrame);
+  const calibrationStatus = useSequencePlaybackStore(selectCalibrationStatus);
+  const approximateBrowserTimeSeconds = useSequencePlaybackStore(
     selectApproximateBrowserTimeSeconds,
   );
 

@@ -26,7 +26,8 @@ import {
   useExportQueueStore,
   useExportStore,
 } from "@/features/export";
-import { useMediaStore } from "@/features/media";
+import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
+import { useSequenceMediaStore } from "@/features/sequence/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
@@ -116,7 +117,7 @@ export function TitleBar() {
   // Everything that is not macOS takes the Windows branch, so Linux gets the
   // Windows title bar.
   const isMac = isMacOS();
-  const media = useMediaStore((state) => state.media);
+  const media = useAttachedMediaStore((state) => state.media);
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
   const exportStatus = useExportStore((state) => state.status);
   const exportTracking = useExportStore((state) => state.tracking);
@@ -135,7 +136,9 @@ export function TitleBar() {
 
   // The duration in the tooltip uses the timecode format of the open source (ADR 028).
   const timecodePreference = useTimecodePreference((state) => state.format);
-  const probe = media?.probe;
+  // The total of the segments is on the axis of the sequence (ADR 052), so it reads the probe of
+  // the sequence, which is the probe of the one clip when there is one clip.
+  const probe = useSequenceMediaStore((state) => state.media?.probe);
   const timecodeDisplay = useMemo(
     () => resolveTimecodeDisplay(timecodePreference, probe),
     [timecodePreference, probe],

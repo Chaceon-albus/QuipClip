@@ -5,8 +5,8 @@ import type { ShortcutLabel } from "@/components/common/useShortcutLabels";
 import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
-import { playbackStore } from "@/features/playback";
 import { createStepHold, isStepHoldPress, type StepHold } from "./stepHold";
+import { sequencePlayback } from "@/features/sequence";
 
 // A step button does not keep the focus after a mouse click (`preventFocusOnMouseDown`), as
 // every transport button does (ADR 021). The window shortcut layer takes Space from a focused
@@ -61,7 +61,7 @@ export function FrameStepButton({
   useEffect(() => {
     // A timer repeat is a held step, as a key repeat is (FrameStepOptions).
     const hold = createStepHold((held) => {
-      playbackStore.getState().seekNominal(delta, { held });
+      sequencePlayback.store.getState().seekNominal(delta, { held });
     });
     holdRef.current = hold;
     // A release can land outside the button, so the end of a press is read on the window, in
@@ -127,7 +127,7 @@ export function FrameStepButton({
                 !nativeContextMenuState.isOpen()
               ) {
                 event.preventDefault();
-                playbackStore.getState().seekNominal(delta, { held: true });
+                sequencePlayback.store.getState().seekNominal(delta, { held: true });
               }
             }}
             onClick={(event) => {

@@ -27,12 +27,8 @@ import {
   canUndoEdit,
   isSourceActive,
 } from "@/components/layout/actionConditions";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
-import {
-  hasNominalFrameRate,
-  playbackStore,
-  usePlaybackStore,
-} from "@/features/playback";
+import { type MediaStoreState } from "@/features/media";
+import { hasNominalFrameRate } from "@/features/playback";
 import {
   previewMutePreferenceStore,
   usePreviewMutePreference,
@@ -68,6 +64,11 @@ import {
   type MarkOutFinishesSegmentKey,
   type TransportDisabledReasonKey,
 } from "./transportDisabledReason";
+import {
+  sequencePlayback,
+  useSequenceMediaStore,
+  useSequencePlaybackStore,
+} from "@/features/sequence";
 
 const selectMedia = (s: MediaStoreState) => s.media;
 
@@ -131,7 +132,7 @@ function useSettledReason<
 export function TransportBar() {
   const { t } = useTranslation();
   const shortcutOf = useShortcutLabels();
-  const media = useMediaStore(selectMedia);
+  const media = useSequenceMediaStore(selectMedia);
 
   const canUndo = useTimelineStore(selectCanUndo);
   const canRedo = useTimelineStore(selectCanRedo);
@@ -152,15 +153,15 @@ export function TransportBar() {
   // The playback store replaces presentedFrame on every presented frame. Selecting the
   // derived booleans instead of the object keeps this tree off the frame-rate render path.
   // Every condition below is shared with the window keyboard layer (ADR 026).
-  const hasActiveSource = usePlaybackStore((s) =>
+  const hasActiveSource = useSequencePlaybackStore((s) =>
     isSourceActive(hasMedia, s.isAttached, s.isReady),
   );
-  const isPlaying = usePlaybackStore((s) => s.isPlaying);
+  const isPlaying = useSequencePlaybackStore((s) => s.isPlaying);
   // A stalled preview element does not play or step again, and a seek reloads it. The notice of
   // the preview says so.
-  const isDecodeStalled = usePlaybackStore((s) => s.decodeStall !== null);
-  const isReadStall = usePlaybackStore((s) => s.decodeStall?.cause === "read");
-  const togglePlayback = playbackStore.getState().togglePlayback;
+  const isDecodeStalled = useSequencePlaybackStore((s) => s.decodeStall !== null);
+  const isReadStall = useSequencePlaybackStore((s) => s.decodeStall?.cause === "read");
+  const togglePlayback = sequencePlayback.store.getState().togglePlayback;
 
   const hasNominalRate = hasNominalFrameRate(media?.probe);
 
@@ -180,10 +181,10 @@ export function TransportBar() {
     [currentSegment],
   );
 
-  const isMarkInEnabled = usePlaybackStore((s) =>
+  const isMarkInEnabled = useSequencePlaybackStore((s) =>
     canMarkIn(s.calibrationStatus, s.presentedFrame, hasActiveSource, currentTarget),
   );
-  const isMarkOutEnabled = usePlaybackStore((s) =>
+  const isMarkOutEnabled = useSequencePlaybackStore((s) =>
     canMarkOut(
       s.calibrationStatus,
       s.presentedFrame,
@@ -192,7 +193,7 @@ export function TransportBar() {
       currentTarget,
     ),
   );
-  const isSplitEnabled = usePlaybackStore((s) =>
+  const isSplitEnabled = useSequencePlaybackStore((s) =>
     canSplitCurrentSegment(
       currentTarget,
       s.calibrationStatus,
@@ -208,29 +209,35 @@ export function TransportBar() {
     [hasActiveSource, pendingInPts, currentTarget, selectedSegmentCount],
   );
   const markInReason = useSettledReason(
-    usePlaybackStore((s) => presentEditDisabledReason("markIn", s, reasonContext)),
+    useSequencePlaybackStore((s) =>
+      presentEditDisabledReason("markIn", s, reasonContext),
+    ),
   );
   const markOutReason = useSettledReason(
-    usePlaybackStore((s) => presentEditDisabledReason("markOut", s, reasonContext)),
+    useSequencePlaybackStore((s) =>
+      presentEditDisabledReason("markOut", s, reasonContext),
+    ),
   );
   const splitReason = useSettledReason(
-    usePlaybackStore((s) => presentEditDisabledReason("split", s, reasonContext)),
+    useSequencePlaybackStore((s) =>
+      presentEditDisabledReason("split", s, reasonContext),
+    ),
   );
   // At or after the Out of the current segment, Mark In finishes that segment and starts the
   // next one at the frame on screen. The selector settles on a key or null, as the reasons do,
   // so a frame that does not change the description does not render this tree.
   const markInFinishes = useSettledReason(
-    usePlaybackStore((s) => presentMarkInFinishesSegment(s, reasonContext)),
+    useSequencePlaybackStore((s) => presentMarkInFinishesSegment(s, reasonContext)),
   );
   // On the Out of the current segment, Mark Out finishes that segment. A second Mark Out at
   // the frame of the first one therefore ends the segment, as Finish does.
   const markOutFinishes = useSettledReason(
-    usePlaybackStore((s) => presentMarkOutFinishesSegment(s, reasonContext)),
+    useSequencePlaybackStore((s) => presentMarkOutFinishesSegment(s, reasonContext)),
   );
   // With a pending In, Finish makes a segment that ends at the frame on screen, or discards
   // the In when that frame is at or before it. The description says which.
   const finishDescription = useSettledReason(
-    usePlaybackStore((s) => presentFinishSegmentDescription(s, reasonContext)),
+    useSequencePlaybackStore((s) => presentFinishSegmentDescription(s, reasonContext)),
   );
   const stepReason = presentStepDisabledReason(
     hasActiveSource,
@@ -293,7 +300,7 @@ export function TransportBar() {
   const isSplitDisabled = !isSplitEnabled;
   // Finish is available while its plan is not null (`planFinishSegment`), the condition of
   // the key too. With a pending In, no frame on screen makes it unavailable, as Mark Out is.
-  const isFinishSegmentDisabled = usePlaybackStore(
+  const isFinishSegmentDisabled = useSequencePlaybackStore(
     (s) =>
       planFinishSegment(
         s.calibrationStatus,
@@ -431,7 +438,7 @@ export function TransportBar() {
                   onClick={() => {
                     // Read at click time: the store is the single source, and the click runs
                     // after the render that enabled the button.
-                    const frame = playbackStore.getState().presentedFrame;
+                    const frame = sequencePlayback.store.getState().presentedFrame;
                     if (frame) {
                       markIn(frame.inferredSourcePts);
                     }
@@ -479,7 +486,7 @@ export function TransportBar() {
                   disabled={isMarkOutDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => {
-                    const frame = playbackStore.getState().presentedFrame;
+                    const frame = sequencePlayback.store.getState().presentedFrame;
                     if (frame) {
                       markOut(frame.inferredSourcePts);
                     }
@@ -518,7 +525,7 @@ export function TransportBar() {
                   disabled={isSplitDisabled}
                   onMouseDown={preventFocusOnMouseDown}
                   onClick={() => {
-                    const frame = playbackStore.getState().presentedFrame;
+                    const frame = sequencePlayback.store.getState().presentedFrame;
                     if (frame) {
                       split(frame.inferredSourcePts);
                     }
@@ -642,7 +649,7 @@ export function TransportBar() {
                   onClick={() => {
                     // The rule of the key (`planFinishSegment`), on the state at click time:
                     // with a pending In, Finish completes a segment at the frame on screen.
-                    const playback = playbackStore.getState();
+                    const playback = sequencePlayback.store.getState();
                     const timeline = timelineStore.getState();
                     const plan = planFinishSegment(
                       playback.calibrationStatus,

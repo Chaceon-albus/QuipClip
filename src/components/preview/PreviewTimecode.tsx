@@ -9,7 +9,6 @@ import {
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { MediaProbe } from "@/features/media";
-import { playbackStore, usePlaybackStore } from "@/features/playback";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import { formatPreviewCurrentTime, showsApproximateBadge } from "./previewFrame";
 import { closesFieldOnPress } from "./timecodeFieldPress";
@@ -18,6 +17,7 @@ import {
   runTimecodeEntryCommand,
   type TimecodeEntryErrorCode,
 } from "./timecodeEntrySeek";
+import { sequencePlayback, useSequencePlaybackStore } from "@/features/sequence";
 
 /**
  * Marks the current timecode as approximate. It is a small `≈` badge before the value, and
@@ -111,15 +111,15 @@ export function PreviewTimecode({
   decodeFailed: boolean;
 }) {
   const { t } = useTranslation();
-  const presentedFrame = usePlaybackStore((s) => s.presentedFrame);
-  const calibrationStatus = usePlaybackStore((s) => s.calibrationStatus);
-  const approximateBrowserTimeSeconds = usePlaybackStore(
+  const presentedFrame = useSequencePlaybackStore((s) => s.presentedFrame);
+  const calibrationStatus = useSequencePlaybackStore((s) => s.calibrationStatus);
+  const approximateBrowserTimeSeconds = useSequencePlaybackStore(
     (s) => s.approximateBrowserTimeSeconds,
   );
-  const seekTargetSeconds = usePlaybackStore((s) => s.seekTargetSeconds);
-  const isAttached = usePlaybackStore((s) => s.isAttached);
-  const isReady = usePlaybackStore((s) => s.isReady);
-  const attachedSourceRevisionKey = usePlaybackStore(
+  const seekTargetSeconds = useSequencePlaybackStore((s) => s.seekTargetSeconds);
+  const isAttached = useSequencePlaybackStore((s) => s.isAttached);
+  const isReady = useSequencePlaybackStore((s) => s.isReady);
+  const attachedSourceRevisionKey = useSequencePlaybackStore(
     (s) => s.attachedSourceRevisionKey,
   );
 
@@ -212,7 +212,7 @@ export function PreviewTimecode({
   const commit = (text: string) => {
     const outcome = resolveTimecodeEntry(text, {
       probe,
-      playback: playbackStore.getState(),
+      playback: sequencePlayback.store.getState(),
       display,
     });
     if (outcome.kind === "error") {
@@ -222,7 +222,7 @@ export function PreviewTimecode({
       return;
     }
     if (outcome.kind === "run" && outcome.command !== null) {
-      runTimecodeEntryCommand(outcome.command, playbackStore.getState());
+      runTimecodeEntryCommand(outcome.command, sequencePlayback.store.getState());
     }
     close(true);
   };

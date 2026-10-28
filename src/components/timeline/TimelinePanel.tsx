@@ -10,14 +10,17 @@ import { useTranslation } from "react-i18next";
 import { isSourceActive } from "@/components/layout/actionConditions";
 import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
 import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
-import { toSequenceSource } from "@/features/media/sequenceSource";
+import type { MediaStoreState } from "@/features/media";
+import {
+  sequencePlayback,
+  useSequenceMediaStore,
+  useSequencePlaybackStore,
+  type SequencePlaybackState,
+} from "@/features/sequence";
 import {
   getDisplayedElapsedSeconds,
   getNominalFrameRate,
-  playbackStore,
   resolveTimecodeDisplay,
-  usePlaybackStore,
   type PlaybackStoreState,
   type SeekOptions,
 } from "@/features/playback";
@@ -119,6 +122,10 @@ import {
   type TimelineScrubPhase,
 } from "./timelineScrub";
 import { TrimNotice } from "./TrimNotice";
+import { ClipBars, ClipLabels } from "./ClipLayer";
+import { calculateClipBarLayouts } from "./clipBarLayout";
+import { DropJunctionLine } from "./DropJunctionLine";
+import { registerTrackLane } from "@/components/layout/fileDropTarget";
 
 export interface TimelinePanelProps {
   /** Finite HTMLMediaElement.duration supplied by preview runtime state. */
@@ -134,8 +141,8 @@ const selectIsAttached = (state: PlaybackStoreState) => state.isAttached;
 const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectIsDecodeStalled = (state: PlaybackStoreState) => state.decodeStall !== null;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
+const selectSwitching = (state: SequencePlaybackState) => state.switching;
 
-const selectShowOnlySource = (state: TimelineStoreState) => state.showOnlySource;
 const selectSequenceSourceId = (state: TimelineStoreState) => state.sourceId;
 
 const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
@@ -193,30 +200,20 @@ export function TimelinePanel({
   onApproximateSeek,
 }: TimelinePanelProps = {}) {
   const { t } = useTranslation();
-  const media = useMediaStore(selectMedia);
-  const mediaStatus = useMediaStore(selectMediaStatus);
-  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
-  const isAttached = usePlaybackStore(selectIsAttached);
-  const isReady = usePlaybackStore(selectIsReady);
-  const isDecodeStalled = usePlaybackStore(selectIsDecodeStalled);
-  const seekToPts = usePlaybackStore(selectSeekToPts);
+  // The media of the sequence: the virtual source of ADR 052, or the media of the one clip.
+  const media = useSequenceMediaStore(selectMedia);
+  const mediaStatus = useSequenceMediaStore(selectMediaStatus);
+  const calibrationStatus = useSequencePlaybackStore(selectCalibrationStatus);
+  const isAttached = useSequencePlaybackStore(selectIsAttached);
+  const isReady = useSequencePlaybackStore(selectIsReady);
+  const isDecodeStalled = useSequencePlaybackStore(selectIsDecodeStalled);
+  const seekToPts = useSequencePlaybackStore(selectSeekToPts);
+  const switching = useSequencePlaybackStore(selectSwitching);
 
-  const showOnlySource = useTimelineStore(selectShowOnlySource);
   // The virtual source of the sequence (ADR 052). Its ID changes with each new generation of the
-  // sequence, so the view state below resets as it did for a new source.
+  // sequence, so the view state below resets as it did for a new source. The imports add the
+  // clips (`importClips`), so the panel only reads the sequence.
   const sourceId = useTimelineStore(selectSequenceSourceId);
-
-  // The generated ID is keyed by the revision key, not by the path, so a file that changed on
-  // disk becomes a new source and its old marks stop matching it (ADR 010).
-  const sequenceSource = useMemo(
-    () => (media ? toSequenceSource(media) : null),
-    [media],
-  );
-
-  // The open media file is the one clip of the sequence.
-  useLayoutEffect(() => {
-    showOnlySource(sequenceSource);
-  }, [sequenceSource, showOnlySource]);
 
   const totalDurationSeconds = useMemo(() => {
     if (!media) return null;
@@ -229,17 +226,17 @@ export function TimelinePanel({
   }, [media, runtimeBrowserDurationSeconds]);
 
   const isIndeterminate = totalDurationSeconds === null || totalDurationSeconds <= 0;
+  // During a cold switch of clip the new element loads and calibrates, and the sequence stays
+  // seekable for the gestures of the timeline, so a scrub or a trim across a junction goes on
+  // (ADR 052, ADR 030 note of 2026-10-28).
   const canUsePreciseSeek =
     media !== null &&
-    isAttached &&
-    isReady &&
+    ((isAttached && isReady && calibrationStatus === "ready") || switching) &&
     !isIndeterminate &&
-    calibrationStatus === "ready" &&
     media.probe.videoStartPts !== null;
   const canUseApproximateSeek =
     media !== null &&
-    isAttached &&
-    isReady &&
+    ((isAttached && isReady) || switching) &&
     !isIndeterminate &&
     onApproximateSeek !== undefined;
   const canSeek = canUsePreciseSeek || canUseApproximateSeek;
@@ -264,6 +261,24 @@ export function TimelinePanel({
   const lastWidthRef = useRef<number>(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const laneRef = useRef<HTMLDivElement | null>(null);
+  // The geometry box of the track row, where a file drop inserts at a junction (ADR 052). It
+  // spans the same width as the ruler lane.
+  const trackBoxRef = useRef<HTMLDivElement | null>(null);
+
+  // The lane and the place of each clip, for a file drop that inserts at a junction (ADR 052).
+  // The registration follows the extent, so a drop reads the layout that the lane shows.
+  useEffect(
+    () =>
+      registerTrackLane({
+        rect: () => trackBoxRef.current?.getBoundingClientRect() ?? null,
+        layouts: () =>
+          calculateClipBarLayouts(
+            timelineStore.getState().virtual,
+            totalDurationSeconds,
+          ),
+      }),
+    [totalDurationSeconds],
+  );
 
   // scrollLeft is mirrored in a ref because reading scrollRef.current.scrollLeft
   // on the per-frame effect path (PlayheadFollow) would force a synchronous layout on every
@@ -432,7 +447,7 @@ export function TimelinePanel({
       return null;
     }
     const elapsedSeconds = getDisplayedElapsedSeconds(
-      playbackStore.getState(),
+      sequencePlayback.store.getState(),
       media.probe.videoStartPts,
       media.probe.videoTimeBase,
     );
@@ -690,7 +705,7 @@ export function TimelinePanel({
       onApproximateSeek?.(request.seconds, options);
     }
 
-    const state = playbackStore.getState();
+    const state = sequencePlayback.store.getState();
     gestureSeekTargetRef.current = state.seekTargetSeconds;
     const snapRatio = resolveSnapIndicatorRatio(
       plan.snap,
@@ -735,7 +750,7 @@ export function TimelinePanel({
       hideSnapIndicator(snapElements());
       return;
     }
-    if (!canUsePreciseSeek || !isTrimCurrent(trim, playbackStore.getState())) {
+    if (!canUsePreciseSeek || !isTrimCurrent(trim, sequencePlayback.store.getState())) {
       // The trim cannot commit a frame any more, so the timeline says that it was not applied.
       segmentTrimSession.fail();
       gestureModeRef.current = "scrub";
@@ -779,7 +794,7 @@ export function TimelinePanel({
       segmentTrimSession.abandon(target);
     }
 
-    const state = playbackStore.getState();
+    const state = sequencePlayback.store.getState();
     gestureSeekTargetRef.current = state.seekTargetSeconds;
     const snapRatio = resolveSnapIndicatorRatio(
       target?.snap ?? null,
@@ -1035,7 +1050,7 @@ export function TimelinePanel({
       trimPointerIdRef.current = null;
       // Read before the seek at pointer down. That seek keeps a playback running, and the
       // first scrub sample of a drag pauses it, so the release reads this value.
-      pressPlayback.pressScrub(playbackStore.getState().isPlaying);
+      pressPlayback.pressScrub(sequencePlayback.store.getState().isPlaying);
     }
     gesture.begin(event.pointerId, event.clientX);
   };
@@ -1198,7 +1213,7 @@ export function TimelinePanel({
     // runs in the handler of the release, as the play button and the keys run it in theirs. The
     // gesture ends only for its own pointer, so the pointer up of another pointer resumes nothing.
     // The store refuses a resume at the end of the media (`resumeAfterSeek`).
-    const playback = playbackStore.getState();
+    const playback = sequencePlayback.store.getState();
     if (
       shouldResumeAfterGesture({
         release: release.kind,
@@ -1500,7 +1515,7 @@ export function TimelinePanel({
                  * Segments are interactive, and interactive content cannot be nested inside a
                  * `role="slider"` element.
                  */
-                <div className="relative h-full w-full">
+                <div ref={trackBoxRef} className="relative h-full w-full">
                   {/*
                    * Canonical accessible seek surface (see TimelineSeekSlider). The panel
                    * creates its content here, so a render of the slider for a new position
@@ -1534,7 +1549,8 @@ export function TimelinePanel({
                      * - The outline is solid. A dashed border on a bar of that length costs
                      *   more to paint, and the hatch already marks the bar as cut.
                      */}
-                    <div className="pointer-events-none absolute inset-0 rounded-lg border border-timeline-divider bg-timeline-track bg-[linear-gradient(135deg,var(--timeline-divider)_0_9%,transparent_9%_50%,var(--timeline-divider)_50%_59%,transparent_59%)] bg-size-[8px_8px]" />
+                    {/* One bar for each clip of the sequence (see ClipBars, ADR 052). */}
+                    <ClipBars totalDurationSeconds={totalDurationSeconds} />
 
                     {/* Pending In trail and mark (see PendingInTrackMarks) */}
                     <PendingInTrackMarks
@@ -1558,6 +1574,12 @@ export function TimelinePanel({
                     canTrimEdges={canTrimEdges}
                     outFrameRate={frameBandRate}
                   />
+
+                  {/* The file name and the menu of each clip (see ClipLabels, ADR 052) */}
+                  <ClipLabels totalDurationSeconds={totalDurationSeconds} />
+
+                  {/* The junction where dropped videos go (see DropJunctionLine, ADR 052) */}
+                  <DropJunctionLine />
 
                   {/* The new extent of a segment that a trim moves (see SegmentTrimPreview) */}
                   <SegmentTrimPreview

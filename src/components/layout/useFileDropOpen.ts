@@ -6,6 +6,7 @@ import {
   resolveFileDropEvent,
   type DroppedPathsClassification,
 } from "./fileDropPresenter";
+import { fileDropTargetStore, resolveDropTarget } from "./fileDropTarget";
 import { MODAL_LAYER_SELECTOR } from "./keyboardShortcutController";
 import { quitGuard } from "./quitGuardController";
 
@@ -23,13 +24,13 @@ function isFileDropBlocked(): boolean {
 }
 
 /**
- * Opens a video that the user drops on the window, and returns what the drop overlay shows.
+ * Adds the videos that the user drops on the window, and returns what the drop overlay shows.
  *
- * The hook subscribes once to the drag-drop events of the Tauri web view. A drop opens the
- * file through `requestOpen` of the quit guard, which is the call the Open Media dialog makes
- * after the user picks a file. The drop therefore replaces an open source exactly as the
- * dialog does: it asks first when the open source has segments (ADR 027), and the import
- * validates the file in the same way.
+ * The hook subscribes once to the drag-drop events of the Tauri web view. A drop adds the files
+ * through `requestOpen` of the quit guard, which is the call the Open Media dialog makes after
+ * the user picks files. Each file becomes a clip (ADR 052): at the junction under the pointer
+ * when the drop lands on the track lane, else at the end of the sequence. The import validates
+ * it as the dialog does.
  *
  * @returns The classification the overlay shows, or null when the overlay is hidden.
  */
@@ -50,8 +51,28 @@ export function useFileDropOpen(): DroppedPathsClassification | null {
         const step = resolveFileDropEvent(event.payload, dragged, isFileDropBlocked());
         dragged = step.dragged;
         setOverlay(step.overlay);
-        if (step.openPath !== null) {
-          void quitGuard.requestOpen(step.openPath);
+        // The junction under the pointer, while the drag of videos is over the track lane
+        // (ADR 052). The position of the event is in physical pixels of the web view.
+        const position = "position" in event.payload ? event.payload.position : null;
+        const scale = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+        const target =
+          position === null ||
+          (step.overlay?.kind !== "open" && step.openPaths === null)
+            ? null
+            : resolveDropTarget(position.x / scale, position.y / scale);
+        const nextTarget =
+          event.payload.type === "drop" || event.payload.type === "leave"
+            ? null
+            : target;
+        const shown = fileDropTargetStore.getState().target;
+        if (
+          nextTarget?.junction !== shown?.junction ||
+          nextTarget?.leftPercent !== shown?.leftPercent
+        ) {
+          fileDropTargetStore.setState({ target: nextTarget });
+        }
+        if (step.openPaths !== null) {
+          void quitGuard.requestOpen(step.openPaths, target?.junction ?? null);
         }
       });
     } catch {
@@ -76,6 +97,7 @@ export function useFileDropOpen(): DroppedPathsClassification | null {
 
     return () => {
       disposed = true;
+      fileDropTargetStore.setState({ target: null });
       unlisten?.();
       unlisten = null;
     };

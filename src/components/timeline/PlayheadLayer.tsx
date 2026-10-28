@@ -1,6 +1,6 @@
 import type { DOMAttributes, ReactNode } from "react";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
-import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
+import { type PlaybackStoreState } from "@/features/playback";
 import { calculatePlayheadLayout, useTimelineStore } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
@@ -8,6 +8,7 @@ import { calculatePlayheadFrameBand } from "./frameBand";
 import { usePlayheadTimecode } from "./playheadTimecode";
 import { selectSelectedFillCanBeUnderPlayhead } from "./playheadRing";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
+import { useSequencePlaybackStore } from "@/features/sequence";
 
 const selectSeekTargetSeconds = (state: PlaybackStoreState) => state.seekTargetSeconds;
 const selectPresentedFrame = (state: PlaybackStoreState) => state.presentedFrame;
@@ -211,9 +212,9 @@ export function TrackFrameBand({
   totalDurationSeconds,
   rate,
 }: TrackFrameBandProps) {
-  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
-  const presentedFrame = usePlaybackStore(selectPresentedFrame);
-  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const seekTargetSeconds = useSequencePlaybackStore(selectSeekTargetSeconds);
+  const presentedFrame = useSequencePlaybackStore(selectPresentedFrame);
+  const calibrationStatus = useSequencePlaybackStore(selectCalibrationStatus);
   const hasRing = useTimelineStore(selectSelectedFillCanBeUnderPlayhead);
   const band = calculatePlayheadFrameBand(
     { seekTargetSeconds, presentedFrame, calibrationStatus },

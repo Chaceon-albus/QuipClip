@@ -4,8 +4,7 @@ import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { isSourceActive } from "@/components/layout/actionConditions";
 import { MarkInIcon, MarkOutIcon } from "@/components/transport/markPointIcons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
-import { usePlaybackStore } from "@/features/playback";
+import { type MediaStoreState } from "@/features/media";
 import { useTimelineStore, type TimelineStoreState } from "@/features/timeline";
 import { cn } from "@/lib/utils";
 import {
@@ -16,6 +15,7 @@ import {
   matchBoundaryBadges,
   type BoundaryBadgeLine,
 } from "./boundaryBadgeModel";
+import { useSequenceMediaStore, useSequencePlaybackStore } from "@/features/sequence";
 
 const selectHasMedia = (s: MediaStoreState) => s.media !== null;
 const selectSegments = (s: TimelineStoreState) => s.segments;
@@ -116,7 +116,7 @@ export function PreviewBoundaryBadges({
   pictureBoxStyle: CSSProperties;
 }) {
   const { t } = useTranslation();
-  const hasMedia = useMediaStore(selectHasMedia);
+  const hasMedia = useSequenceMediaStore(selectHasMedia);
   const segments = useTimelineStore(selectSegments);
   const sourceId = useTimelineStore(selectSourceId);
   const pendingInPts = useTimelineStore(selectPendingInPts);
@@ -126,7 +126,7 @@ export function PreviewBoundaryBadges({
     () => indexSegmentBoundaries(segments, sourceId, pendingInPts),
     [segments, sourceId, pendingInPts],
   );
-  const framePts = usePlaybackStore((s) =>
+  const framePts = useSequencePlaybackStore((s) =>
     boundaryBadgeFramePts(s, isSourceActive(hasMedia, s.isAttached, s.isReady)),
   );
   const badges = useMemo(() => matchBoundaryBadges(framePts, index), [framePts, index]);

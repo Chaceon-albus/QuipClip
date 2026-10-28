@@ -140,21 +140,22 @@ export const zhCN: TranslationCatalog = {
     },
   },
   fileDrop: {
-    release: "松开以打开视频",
-    unsupported: "没有可打开的视频文件",
-    othersIgnored: "只打开一个文件，其他文件将被忽略。",
+    // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+    release_other: "松开以添加 {{count}} 个视频",
+    unsupported: "没有可添加的视频文件",
+    othersIgnored: "只添加视频文件，其他文件将被忽略。",
   },
   quitGuard: {
     quit: {
       title: "退出 QuipClip？",
       confirm: "退出",
     },
-    replace: {
-      title: "替换已打开的视频？",
+    clear: {
+      title: "清空时间轴？",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
-      segments_other:
-        "已标记的 {{count}} 个片段会保留在当前视频中，重新打开该视频即可看到。",
-      confirm: "替换",
+      segments_other: "已标记的 {{count}} 个片段将从时间轴上移除。撤销可以恢复。",
+      pendingIn: "待定的入点也将一并移除。",
+      confirm: "清空",
     },
     loss: {
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
@@ -234,6 +235,13 @@ export const zhCN: TranslationCatalog = {
     sourceLane: "源媒体",
     playhead: "播放头",
     seekSlider: "时间轴定位",
+    clip: {
+      menu: "视频“{{name}}”",
+      moveLeft: "左移该视频",
+      moveRight: "右移该视频",
+      remove: "移除该视频",
+      clear: "清空时间轴",
+    },
     segmentList: "时间轴片段",
     segment: "片段 {{index}}",
     segmentLabel:
@@ -290,6 +298,8 @@ export const zhCN: TranslationCatalog = {
     assetScopeDenied: "资源协议拒绝访问该媒体文件。",
     commandExecutionFailed: "无法运行媒体导入命令。",
     dialogFailed: "无法打开文件选择对话框。",
+    sourceExtentUnknown:
+      "无法确定此视频的时长，因此不能把它放在时间轴上另一个视频的旁边。",
     unknown: "导入媒体时发生未知错误。",
   },
   playbackError: {

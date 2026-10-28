@@ -47,7 +47,9 @@ import {
   type ExportRunTiming,
   type ExportState,
 } from "@/features/export";
-import { openMediaFileDialog, useMediaStore } from "@/features/media";
+import { quitGuard } from "@/components/layout/quitGuardController";
+import { openMediaFileDialog } from "@/features/media";
+import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 import { selectActiveSourceSegmentCount, useTimelineStore } from "@/features/timeline";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
@@ -492,7 +494,7 @@ export function ExportDialog({
   // summary.
   const streamChoice = useExportStreamChoice((state) => state.choice);
   const setStream = useExportStreamChoice((state) => state.setStream);
-  const probe = useMediaStore((state) => state.media?.probe ?? null);
+  const probe = useAttachedMediaStore((state) => state.media?.probe ?? null);
   const streams = resolveExportStreams(streamChoice, sourceHasAudio(probe));
   // The copy of the audio (ADR 048): the request asks for it only while the setup step offers
   // it, which the setup step resolves the same way for its switch and its summary.
@@ -797,7 +799,11 @@ export function ExportDialog({
       onReimport();
       return;
     }
-    void openMediaFileDialog({ filterName: t("dialog.videoFilter") });
+    // A file that changed on disk is a new source, so Re-import adds it as a clip (ADR 052).
+    void openMediaFileDialog({
+      filterName: t("dialog.videoFilter"),
+      importPath: quitGuard.requestOpen,
+    });
   };
 
   // Opens the Settings window on `section`, or brings it forward. The Settings window is a

@@ -1,11 +1,12 @@
 /**
- * The quit guard of ADR 027: one path for every way to close, and the confirmation before
- * another video replaces the open one.
+ * The quit guard of ADR 027: one path for every way to close, and the confirmation before Clear
+ * Timeline (ADR 052).
  *
  * Every close request and every exit request that Rust held back reach `requestQuit`. When
  * nothing would be lost, it calls `confirm_quit` at once. Otherwise it opens the quit prompt,
- * and the Quit button calls `confirm_quit`. A File > Open and a drop reach `requestOpen`,
- * which asks first when the open source has segments.
+ * and the Quit button calls `confirm_quit`. A File > Open and a drop reach `requestOpen`, which
+ * imports the files as clips and asks nothing, because an import replaces nothing (ADR 052).
+ * Clear Timeline reaches `requestClear`, which asks first when the sequence has segments.
  *
  * The prompt is in a store, so the one dialog in `QuitGuardDialog` shows it, and any caller
  * can raise it. The decisions themselves are the pure rules in `quitGuard.ts`.
@@ -27,14 +28,14 @@ import {
   exportStore,
   type ExportQueueState,
 } from "@/features/export";
-import { mediaStore, type ImportMediaResult } from "@/features/media";
+import { importClips } from "@/features/sequence/importClips";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import { timelineStore } from "@/features/timeline";
 import { BACKEND_COMMANDS, invokeCommand } from "@/lib/ipc";
 import {
   countQueuedExports,
   decideQuit,
-  decideReplace,
+  decideClear,
   type QuitGuardInput,
   type QuitLoss,
 } from "./quitGuard";
@@ -43,7 +44,7 @@ import {
 export type QuitGuardPrompt =
   | { readonly kind: "quit"; readonly loss: QuitLoss }
   | {
-      readonly kind: "replace";
+      readonly kind: "clear";
       readonly segments: number;
       readonly pendingIn: boolean;
     };
@@ -72,8 +73,13 @@ export interface QuitGuardDependencies {
    * because Rust only queues the exit, and it can also never settle.
    */
   confirmQuit?: () => Promise<unknown>;
-  /** Opens a video. Defaults to `importPath` of the media store. */
-  importPath?: (path: string) => Promise<ImportMediaResult | null>;
+  /**
+   * Imports files as clips from a junction of the sequence, or at the end for null. Defaults to
+   * `importClips` (ADR 052).
+   */
+  importPaths?: (paths: readonly string[], index: number | null) => Promise<unknown>;
+  /** Removes every clip and every segment, as one edit. Defaults to the timeline store. */
+  clearTimeline?: () => void;
   /**
    * Brings the main window forward when the quit prompt opens. Defaults to `setFocus` of the
    * current Tauri window, best effort.
@@ -93,12 +99,20 @@ export interface QuitGuard {
    */
   requestQuit: () => void;
   /**
-   * Opens a video, or first asks to replace the open one when it has segments. The file that
-   * is already open opens again with no question. Resolves with the import result, or with
-   * null when the user cancels or when a prompt is already open.
+   * Imports videos as clips of the sequence (ADR 052): from junction `index`, or at the end for
+   * null or no index. An import replaces nothing, so it asks nothing. Does nothing while a prompt
+   * is open or the quit started.
    */
-  requestOpen: (path: string) => Promise<ImportMediaResult | null>;
-  /** The confirm button of the prompt: quits, or opens the video that the prompt is about. */
+  requestOpen: (
+    paths: string | readonly string[],
+    index?: number | null,
+  ) => Promise<unknown>;
+  /**
+   * Clears the timeline, or first asks when the sequence has segments (ADR 052). Does nothing
+   * while a prompt is open or the quit started.
+   */
+  requestClear: () => void;
+  /** The confirm button of the prompt: quits, or clears the timeline. */
   confirm: () => void;
   /** The Cancel button, Escape, or any other dismissal of the prompt. Changes nothing else. */
   cancel: () => void;
@@ -119,7 +133,6 @@ export function readQuitGuardInput(
     exportStatus: exportState.status,
     exportTracking: exportState.tracking,
     unsavedPresetName: settingsWindowDraftStore.getState().unsavedPresetName,
-    openMediaPath: mediaStore.getState().media?.path ?? null,
     queuedExports: countQueuedExports(queueStore.getState()),
   };
 }
@@ -146,29 +159,19 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
   const queueStore = dependencies.queueStore ?? exportQueueStore;
   const readInput = dependencies.readInput ?? (() => readQuitGuardInput(queueStore));
   const confirmQuit = dependencies.confirmQuit ?? invokeConfirmQuit;
-  const importPath =
-    dependencies.importPath ??
-    ((path: string) => mediaStore.getState().importPath(path));
+  const importPaths =
+    dependencies.importPaths ??
+    ((paths: readonly string[], index: number | null) => importClips(paths, index));
+  const clearTimeline =
+    dependencies.clearTimeline ?? (() => timelineStore.getState().clearTimeline());
   const focusWindow = dependencies.focusWindow ?? focusCurrentWindow;
 
   const store = createStore<QuitGuardState>()(() => ({ prompt: null }));
 
-  // The path of the replace prompt and the resolver of its `requestOpen`. Kept out of the
-  // store, because the dialog does not render them.
-  let pendingOpen: {
-    path: string;
-    resolve: (result: ImportMediaResult | null) => void;
-  } | null = null;
   // True from the call of `confirm_quit` until it fails. A call that resolves leaves it true:
   // Rust has confirmed the quit and queued the exit, so the application is ending, and a
   // later request must not show a dialog in a window that is about to close.
   let quitting = false;
-
-  function dropPendingOpen(): void {
-    const open = pendingOpen;
-    pendingOpen = null;
-    open?.resolve(null);
-  }
 
   function quit(): void {
     quitting = true;
@@ -187,7 +190,6 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       const decision = decideQuit(readInput());
-      dropPendingOpen();
       if (!decision.ask) {
         store.setState({ prompt: null });
         quit();
@@ -197,25 +199,30 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       focusWindow();
     },
 
-    requestOpen: (path: string) => {
+    requestOpen: (paths, index = null) => {
       // The dialog is modal, so no entry point can reach this while it is open. The test is a
-      // guard, so that a second request never takes the place of an unanswered one.
+      // guard, so that an import never starts under an unanswered prompt.
       if (quitting || store.getState().prompt !== null) {
-        return Promise.resolve(null);
+        return Promise.resolve([]);
       }
-      const decision = decideReplace(readInput(), path);
+      return importPaths(typeof paths === "string" ? [paths] : paths, index);
+    },
+
+    requestClear: () => {
+      if (quitting || store.getState().prompt !== null) {
+        return;
+      }
+      const decision = decideClear(readInput());
       if (!decision.ask) {
-        return importPath(path);
+        clearTimeline();
+        return;
       }
       store.setState({
         prompt: {
-          kind: "replace",
+          kind: "clear",
           segments: decision.segments,
           pendingIn: decision.pendingIn,
         },
-      });
-      return new Promise<ImportMediaResult | null>((resolve) => {
-        pendingOpen = { path, resolve };
       });
     },
 
@@ -229,20 +236,13 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         quit();
         return;
       }
-      const open = pendingOpen;
-      pendingOpen = null;
-      if (open !== null) {
-        importPath(open.path).then(open.resolve, () => {
-          open.resolve(null);
-        });
-      }
+      clearTimeline();
     },
 
     cancel: () => {
       if (store.getState().prompt !== null) {
         store.setState({ prompt: null });
       }
-      dropPendingOpen();
     },
   };
 }

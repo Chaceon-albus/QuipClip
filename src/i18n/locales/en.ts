@@ -206,26 +206,29 @@ export const en = {
     },
   },
   fileDrop: {
-    release: "Release to open the video",
+    // The drop adds each video file as a clip: where the line shows on the track, or at the end
+    // of the timeline (ADR 052).
+    release_one: "Release to add the video",
+    release_other: "Release to add {{count}} videos",
     unsupported: "No supported video file",
-    othersIgnored: "QuipClip opens one file and ignores the others.",
+    othersIgnored: "QuipClip adds the video files and ignores the other files.",
   },
-  // The confirmations before a quit or before another video replaces the open one (ADR 027).
-  // Each message below `loss` and `replace.segments` is one line of a list in the dialog,
-  // which shows only the lines that apply. A replacement keeps the segments with the old
-  // video, and it loses the pending In point, so its dialog reuses `loss.pendingIn`.
+  // The confirmations before a quit (ADR 027) and before Clear Timeline (ADR 052). Each message
+  // below `loss`, `clear.segments` and `clear.pendingIn` is one line of a list in the dialog,
+  // which shows only the lines that apply. Undo brings back what Clear Timeline removes.
   quitGuard: {
     quit: {
       title: "Quit QuipClip?",
       confirm: "Quit",
     },
-    replace: {
-      title: "Replace the open video?",
-      segments_one:
-        "The marked segment stays with the open video. Open that video again to see it.",
+    // Clear Timeline removes every clip and every segment as one edit (ADR 052).
+    clear: {
+      title: "Clear the timeline?",
+      segments_one: "The marked segment leaves the timeline. Undo brings it back.",
       segments_other:
-        "The {{count}} marked segments stay with the open video. Open that video again to see them.",
-      confirm: "Replace",
+        "The {{count}} marked segments leave the timeline. Undo brings them back.",
+      pendingIn: "The pending In point leaves the timeline too.",
+      confirm: "Clear",
     },
     loss: {
       segments_one: "{{count}} marked segment will be lost.",
@@ -345,6 +348,14 @@ export const en = {
     sourceLane: "Source Media",
     playhead: "Playhead",
     seekSlider: "Timeline seek",
+    // The label and the menu of one clip of the sequence (ADR 052). {{name}} is its file name.
+    clip: {
+      menu: "Clip “{{name}}”",
+      moveLeft: "Move Clip Left",
+      moveRight: "Move Clip Right",
+      remove: "Remove Clip",
+      clear: "Clear Timeline",
+    },
     segmentList: "Timeline segments",
     segment: "Segment {{index}}",
     segmentLabel:
@@ -426,6 +437,8 @@ export const en = {
     assetScopeDenied: "The asset protocol denied access to the media file.",
     commandExecutionFailed: "QuipClip could not run the media import command.",
     dialogFailed: "QuipClip could not open the file selection dialog.",
+    sourceExtentUnknown:
+      "QuipClip could not find the length of this video, so it cannot place the video next to another video on the timeline.",
     unknown: "An unknown error occurred while importing media.",
   },
   playbackError: {

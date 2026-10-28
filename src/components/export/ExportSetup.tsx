@@ -31,7 +31,6 @@ import {
   type ExportStreamKind,
 } from "@/features/export/streamChoice";
 import { useFfmpegStore } from "@/features/ffmpeg";
-import { useMediaStore } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useSettingsStore, type SettingsSection } from "@/features/settings";
 import { presetTestFingerprint } from "@/features/settings/presetTest";
@@ -83,6 +82,7 @@ import {
   type CopyAudioSwitchView,
   type StreamSwitchView,
 } from "./exportStreamsPresenter";
+import { useSequenceMediaStore } from "@/features/sequence";
 
 // One bigint or null, which compare by value, so the step renders again only when the exact
 // duration changes.
@@ -619,7 +619,7 @@ export function ExportSetup({
 
   // The open source and its segments, read as the title bar reads them, so the sentence shows
   // the duration of the Export tooltip in the same timecode format (ADR 028).
-  const media = useMediaStore((state) => state.media);
+  const media = useSequenceMediaStore((state) => state.media);
   const probe = media?.probe ?? null;
   const timecodePreference = useTimecodePreference((state) => state.format);
   const timecodeDisplay = useMemo(

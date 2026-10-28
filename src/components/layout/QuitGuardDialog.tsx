@@ -4,7 +4,7 @@ import { useStore } from "zustand";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import {
   presentQuitPrompt,
-  presentReplacePrompt,
+  presentClearPrompt,
   type QuitGuardPromptView,
 } from "./quitGuard";
 import { quitGuard, type QuitGuardPrompt } from "./quitGuardController";
@@ -12,7 +12,7 @@ import { quitGuard, type QuitGuardPrompt } from "./quitGuardController";
 function presentPrompt(prompt: QuitGuardPrompt): QuitGuardPromptView {
   return prompt.kind === "quit"
     ? presentQuitPrompt(prompt.loss)
-    : presentReplacePrompt(prompt);
+    : presentClearPrompt(prompt);
 }
 
 const handleConfirm = () => {

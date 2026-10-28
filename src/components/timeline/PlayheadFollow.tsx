@@ -1,6 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react";
 import type { ImportMediaResult } from "@/features/media";
-import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
+import { type PlaybackStoreState } from "@/features/playback";
 import {
   calculatePausedFollow,
   calculatePendingNavigation,
@@ -12,6 +12,7 @@ import {
 } from "@/features/timeline";
 import type { TimelineScrubGesture } from "./timelineScrub";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
+import { useSequencePlaybackStore } from "@/features/sequence";
 
 const selectIsPlaying = (state: PlaybackStoreState) => state.isPlaying;
 
@@ -88,7 +89,7 @@ export function PlayheadFollow({
   gestureRef,
   gestureSeekTargetRef,
 }: PlayheadFollowProps): null {
-  const isPlaying = usePlaybackStore(selectIsPlaying);
+  const isPlaying = useSequencePlaybackStore(selectIsPlaying);
   const { elapsedSeconds: currentElapsedSeconds, seekTargetSeconds } =
     useDisplayedPlaybackPosition(
       media?.probe.videoStartPts,

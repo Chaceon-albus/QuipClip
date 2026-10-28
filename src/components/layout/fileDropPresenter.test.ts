@@ -9,7 +9,7 @@ describe("classifyDroppedPaths", () => {
   it("opens one supported video", () => {
     expect(classifyDroppedPaths(["/media/clip.mp4"])).toEqual({
       kind: "open",
-      path: "/media/clip.mp4",
+      paths: ["/media/clip.mp4"],
       extraIgnored: false,
     });
   });
@@ -17,7 +17,7 @@ describe("classifyDroppedPaths", () => {
   it("opens a supported video in any letter case and on a Windows path", () => {
     expect(classifyDroppedPaths(["C:\\Videos\\CLIP.MOV"])).toEqual({
       kind: "open",
-      path: "C:\\Videos\\CLIP.MOV",
+      paths: ["C:\\Videos\\CLIP.MOV"],
       extraIgnored: false,
     });
   });
@@ -38,18 +38,18 @@ describe("classifyDroppedPaths", () => {
     expect(classifyDroppedPaths(["", "   "])).toEqual({ kind: "unsupported" });
   });
 
-  it("opens only the first of several videos and reports the others", () => {
+  it("adds every video of several, in the order of the drop", () => {
     expect(classifyDroppedPaths(["/media/a.mp4", "/media/b.mkv"])).toEqual({
       kind: "open",
-      path: "/media/a.mp4",
-      extraIgnored: true,
+      paths: ["/media/a.mp4", "/media/b.mkv"],
+      extraIgnored: false,
     });
   });
 
-  it("opens the first supported video when an earlier path is not a video", () => {
+  it("adds the videos and reports a path that is not a video", () => {
     expect(classifyDroppedPaths(["/media/notes.txt", "/media/b.webm"])).toEqual({
       kind: "open",
-      path: "/media/b.webm",
+      paths: ["/media/b.webm"],
       extraIgnored: true,
     });
   });
@@ -64,7 +64,7 @@ describe("classifyDroppedPaths", () => {
 describe("resolveFileDropEvent", () => {
   const video: DroppedPathsClassification = {
     kind: "open",
-    path: "/media/clip.mp4",
+    paths: ["/media/clip.mp4"],
     extraIgnored: false,
   };
 
@@ -77,7 +77,7 @@ describe("resolveFileDropEvent", () => {
       );
       expect(step.dragged).toEqual(video);
       expect(step.overlay).toBe(step.dragged);
-      expect(step.openPath).toBeNull();
+      expect(step.openPaths).toBeNull();
     });
 
     it("shows the unsupported state for a file that is not a video", () => {
@@ -87,7 +87,7 @@ describe("resolveFileDropEvent", () => {
         false,
       );
       expect(step.overlay).toEqual({ kind: "unsupported" });
-      expect(step.openPath).toBeNull();
+      expect(step.openPaths).toBeNull();
     });
 
     it("shows nothing while blocked, and still keeps the classification", () => {
@@ -98,7 +98,7 @@ describe("resolveFileDropEvent", () => {
       );
       expect(step.overlay).toBeNull();
       expect(step.dragged).toEqual(video);
-      expect(step.openPath).toBeNull();
+      expect(step.openPaths).toBeNull();
     });
   });
 
@@ -107,7 +107,7 @@ describe("resolveFileDropEvent", () => {
       const step = resolveFileDropEvent({ type: "over" }, video, false);
       expect(step.overlay).toBe(video);
       expect(step.dragged).toBe(video);
-      expect(step.openPath).toBeNull();
+      expect(step.openPaths).toBeNull();
     });
 
     it("shows the overlay once the block ends during the drag", () => {
@@ -136,7 +136,7 @@ describe("resolveFileDropEvent", () => {
   describe("leave", () => {
     it("hides the overlay and forgets the drag", () => {
       const step = resolveFileDropEvent({ type: "leave" }, video, false);
-      expect(step).toEqual({ dragged: null, overlay: null, openPath: null });
+      expect(step).toEqual({ dragged: null, overlay: null, openPaths: null });
     });
   });
 
@@ -150,17 +150,17 @@ describe("resolveFileDropEvent", () => {
       expect(step).toEqual({
         dragged: null,
         overlay: null,
-        openPath: "/media/clip.mp4",
+        openPaths: ["/media/clip.mp4"],
       });
     });
 
-    it("opens only the first video of several", () => {
+    it("adds every video of several", () => {
       const step = resolveFileDropEvent(
         { type: "drop", paths: ["/media/notes.txt", "/media/a.mov", "/media/b.mp4"] },
         null,
         false,
       );
-      expect(step.openPath).toBe("/media/a.mov");
+      expect(step.openPaths).toEqual(["/media/a.mov", "/media/b.mp4"]);
     });
 
     it("reads the paths of the drop, not the paths of the enter event", () => {
@@ -169,7 +169,7 @@ describe("resolveFileDropEvent", () => {
         video,
         false,
       );
-      expect(step.openPath).toBe("/media/other.mkv");
+      expect(step.openPaths).toEqual(["/media/other.mkv"]);
     });
 
     it("opens a video even when no enter event came first", () => {
@@ -178,7 +178,7 @@ describe("resolveFileDropEvent", () => {
         null,
         false,
       );
-      expect(step.openPath).toBe("/media/clip.mp4");
+      expect(step.openPaths).toEqual(["/media/clip.mp4"]);
     });
 
     it("opens nothing when no path is a video", () => {
@@ -187,7 +187,7 @@ describe("resolveFileDropEvent", () => {
         { kind: "unsupported" },
         false,
       );
-      expect(step).toEqual({ dragged: null, overlay: null, openPath: null });
+      expect(step).toEqual({ dragged: null, overlay: null, openPaths: null });
     });
 
     it("opens nothing while blocked, and still hides the overlay", () => {
@@ -196,7 +196,7 @@ describe("resolveFileDropEvent", () => {
         video,
         true,
       );
-      expect(step).toEqual({ dragged: null, overlay: null, openPath: null });
+      expect(step).toEqual({ dragged: null, overlay: null, openPaths: null });
     });
   });
 });

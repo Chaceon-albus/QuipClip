@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
-import { resolveTimecodeDisplay, usePlaybackStore } from "@/features/playback";
+import { type MediaStoreState } from "@/features/media";
+import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import { useTimelineStore, type TimelineStoreState } from "@/features/timeline";
 import { timecodePlaceholder, type TimecodeDisplay } from "@/lib/timecode";
@@ -14,6 +14,7 @@ import {
   type SegmentDurationTiming,
   type SegmentDurationValue,
 } from "./segmentDurationModel";
+import { useSequenceMediaStore, useSequencePlaybackStore } from "@/features/sequence";
 
 const selectProbe = (s: MediaStoreState) => s.media?.probe;
 const selectSegments = (s: TimelineStoreState) => s.segments;
@@ -81,7 +82,9 @@ function PendingSegmentDuration({
 }) {
   const { t } = useTranslation();
   const duration = useSettledDuration(
-    usePlaybackStore((s) => presentPendingSegmentDuration(pendingInPts, s, timing)),
+    useSequencePlaybackStore((s) =>
+      presentPendingSegmentDuration(pendingInPts, s, timing),
+    ),
   );
   if (duration === null) {
     return null;
@@ -110,7 +113,7 @@ export function SegmentDurationReadout({
   hasActiveSource: boolean;
 }) {
   const { t } = useTranslation();
-  const probe = useMediaStore(selectProbe);
+  const probe = useSequenceMediaStore(selectProbe);
   const segments = useTimelineStore(selectSegments);
   const sourceId = useTimelineStore(selectSourceId);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);

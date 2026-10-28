@@ -30,7 +30,7 @@ export function DropOverlay() {
     state === null
       ? null
       : supported
-        ? t("fileDrop.release")
+        ? t("fileDrop.release", { count: state.paths.length })
         : t("fileDrop.unsupported");
   const note =
     state?.kind === "open" && state.extraIgnored ? t("fileDrop.othersIgnored") : null;

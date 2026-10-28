@@ -27,7 +27,8 @@ import {
   type AnchorWaitEvent,
   type AnchorWaitPhase,
 } from "@/components/preview/anchorWait";
-import { playbackStore, type PlaybackStoreState } from "@/features/playback";
+import type { PlaybackStoreState } from "@/features/playback";
+import { sequencePlayback } from "@/features/sequence";
 import { timelineStore, type TimelineStoreState } from "@/features/timeline";
 import type { Pts } from "@/types/project";
 import type { SegmentEdge } from "./segmentEdges";
@@ -264,6 +265,9 @@ export function createSegmentTrimSession(
       fail();
       return;
     }
+    // The wait ends before the write: the write notifies the stores, and a listener that still
+    // waited would take that notification for the frame it waits for.
+    stopWaiting();
     state.trimSegmentEdge(committed.segmentId, committed.edge, pts);
     drop();
   };
@@ -441,8 +445,11 @@ export function createSegmentTrimSession(
   };
 }
 
-/** The session of the application, on the production stores. */
+/**
+ * The session of the application, on the production stores. It reads the playback of the
+ * sequence, so a trim keeps its virtual PTS when the edge crosses into another clip (ADR 052).
+ */
 export const segmentTrimSession: SegmentTrimSession = createSegmentTrimSession({
-  playback: playbackStore,
+  playback: sequencePlayback.store,
   timeline: timelineStore,
 });

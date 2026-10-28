@@ -459,9 +459,15 @@ export function createTimelineStore(
         next.clips.some((clip) => clip.id === next.pendingIn?.clipId)
           ? next.pendingIn
           : null;
+      const attachedClipId = nextAttachedClip(
+        state.clips,
+        next.clips,
+        state.attachedClipId,
+      );
       pushHistory();
       write({
         ...extra,
+        attachedClipId,
         clips: edited.clips,
         sequenceSegments: edited.sequenceSegments,
         pendingIn,
@@ -490,6 +496,11 @@ export function createTimelineStore(
           ? entry.pendingIn
           : null;
       write({
+        attachedClipId: nextAttachedClip(
+          state.clips,
+          entry.clips,
+          state.attachedClipId,
+        ),
         clips: entry.clips,
         sequenceSegments: entry.sequenceSegments,
         pendingIn,
@@ -908,6 +919,27 @@ export function createTimelineStore(
       },
     };
   });
+}
+
+/**
+ * The attached clip after the clips change (ADR 052): the same clip while it stays, else the clip
+ * that took its place, else the clip before it, and none on an empty sequence. A sequence that
+ * had no attached clip attaches its first clip.
+ */
+function nextAttachedClip(
+  before: readonly Clip[],
+  after: readonly Clip[],
+  attached: string | null,
+): string | null {
+  if (after.length === 0) {
+    return null;
+  }
+  if (attached !== null && after.some((clip) => clip.id === attached)) {
+    return attached;
+  }
+  const index =
+    attached === null ? -1 : before.findIndex((clip) => clip.id === attached);
+  return after[index < 0 ? 0 : Math.min(index, after.length - 1)]?.id ?? null;
 }
 
 /** The live segments of the truth, the input of a clip operation of `sequence.ts`. */

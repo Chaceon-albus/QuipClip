@@ -11,20 +11,19 @@
  */
 
 import { isSourceActive } from "@/components/layout/actionConditions";
-import { mediaStore } from "@/features/media";
-import { playbackStore } from "@/features/playback";
 import { findCurrentSegment, timelineStore } from "@/features/timeline";
 import type { Segment } from "@/types/project";
 import { planSegmentEdgeSeek, type SegmentEdge } from "./segmentEdges";
+import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
 
 /**
  * Seeks to the stored boundary that an edge names, under the condition of Shift+I and Shift+O
  * (`planSegmentEdgeSeek`).
  */
 export function seekToSegmentEdge(segment: Segment, edge: SegmentEdge): void {
-  const playback = playbackStore.getState();
+  const playback = sequencePlayback.store.getState();
   const hasActiveSource = isSourceActive(
-    mediaStore.getState().media !== null,
+    sequenceMediaStore.getState().media !== null,
     playback.isAttached,
     playback.isReady,
   );

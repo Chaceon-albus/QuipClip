@@ -1,16 +1,13 @@
 /**
- * Pure rules that decide whether a quit, or a replacement of the open video, loses work
- * (ADR 027).
+ * Pure rules that decide whether a quit, or Clear Timeline, loses work (ADR 027, ADR 052).
  *
  * Version 1 writes no project file, so the segments live only for the session. A quit loses
- * the segments and the pending In point of the open source, a live export, the exports that
- * wait in the queue, and an unsaved preset draft.
+ * the segments and the pending In point of the sequence, a live export, the exports that wait
+ * in the queue, and an unsaved preset draft.
  *
- * Opening another video keeps the segments, but it hides them: they belong to the source of
- * the open video, and the timeline shows only the segments of the active source. They come
- * back when the user opens that video again, so the replace dialog says that and does not
- * call them lost. The replacement does lose the pending In point, because a change of source
- * clears it.
+ * An import adds clips to the sequence and replaces nothing, so it asks nothing (ADR 052).
+ * Clear Timeline removes every clip and every segment. It is one edit, so Undo brings them
+ * back, but it still asks first when segments exist, as ADR 052 requires.
  *
  * The rules have no DOM, no React, no store and no Tauri runtime, so a test can run them in
  * node. They return catalog keys and values, and they do not call the i18n runtime. Each line
@@ -21,7 +18,6 @@
 import type { ExportQueueState, ExportStatus } from "@/features/export";
 import { isExportRunLive } from "@/features/export/runState";
 import { getActiveSourceSegmentEntries } from "@/features/timeline";
-import { isSameFilePath } from "@/lib/filePath";
 import type { Pts, Segment } from "@/types/project";
 
 /** The timeline fields that the rules read. */
@@ -34,7 +30,7 @@ export interface TimelineWorkInput {
   readonly pendingInPts: Pts | null;
 }
 
-/** Everything that the quit decision and the replace decision read. */
+/** Everything that the quit decision and the clear decision read. */
 export interface QuitGuardInput {
   readonly timeline: TimelineWorkInput;
   readonly exportStatus: ExportStatus;
@@ -45,8 +41,6 @@ export interface QuitGuardInput {
    * name can be empty, for a new preset with no name yet.
    */
   readonly unsavedPresetName: string | null;
-  /** The canonical path of the open video, as the import reported it, or null. */
-  readonly openMediaPath: string | null;
   /** The exports that a quit drops before they start (`countQueuedExports`). */
   readonly queuedExports: number;
 }
@@ -80,13 +74,13 @@ export interface QuitDecision {
   readonly loss: QuitLoss;
 }
 
-/** What opening another video would change now. */
-export interface ReplaceDecision {
-  /** True when the open must ask the user first. False opens the video at once. */
+/** What Clear Timeline would change now. */
+export interface ClearDecision {
+  /** True when the clear must ask the user first. False clears at once. */
   readonly ask: boolean;
-  /** The number of segments of the open source. The replacement hides them. */
+  /** The number of segments on the sequence. The clear removes them. */
   readonly segments: number;
-  /** True when the open source has a pending In point. The replacement clears it. */
+  /** True when the sequence has a pending In point. The clear removes it. */
   readonly pendingIn: boolean;
 }
 
@@ -161,26 +155,14 @@ export function decideQuit(input: QuitGuardInput): QuitDecision {
 }
 
 /**
- * Decides whether opening the file at `chosenPath` asks first.
- *
- * It asks when the open source has one or more segments, because they leave the timeline
- * (ADR 027). A pending In point alone does not ask: it is one mark, and the user sets it
- * again with one key. When the dialog asks, it also names the pending In point.
- *
- * Opening the file that is already open does not ask. The import then reports the same
- * revision, so the timeline keeps the same source with its segments and its pending In
- * point. When the file changed on disk, the import makes it a new source (ADR 010), and the
- * old segments no longer name its frames, so the dialog would have nothing true to say.
+ * Decides whether Clear Timeline asks first. It asks when the sequence has one or more segments
+ * (ADR 052). A pending In point alone does not ask: it is one mark, and the user sets it again
+ * with one key. When the dialog asks, it also names the pending In point.
  */
-export function decideReplace(
-  input: QuitGuardInput,
-  chosenPath: string,
-): ReplaceDecision {
+export function decideClear(input: QuitGuardInput): ClearDecision {
   const segments = countOpenSourceSegments(input.timeline);
   const pendingIn = hasPendingIn(input.timeline);
-  const sameFile =
-    input.openMediaPath !== null && isSameFilePath(input.openMediaPath, chosenPath);
-  return { ask: segments > 0 && !sameFile, segments, pendingIn };
+  return { ask: segments > 0, segments, pendingIn };
 }
 
 /** Presents the quit dialog. It lists only the lines that apply, in a fixed order. */
@@ -215,25 +197,22 @@ export function presentQuitPrompt(loss: QuitLoss): QuitGuardPromptView {
 }
 
 /**
- * Presents the dialog that asks before another video replaces the open one.
- *
- * The segments line says where the segments stay. The pending In line appears only when the
- * open source has one, and only that line names a loss, so the confirm button is destructive
- * only then.
+ * Presents the dialog that asks before Clear Timeline. The segments line says that Undo brings
+ * the segments back, and the pending In line appears only when one exists.
  */
-export function presentReplacePrompt(
-  change: Pick<ReplaceDecision, "segments" | "pendingIn">,
+export function presentClearPrompt(
+  change: Pick<ClearDecision, "segments" | "pendingIn">,
 ): QuitGuardPromptView {
   const lines: QuitGuardMessage[] = [
-    { key: "quitGuard.replace.segments", values: { count: change.segments } },
+    { key: "quitGuard.clear.segments", values: { count: change.segments } },
   ];
   if (change.pendingIn) {
-    lines.push({ key: "quitGuard.loss.pendingIn" });
+    lines.push({ key: "quitGuard.clear.pendingIn" });
   }
   return {
-    title: { key: "quitGuard.replace.title" },
+    title: { key: "quitGuard.clear.title" },
     lines,
-    confirm: { key: "quitGuard.replace.confirm" },
-    destructive: change.pendingIn,
+    confirm: { key: "quitGuard.clear.confirm" },
+    destructive: true,
   };
 }

@@ -7,7 +7,7 @@
 
 import { open as tauriOpen } from "@tauri-apps/plugin-dialog";
 import { mediaStore } from "./store";
-import { ImportMediaError, type ImportMediaResult } from "./types";
+import { ImportMediaError } from "./types";
 
 /**
  * Sensible video file extensions supported in the file picker.
@@ -59,9 +59,11 @@ export interface OpenMediaFileDialogOptions {
    */
   openDialog?: typeof tauriOpen;
   /**
-   * Import handler function. Defaults to `mediaStore.getState().importPath`.
+   * Import handler, called once for each selected file, in the order of the selection. The
+   * quit guard passes `requestOpen`, which adds each file as a clip of the sequence (ADR 052).
+   * Defaults to `mediaStore.getState().importPath`.
    */
-  importPath?: (path: string) => Promise<ImportMediaResult | null>;
+  importPath?: (path: string) => Promise<unknown>;
   /**
    * Error reporter function. Defaults to `mediaStore.getState().reportError`.
    */
@@ -84,20 +86,19 @@ export function isMediaFileDialogOpen(): boolean {
 }
 
 /**
- * Opens a native file dialog to select a single video file and triggers media import.
+ * Opens a native file dialog to select one or more video files and imports them (ADR 052).
  *
  * Requirements:
- * - Uses @tauri-apps/plugin-dialog open with multiple: false, directory: false, and localized video filter label.
- * - Cancel is a strict no-op (returns null without modifying store or throwing).
- * - A selected single path calls importPath exactly once.
+ * - Uses @tauri-apps/plugin-dialog open with multiple: true, directory: false, and localized video filter label.
+ * - Cancel is a strict no-op (returns without modifying store or throwing).
+ * - Each selected path calls importPath once, one after another, in the order of the selection.
  * - Handles dialog rejection without unhandled promises: reports ImportMediaError with code dialogFailed and no detail.
  *
  * @param options Configuration options including required localized filterName.
- * @returns The imported media result on success, or null on cancel/failure.
  */
 export async function openMediaFileDialog(
   options: OpenMediaFileDialogOptions,
-): Promise<ImportMediaResult | null> {
+): Promise<void> {
   const openDialogFn = options.openDialog ?? tauriOpen;
   const importPathFn = options.importPath ?? mediaStore.getState().importPath;
   const reportErrorFn = options.reportError ?? mediaStore.getState().reportError;
@@ -106,7 +107,7 @@ export async function openMediaFileDialog(
   openDialogCount += 1;
   try {
     selected = await openDialogFn({
-      multiple: false,
+      multiple: true,
       directory: false,
       filters: [
         {
@@ -121,28 +122,17 @@ export async function openMediaFileDialog(
         code: "dialogFailed",
       }),
     );
-    return null;
+    return;
   } finally {
     openDialogCount -= 1;
   }
 
   // Cancel or empty selection is a strict no-op
-  if (!selected) {
-    return null;
+  const paths = (Array.isArray(selected) ? selected : [selected]).filter(
+    (path): path is string => typeof path === "string" && path.trim().length > 0,
+  );
+  // One after another, so the files join the sequence in the order of the selection.
+  for (const path of paths) {
+    await importPathFn(path);
   }
-
-  if (typeof selected === "string" && selected.trim().length > 0) {
-    return await importPathFn(selected);
-  }
-
-  if (
-    Array.isArray(selected) &&
-    selected.length > 0 &&
-    typeof selected[0] === "string" &&
-    selected[0].trim().length > 0
-  ) {
-    return await importPathFn(selected[0]);
-  }
-
-  return null;
 }

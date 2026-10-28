@@ -16,12 +16,19 @@ import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import {
+  getGeneratedSourceId,
   getSourceRevisionKey,
   mediaStore,
-  useMediaStore,
   VIDEO_FILE_EXTENSIONS,
   type ImportMediaResult,
 } from "@/features/media";
+import {
+  attachedMediaStore,
+  useAttachedMediaStore,
+} from "@/features/sequence/attachedMedia";
+import { useSequenceMediaStore } from "@/features/sequence/media";
+import { sequencePlayback } from "@/features/sequence/playback";
+import { timelineStore } from "@/features/timeline";
 import {
   createVideoRefCallback,
   playbackStore,
@@ -362,9 +369,11 @@ function DecodeFailureReasonText({ reason }: { reason: DecodeFailureReason }) {
 
 export function PreviewPane() {
   const { t } = useTranslation();
-  const status = useMediaStore((s) => s.status);
-  const media = useMediaStore((s) => s.media);
-  const error = useMediaStore((s) => s.error);
+  // The media of the clip that the sequence attached (ADR 052). A switch of clip changes it, and
+  // the element below mounts again for the new source: the cold switch.
+  const status = useAttachedMediaStore((s) => s.status);
+  const media = useAttachedMediaStore((s) => s.media);
+  const error = useAttachedMediaStore((s) => s.error);
   // The loading indicators show only after a load has lasted SHORT_STATE_INDICATOR_DELAY_MS,
   // so a fast open shows no flash.
   const showLoading = useDelayedVisibility(
@@ -642,7 +651,7 @@ export function PreviewPane() {
         setElement: (node) => {
           videoRef.current = node;
         },
-        getSource: () => toPlaybackSource(mediaStore.getState().media),
+        getSource: () => toPlaybackSource(attachedMediaStore.getState().media),
         attach: (source, node) => playbackStore.getState().attach(source, node),
         detach: (sourceRevisionKey, node) =>
           playbackStore.getState().detach(sourceRevisionKey, node),
@@ -663,7 +672,7 @@ export function PreviewPane() {
       }
       // A MediaSource source starts its controller after the store attached the element, so
       // the first reports find the attachment (ADR 046).
-      const current = mediaStore.getState().media;
+      const current = attachedMediaStore.getState().media;
       const path = current === null ? null : previewPathOf(current);
       if (current !== null && path?.kind === "mediaSource") {
         const key = getSourceRevisionKey(current);
@@ -932,6 +941,15 @@ export function PreviewPane() {
     handleDecodeFailure(element, outcome.trigger);
   };
 
+  // The duration of the element of each source of the session, the last extent fallback of a
+  // clip on the sequence (ADR 007, ADR 052). The timeline keeps it after the attach changes.
+  const recordBrowserDuration = (element: HTMLVideoElement) => {
+    const sourceId = media === null ? null : getGeneratedSourceId(media);
+    if (sourceId !== null) {
+      timelineStore.getState().setBrowserDuration(sourceId, element.duration);
+    }
+  };
+
   // The ready path of a loaded element. `loadedmetadata` takes it at once when the element
   // reports a picture size. Otherwise the picture check takes it when a size arrives.
   const takeReadyPath = (element: HTMLVideoElement) => {
@@ -940,6 +958,7 @@ export function PreviewPane() {
     }
     syncReady(sourceRevisionKey, element);
     syncBrowserDuration(sourceRevisionKey, element);
+    recordBrowserDuration(element);
     syncBrowserTime(sourceRevisionKey, element);
   };
 
@@ -1026,6 +1045,15 @@ export function PreviewPane() {
     () => resolveTimecodeDisplay(timecodePreference, probe),
     [timecodePreference, probe],
   );
+  // The timecode row shows the position on the sequence (ADR 052): the virtual media of the
+  // sequence, which is the media of the one clip when there is one clip. The decode stall
+  // reports a position of the attached element, so it keeps the format of that clip.
+  const sequenceMedia = useSequenceMediaStore((s) => s.media);
+  const sequenceProbe = sequenceMedia?.probe;
+  const sequenceTimecodeDisplay = useMemo(
+    () => resolveTimecodeDisplay(timecodePreference, sequenceProbe),
+    [timecodePreference, sequenceProbe],
+  );
   const noMediaPlaceholder =
     timecodePreference === "frames"
       ? FRAME_TIMECODE_PLACEHOLDER
@@ -1050,12 +1078,12 @@ export function PreviewPane() {
     shownStall !== null ||
     shownMediaSourceNotices.length > 0;
 
-  const totalTimeDisplay = media
+  const totalTimeDisplay = sequenceMedia
     ? formatPreviewTotalDuration(
-        media.probe.approximateDurationSeconds,
-        media.probe.videoDurationTicks,
-        media.probe.videoTimeBase,
-        timecodeDisplay,
+        sequenceMedia.probe.approximateDurationSeconds,
+        sequenceMedia.probe.videoDurationTicks,
+        sequenceMedia.probe.videoTimeBase,
+        sequenceTimecodeDisplay,
       )
     : noMediaPlaceholder;
 
@@ -1170,12 +1198,20 @@ export function PreviewPane() {
                     }}
                     onPause={(e) => {
                       if (sourceGuard.isActive(sourceRevisionKey)) {
+                        // The element pauses before it ends, and the sequence needs to know that
+                        // it was playing then (ADR 052).
+                        sequencePlayback.notePause(e.currentTarget.ended);
                         syncPause(sourceRevisionKey, e.currentTarget);
                       }
                     }}
                     onEnded={(e) => {
                       if (sourceGuard.isActive(sourceRevisionKey)) {
-                        syncEnded(sourceRevisionKey, e.currentTarget);
+                        // At the end of a clip that another clip follows, playback goes on at
+                        // the first frame of that clip (ADR 052), and the end of this element is
+                        // no end of the playback.
+                        if (!sequencePlayback.handleEnded()) {
+                          syncEnded(sourceRevisionKey, e.currentTarget);
+                        }
                       }
                     }}
                     onTimeUpdate={handleTimeUpdate}
@@ -1200,6 +1236,7 @@ export function PreviewPane() {
                     onDurationChange={(e) => {
                       if (sourceGuard.isActive(sourceRevisionKey)) {
                         syncBrowserDuration(sourceRevisionKey, e.currentTarget);
+                        recordBrowserDuration(e.currentTarget);
                       }
                     }}
                     onLoadedMetadata={(e) => {
@@ -1398,10 +1435,10 @@ export function PreviewPane() {
           pane (PreviewTimecode). */}
       <div className="relative flex shrink-0 items-center justify-between px-1 pt-2">
         <div className="flex h-6 items-center font-mono text-[15px] leading-none font-medium tracking-tight tabular-nums">
-          {media ? (
+          {sequenceMedia ? (
             <PreviewTimecode
-              probe={media.probe}
-              display={timecodeDisplay}
+              probe={sequenceMedia.probe}
+              display={sequenceTimecodeDisplay}
               decodeFailed={decodeFailed}
             />
           ) : (

@@ -10,7 +10,8 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { StoreApi } from "zustand/vanilla";
-import { mediaStore, type MediaStoreState } from "@/features/media";
+import type { MediaStoreState } from "@/features/media";
+import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 
 /**
  * The product name. It is the `title` of the window in `tauri.conf.json` and in each platform
@@ -24,7 +25,7 @@ export function resolveWindowTitle(fileName: string | null | undefined): string 
 }
 
 export interface WindowTitleSyncOptions {
-  /** Defaults to the production `mediaStore`. */
+  /** Defaults to the production `attachedMediaStore`: the file of the clip that the preview shows. */
   store?: StoreApi<MediaStoreState>;
   /** Defaults to `(title) => getCurrentWindow().setTitle(title)`. */
   setTitle?: (title: string) => Promise<void>;
@@ -48,7 +49,7 @@ export function startWindowTitleSync(options: WindowTitleSyncOptions = {}): () =
   if (!(options.enabled ?? isTauri())) {
     return () => {};
   }
-  const store = options.store ?? mediaStore;
+  const store = options.store ?? attachedMediaStore;
   const setTitle =
     options.setTitle ?? ((title: string) => getCurrentWindow().setTitle(title));
 

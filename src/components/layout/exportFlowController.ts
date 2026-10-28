@@ -40,13 +40,13 @@ import {
 } from "@/features/export";
 import {
   isSameSourceRevision,
-  mediaStore,
   readSourceRevision,
   type MediaSourceRevisionDescriptor,
 } from "@/features/media";
 import { settingsStore } from "@/features/settings";
 import { setActivePreset } from "@/features/settings/presetDocument";
 import type { Settings } from "@/features/settings/types";
+import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 import { timelineStore } from "@/features/timeline";
 import type { Segment } from "@/types/project";
 
@@ -129,7 +129,7 @@ export interface ExportFlowControllerOptions {
   openSaveDialog?: (options: OpenExportSaveDialogOptions) => Promise<string | null>;
 
   /**
-   * Provider for current media state. Defaults to `mediaStore.getState().media`.
+   * Provider for current media state. Defaults to the media of the attached clip.
    *
    * `size` and `mtime` are part of the shape because the replacement check compares them:
    * they are the revision of the file the segments were marked against (ADR 010).
@@ -250,7 +250,7 @@ export class ExportFlowController {
     this.filterName = options.filterName;
     this.audioFilterName = options.audioFilterName;
     this.openSaveDialogFn = options.openSaveDialog ?? openExportSaveDialog;
-    this.getMediaFn = options.getMedia ?? (() => mediaStore.getState().media);
+    this.getMediaFn = options.getMedia ?? (() => attachedMediaStore.getState().media);
     this.readSourceRevisionFn = options.readSourceRevision ?? readSourceRevision;
     this.sourceRevisionTimeoutMs =
       options.sourceRevisionTimeoutMs ?? SOURCE_REVISION_CHECK_TIMEOUT_MS;
@@ -328,6 +328,15 @@ export class ExportFlowController {
 
     const activeSourceId = this.getSourceIdFn();
     const segments = this.getSegmentsFn();
+
+    // The export of several clips follows ADR 053 in a later step. Until then a sequence of
+    // several clips has no segments that this request can carry, because its virtual PTS do not
+    // name the frames of one file.
+    if (timelineStore.getState().clips.length > 1) {
+      this.reportErrorFn(new ExportError({ code: "noSegments" }));
+      this.setModalOpen(true);
+      return false;
+    }
 
     // The same match buildExportRequest and sourceRevisionStillMatches use
     if (
@@ -583,7 +592,7 @@ export async function runExportFlow(
 ): Promise<boolean> {
   // The default of the controller, read here because the guard compares the media path
   // before a controller exists.
-  const getMedia = options.getMedia ?? (() => mediaStore.getState().media);
+  const getMedia = options.getMedia ?? (() => attachedMediaStore.getState().media);
   const mediaPath = getMedia()?.path ?? null;
   if (openStep !== null && openStep.mediaPath === mediaPath) {
     return false;

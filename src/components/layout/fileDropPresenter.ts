@@ -1,5 +1,5 @@
 /**
- * Pure rules for opening a video that the user drops on the window.
+ * Pure rules for adding the videos that the user drops on the window (ADR 052).
  *
  * The Tauri web view takes native file drops (`dragDropEnabled`), so the page receives no
  * HTML5 drop event. The hook `useFileDropOpen` forwards each Tauri drag-drop event to
@@ -13,9 +13,9 @@ import { hasVideoFileExtension } from "@/features/media";
 export type DroppedPathsClassification =
   | {
       readonly kind: "open";
-      /** The first dropped path with a supported video extension. */
-      readonly path: string;
-      /** True when the drag carries more than one path, so the others are not opened. */
+      /** Every dropped path with a supported video extension, in the order of the drop. */
+      readonly paths: readonly string[];
+      /** True when the drag also carries paths that are not videos, so those are not added. */
       readonly extraIgnored: boolean;
     }
   | { readonly kind: "unsupported" };
@@ -36,30 +36,29 @@ export interface FileDropStep {
   readonly dragged: DroppedPathsClassification | null;
   /** What the overlay shows, or null when it is hidden. */
   readonly overlay: DroppedPathsClassification | null;
-  /** The file to open, or null. Only a `drop` event sets it. */
-  readonly openPath: string | null;
+  /** The files to add, or null. Only a `drop` event sets it. */
+  readonly openPaths: readonly string[] | null;
 }
 
 /**
- * Chooses the file that a drop opens.
+ * Chooses the files that a drop adds as clips (ADR 052).
  *
- * The result is `open` with the first path that has a supported video extension, even when
- * an earlier path is not a video. The result is `unsupported` when no path has a supported
- * extension, which includes a drag with no file paths at all. An empty or blank path is
- * never a candidate.
+ * The result is `open` with every path that has a supported video extension, in the order of
+ * the drop. The result is `unsupported` when no path has a supported extension, which includes a
+ * drag with no file paths at all. An empty or blank path is never a candidate.
  *
  * @param paths The dropped paths, in the order the operating system reports them.
  */
 export function classifyDroppedPaths(
   paths: readonly string[],
 ): DroppedPathsClassification {
-  const path = paths.find(
+  const videos = paths.filter(
     (candidate) => candidate.trim().length > 0 && hasVideoFileExtension(candidate),
   );
-  if (path === undefined) {
+  if (videos.length === 0) {
     return { kind: "unsupported" };
   }
-  return { kind: "open", path, extraIgnored: paths.length > 1 };
+  return { kind: "open", paths: videos, extraIgnored: videos.length < paths.length };
 }
 
 /**
@@ -69,7 +68,7 @@ export function classifyDroppedPaths(
  * - `over` shows the classification of the last `enter` again. The event carries no paths.
  *   It returns the same object, so a React state setter that receives it does not render.
  * - `leave` hides the overlay.
- * - `drop` hides the overlay and opens the chosen file. It classifies the paths of the drop
+ * - `drop` hides the overlay and adds the chosen files. It classifies the paths of the drop
  *   itself, because those are the paths the user released.
  *
  * While `blocked` is true, the event shows nothing and opens nothing. The caller sets it
@@ -90,20 +89,20 @@ export function resolveFileDropEvent(
       return {
         dragged: classification,
         overlay: blocked ? null : classification,
-        openPath: null,
+        openPaths: null,
       };
     }
     case "over":
-      return { dragged, overlay: blocked ? null : dragged, openPath: null };
+      return { dragged, overlay: blocked ? null : dragged, openPaths: null };
     case "leave":
-      return { dragged: null, overlay: null, openPath: null };
+      return { dragged: null, overlay: null, openPaths: null };
     case "drop": {
       const classification = classifyDroppedPaths(event.paths);
       return {
         dragged: null,
         overlay: null,
-        openPath:
-          !blocked && classification.kind === "open" ? classification.path : null,
+        openPaths:
+          !blocked && classification.kind === "open" ? classification.paths : null,
       };
     }
   }

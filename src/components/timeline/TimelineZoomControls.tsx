@@ -13,12 +13,13 @@ import {
 } from "@/components/layout/actionConditions";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
+import { type MediaStoreState } from "@/features/media";
 import {
   timelineViewportStore,
   useTimelineViewportStore,
   type TimelineViewportStoreState,
 } from "@/features/timeline";
+import { useSequenceMediaStore } from "@/features/sequence";
 
 const selectHasMedia = (state: MediaStoreState) => state.media !== null;
 const selectZoom = (state: TimelineViewportStoreState) => state.zoom;
@@ -97,7 +98,7 @@ function ZoomButton({ label, disabled, onClick, shortcut, children }: ZoomButton
 export function TimelineZoomControls() {
   const { t } = useTranslation();
   const shortcutOf = useShortcutLabels();
-  const hasMedia = useMediaStore(selectHasMedia);
+  const hasMedia = useSequenceMediaStore(selectHasMedia);
   const zoom = useTimelineViewportStore(selectZoom);
   const maxZoom = useTimelineViewportStore(selectMaxZoom);
 

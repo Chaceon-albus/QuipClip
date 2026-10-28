@@ -91,7 +91,7 @@ describe("Media Dialog Orchestration", () => {
   });
 
   describe("File Selection Flow", () => {
-    it("calls open with multiple: false, directory: false, and localized video filter", async () => {
+    it("calls open with multiple: true, directory: false, and localized video filter", async () => {
       const openDialogMock = vi.fn().mockResolvedValue("/media/clip.mp4");
       const fakeResult = createFakeMediaResult("clip.mp4");
       const importPathMock = vi.fn().mockResolvedValue(fakeResult);
@@ -106,7 +106,7 @@ describe("Media Dialog Orchestration", () => {
 
       expect(openDialogMock).toHaveBeenCalledTimes(1);
       expect(openDialogMock).toHaveBeenCalledWith({
-        multiple: false,
+        multiple: true,
         directory: false,
         filters: [
           {
@@ -119,11 +119,13 @@ describe("Media Dialog Orchestration", () => {
       expect(importPathMock).toHaveBeenCalledTimes(1);
       expect(importPathMock).toHaveBeenCalledWith("/media/clip.mp4");
       expect(reportErrorMock).not.toHaveBeenCalled();
-      expect(result).toEqual(fakeResult);
+      expect(result).toBeUndefined();
     });
 
-    it("handles array return value from dialog and imports the first path", async () => {
-      const openDialogMock = vi.fn().mockResolvedValue(["/media/array_clip.mp4"]);
+    it("imports each path of an array, in order", async () => {
+      const openDialogMock = vi
+        .fn()
+        .mockResolvedValue(["/media/array_clip.mp4", "/media/second.mp4"]);
       const fakeResult = createFakeMediaResult("array_clip.mp4");
       const importPathMock = vi.fn().mockResolvedValue(fakeResult);
 
@@ -134,7 +136,7 @@ describe("Media Dialog Orchestration", () => {
       });
 
       expect(openDialogMock).toHaveBeenCalledWith({
-        multiple: false,
+        multiple: true,
         directory: false,
         filters: [
           {
@@ -143,9 +145,11 @@ describe("Media Dialog Orchestration", () => {
           },
         ],
       });
-      expect(importPathMock).toHaveBeenCalledTimes(1);
-      expect(importPathMock).toHaveBeenCalledWith("/media/array_clip.mp4");
-      expect(result).toEqual(fakeResult);
+      expect(importPathMock.mock.calls).toEqual([
+        ["/media/array_clip.mp4"],
+        ["/media/second.mp4"],
+      ]);
+      expect(result).toBeUndefined();
     });
   });
 
@@ -162,7 +166,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
       expect(importPathMock).not.toHaveBeenCalled();
       expect(reportErrorMock).not.toHaveBeenCalled();
     });
@@ -179,7 +183,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(resArray).toBeNull();
+      expect(resArray).toBeUndefined();
       expect(importPathMock).not.toHaveBeenCalled();
       expect(reportErrorMock).not.toHaveBeenCalled();
 
@@ -191,7 +195,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(resString).toBeNull();
+      expect(resString).toBeUndefined();
       expect(importPathMock).not.toHaveBeenCalled();
       expect(reportErrorMock).not.toHaveBeenCalled();
     });
@@ -211,7 +215,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
       expect(importPathMock).not.toHaveBeenCalled();
       expect(reportErrorMock).toHaveBeenCalledTimes(1);
 
@@ -236,7 +240,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
       expect(reportErrorMock).toHaveBeenCalledTimes(1);
       const reported = reportErrorMock.mock.calls[0][0] as ImportMediaError;
       expect(reported).toBeInstanceOf(ImportMediaError);
@@ -255,7 +259,7 @@ describe("Media Dialog Orchestration", () => {
         reportError: reportErrorMock,
       });
 
-      expect(result).toBeNull();
+      expect(result).toBeUndefined();
       const reported = reportErrorMock.mock.calls[0][0] as ImportMediaError;
       expect(reported.code).toBe("dialogFailed");
       expect(reported.detail).toBeUndefined();

@@ -10,7 +10,6 @@ import {
   type ExportProgressEvent,
   type ExportSubmission,
 } from "@/features/export";
-import type { ImportMediaResult } from "@/features/media";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import type { Pts, Segment } from "@/types/project";
 import {
@@ -39,7 +38,6 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
     exportStatus: "idle",
     exportTracking: false,
     unsavedPresetName: null,
-    openMediaPath: "/videos/open.mp4",
     queuedExports: 0,
     ...overrides,
   };
@@ -53,8 +51,8 @@ const WITH_SEGMENTS = createInput({
   },
 });
 
-// The guard only passes the result through, so any object stands for it.
-const IMPORT_RESULT = { path: "/videos/next.mp4" } as unknown as ImportMediaResult;
+// The guard only passes the result through, so any value stands for it.
+const IMPORT_RESULT = ["clip-1"];
 
 /** A confirm_quit that never settles, as when the application ends before it answers. */
 function neverSettles(): Promise<unknown> {
@@ -64,19 +62,22 @@ function neverSettles(): Promise<unknown> {
 function setup(input: QuitGuardInput, overrides: QuitGuardDependencies = {}) {
   let current = input;
   const confirmQuit = vi.fn(neverSettles);
-  const importPath = vi.fn(() =>
-    Promise.resolve<ImportMediaResult | null>(IMPORT_RESULT),
+  const importPaths = vi.fn((_paths: readonly string[], _index: number | null) =>
+    Promise.resolve<unknown>(IMPORT_RESULT),
   );
+  const clearTimeline = vi.fn();
   const guard = createQuitGuard({
     readInput: () => current,
     confirmQuit,
-    importPath,
+    importPaths,
+    clearTimeline,
     ...overrides,
   });
   return {
     guard,
     confirmQuit,
-    importPath,
+    importPaths,
+    clearTimeline,
     setInput: (next: QuitGuardInput) => {
       current = next;
     },
@@ -192,19 +193,17 @@ describe("requestQuit", () => {
     expect(confirmQuit).toHaveBeenCalledTimes(2);
   });
 
-  it("takes the place of an open replace prompt, and the open resolves with null", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
+  it("takes the place of an open clear prompt, and nothing clears", () => {
+    const { guard, clearTimeline } = setup(WITH_SEGMENTS);
 
-    const opened = guard.requestOpen("/videos/next.mp4");
-    expect(guard.store.getState().prompt?.kind).toBe("replace");
+    guard.requestClear();
+    expect(guard.store.getState().prompt?.kind).toBe("clear");
 
     guard.requestQuit();
 
     expect(guard.store.getState().prompt?.kind).toBe("quit");
-    await expect(opened).resolves.toBeNull();
-    // The quit prompt must not open the video that the replace prompt was about.
     guard.cancel();
-    expect(importPath).not.toHaveBeenCalled();
+    expect(clearTimeline).not.toHaveBeenCalled();
   });
 });
 
@@ -244,119 +243,80 @@ describe("confirm and cancel of the quit prompt", () => {
   });
 
   it("does nothing on a confirm with no prompt open", () => {
-    const { guard, confirmQuit, importPath } = setup(WITH_SEGMENTS);
+    const { guard, confirmQuit, clearTimeline } = setup(WITH_SEGMENTS);
 
     guard.confirm();
 
     expect(confirmQuit).not.toHaveBeenCalled();
-    expect(importPath).not.toHaveBeenCalled();
+    expect(clearTimeline).not.toHaveBeenCalled();
   });
 });
 
 describe("requestOpen", () => {
-  it("opens at once when the open source has no segments", async () => {
-    const { guard, importPath } = setup(createInput());
+  it("imports at once, also when the sequence has segments (ADR 052)", async () => {
+    const { guard, importPaths } = setup(WITH_SEGMENTS);
 
     await expect(guard.requestOpen("/videos/next.mp4")).resolves.toBe(IMPORT_RESULT);
 
-    expect(importPath).toHaveBeenCalledWith("/videos/next.mp4");
+    expect(importPaths).toHaveBeenCalledWith(["/videos/next.mp4"], null);
     expect(guard.store.getState().prompt).toBeNull();
   });
 
-  it("asks first when the open source has segments, and opens the file on confirm", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
+  it("passes several paths and a junction through", async () => {
+    const { guard, importPaths } = setup(createInput());
 
-    const opened = guard.requestOpen("/videos/next.mp4");
+    await guard.requestOpen(["/videos/a.mp4", "/videos/b.mp4"], 2);
 
-    expect(importPath).not.toHaveBeenCalled();
+    expect(importPaths).toHaveBeenCalledWith(["/videos/a.mp4", "/videos/b.mp4"], 2);
+  });
+
+  it("imports nothing while a prompt is open", async () => {
+    const { guard, importPaths } = setup(WITH_SEGMENTS);
+
+    guard.requestClear();
+    await expect(guard.requestOpen("/videos/next.mp4")).resolves.toEqual([]);
+
+    expect(importPaths).not.toHaveBeenCalled();
+  });
+});
+
+describe("requestClear", () => {
+  it("clears at once when the sequence has no segment", () => {
+    const { guard, clearTimeline } = setup(createInput());
+
+    guard.requestClear();
+
+    expect(clearTimeline).toHaveBeenCalledTimes(1);
+    expect(guard.store.getState().prompt).toBeNull();
+  });
+
+  it("asks first when the sequence has segments, and clears on confirm", () => {
+    const { guard, clearTimeline } = setup(WITH_SEGMENTS);
+
+    guard.requestClear();
+    expect(clearTimeline).not.toHaveBeenCalled();
     expect(guard.store.getState().prompt).toEqual({
-      kind: "replace",
+      kind: "clear",
       segments: 2,
       pendingIn: false,
     });
 
     guard.confirm();
     guard.cancel();
-
-    await expect(opened).resolves.toBe(IMPORT_RESULT);
-    expect(importPath).toHaveBeenCalledTimes(1);
-    expect(importPath).toHaveBeenCalledWith("/videos/next.mp4");
+    expect(clearTimeline).toHaveBeenCalledTimes(1);
     expect(guard.store.getState().prompt).toBeNull();
   });
 
-  it("opens the file that is already open again with no question", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
+  it("clears nothing on cancel", () => {
+    const { guard, clearTimeline } = setup(WITH_SEGMENTS);
 
-    await expect(guard.requestOpen("/videos/open.mp4")).resolves.toBe(IMPORT_RESULT);
-
-    expect(importPath).toHaveBeenCalledWith("/videos/open.mp4");
-    expect(guard.store.getState().prompt).toBeNull();
-  });
-
-  it("carries the pending In point into the replace prompt", () => {
-    const { guard } = setup(
-      createInput({
-        timeline: {
-          sourceId: OPEN_SOURCE,
-          segments: [createSegment("a")],
-          pendingInPts: "500" as Pts,
-        },
-      }),
-    );
-
-    void guard.requestOpen("/videos/next.mp4");
-
-    expect(guard.store.getState().prompt).toEqual({
-      kind: "replace",
-      segments: 1,
-      pendingIn: true,
-    });
-  });
-
-  it("opens nothing on cancel and resolves with null", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
-
-    const opened = guard.requestOpen("/videos/next.mp4");
+    guard.requestClear();
     guard.cancel();
 
-    await expect(opened).resolves.toBeNull();
-    expect(importPath).not.toHaveBeenCalled();
+    expect(clearTimeline).not.toHaveBeenCalled();
     expect(guard.store.getState().prompt).toBeNull();
   });
-
-  it("resolves with null when the import rejects after a confirm", async () => {
-    const importPath = vi.fn(() => Promise.reject(new Error("import failed")));
-    const { guard } = setup(WITH_SEGMENTS, { importPath });
-
-    const opened = guard.requestOpen("/videos/next.mp4");
-    guard.confirm();
-
-    await expect(opened).resolves.toBeNull();
-  });
-
-  it("refuses a second request while a prompt is open", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
-
-    const first = guard.requestOpen("/videos/first.mp4");
-    await expect(guard.requestOpen("/videos/second.mp4")).resolves.toBeNull();
-
-    guard.confirm();
-    await expect(first).resolves.toBe(IMPORT_RESULT);
-    expect(importPath).toHaveBeenCalledTimes(1);
-    expect(importPath).toHaveBeenCalledWith("/videos/first.mp4");
-  });
-
-  it("refuses a request while the quit prompt is open", async () => {
-    const { guard, importPath } = setup(WITH_SEGMENTS);
-
-    guard.requestQuit();
-
-    await expect(guard.requestOpen("/videos/next.mp4")).resolves.toBeNull();
-    expect(importPath).not.toHaveBeenCalled();
-    expect(guard.store.getState().prompt?.kind).toBe("quit");
-  });
 });
-
 describe("the quit prompt for a live export after a failed Stop request", () => {
   /**
    * A real export store with a Stop that waits for the run id of its start. After the answer

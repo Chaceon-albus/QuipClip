@@ -5,18 +5,16 @@ import type { Pts, Segment } from "@/types/project";
 import {
   countOpenSourceSegments,
   countQueuedExports,
+  decideClear,
   decideQuit,
-  decideReplace,
+  presentClearPrompt,
   presentQuitPrompt,
-  presentReplacePrompt,
   type QuitGuardInput,
   type TimelineWorkInput,
 } from "./quitGuard";
 
 const OPEN_SOURCE = "s-open";
 const OTHER_SOURCE = "s-other";
-const OPEN_PATH = "/Users/me/Movies/open.mp4";
-const OTHER_PATH = "/Users/me/Movies/other.mp4";
 
 function createSegment(id: string, sourceId: string): Segment {
   return { id, sourceId, inPts: "0" as Pts, outPts: "1000" as Pts };
@@ -32,7 +30,6 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
     exportStatus: "idle",
     exportTracking: false,
     unsavedPresetName: null,
-    openMediaPath: OPEN_PATH,
     queuedExports: 0,
     ...overrides,
   };
@@ -163,7 +160,6 @@ describe("decideQuit", () => {
       exportStatus: "running",
       exportTracking: true,
       unsavedPresetName: "Archive",
-      openMediaPath: OPEN_PATH,
       queuedExports: 2,
     });
     expect(decision).toEqual({
@@ -179,78 +175,40 @@ describe("decideQuit", () => {
   });
 });
 
-describe("decideReplace", () => {
+describe("decideClear", () => {
   const WITH_SEGMENTS = createTimeline({
     segments: [createSegment("a", OPEN_SOURCE), createSegment("b", OPEN_SOURCE)],
   });
 
-  it("asks when the open source has segments", () => {
-    expect(decideReplace(createInput({ timeline: WITH_SEGMENTS }), OTHER_PATH)).toEqual(
-      { ask: true, segments: 2, pendingIn: false },
-    );
-  });
-
-  it("reports the pending In point that the replacement clears", () => {
+  it("asks when the sequence has segments, and names a pending In point", () => {
+    expect(decideClear(createInput({ timeline: WITH_SEGMENTS }))).toEqual({
+      ask: true,
+      segments: 2,
+      pendingIn: false,
+    });
     expect(
-      decideReplace(
+      decideClear(
         createInput({ timeline: { ...WITH_SEGMENTS, pendingInPts: "500" as Pts } }),
-        OTHER_PATH,
       ),
     ).toEqual({ ask: true, segments: 2, pendingIn: true });
   });
 
-  it("opens at once when the open source has no segments", () => {
-    expect(decideReplace(createInput(), OTHER_PATH)).toEqual({
+  it("clears at once with no segment, also with a pending In point alone", () => {
+    expect(decideClear(createInput())).toEqual({
       ask: false,
       segments: 0,
       pendingIn: false,
     });
     expect(
-      decideReplace(
+      decideClear(
+        createInput({ timeline: createTimeline({ pendingInPts: "500" as Pts }) }),
+      ),
+    ).toEqual({ ask: false, segments: 0, pendingIn: true });
+    expect(
+      decideClear(
         createInput({
           timeline: createTimeline({ segments: [createSegment("a", OTHER_SOURCE)] }),
         }),
-        OTHER_PATH,
-      ).ask,
-    ).toBe(false);
-  });
-
-  it("opens at once when no video is open", () => {
-    expect(
-      decideReplace(
-        createInput({
-          timeline: createTimeline({
-            sourceId: null,
-            segments: [createSegment("a", OPEN_SOURCE)],
-          }),
-          openMediaPath: null,
-        }),
-        OTHER_PATH,
-      ).ask,
-    ).toBe(false);
-  });
-
-  it("does not ask for a pending In point alone", () => {
-    expect(
-      decideReplace(
-        createInput({ timeline: createTimeline({ pendingInPts: "500" as Pts }) }),
-        OTHER_PATH,
-      ),
-    ).toEqual({ ask: false, segments: 0, pendingIn: true });
-  });
-
-  it("does not ask when the chosen file is the open file", () => {
-    expect(decideReplace(createInput({ timeline: WITH_SEGMENTS }), OPEN_PATH).ask).toBe(
-      false,
-    );
-    // The canonical Windows path of the import against the path of a file dialog.
-    expect(
-      decideReplace(
-        createInput({
-          timeline: WITH_SEGMENTS,
-          openMediaPath: "\\\\?\\C:\\Videos\\Clip.MP4",
-        }),
-        "C:\\Videos\\clip.mp4",
       ).ask,
     ).toBe(false);
   });
@@ -358,26 +316,21 @@ describe("presentQuitPrompt", () => {
   });
 });
 
-describe("presentReplacePrompt", () => {
-  it("says that the segments stay with the open video, with a neutral confirm", () => {
-    expect(presentReplacePrompt({ segments: 2, pendingIn: false })).toEqual({
-      title: { key: "quitGuard.replace.title" },
-      lines: [{ key: "quitGuard.replace.segments", values: { count: 2 } }],
-      confirm: { key: "quitGuard.replace.confirm" },
-      destructive: false,
+describe("presentClearPrompt", () => {
+  it("says that Undo brings the segments back, with a destructive confirm", () => {
+    expect(presentClearPrompt({ segments: 2, pendingIn: false })).toEqual({
+      title: { key: "quitGuard.clear.title" },
+      lines: [{ key: "quitGuard.clear.segments", values: { count: 2 } }],
+      confirm: { key: "quitGuard.clear.confirm" },
+      destructive: true,
     });
   });
 
-  it("names the pending In point as a loss, with a destructive confirm", () => {
-    expect(presentReplacePrompt({ segments: 1, pendingIn: true })).toEqual({
-      title: { key: "quitGuard.replace.title" },
-      lines: [
-        { key: "quitGuard.replace.segments", values: { count: 1 } },
-        { key: "quitGuard.loss.pendingIn" },
-      ],
-      confirm: { key: "quitGuard.replace.confirm" },
-      destructive: true,
-    });
+  it("names the pending In point too", () => {
+    expect(presentClearPrompt({ segments: 1, pendingIn: true }).lines).toEqual([
+      { key: "quitGuard.clear.segments", values: { count: 1 } },
+      { key: "quitGuard.clear.pendingIn" },
+    ]);
   });
 });
 
@@ -404,12 +357,12 @@ describe("quit guard catalog messages", () => {
     expect(t("quitGuard.loss.presetUnnamed")).toBe(
       "The unsaved changes to the preset will be lost.",
     );
-    expect(t("quitGuard.replace.title")).toBe("Replace the open video?");
-    expect(t("quitGuard.replace.segments", { count: 1 })).toBe(
-      "The marked segment stays with the open video. Open that video again to see it.",
+    expect(t("quitGuard.clear.title")).toBe("Clear the timeline?");
+    expect(t("quitGuard.clear.segments", { count: 1 })).toBe(
+      "The marked segment leaves the timeline. Undo brings it back.",
     );
-    expect(t("quitGuard.replace.segments", { count: 3 })).toBe(
-      "The 3 marked segments stay with the open video. Open that video again to see them.",
+    expect(t("quitGuard.clear.segments", { count: 3 })).toBe(
+      "The 3 marked segments leave the timeline. Undo brings them back.",
     );
   });
 
@@ -434,8 +387,8 @@ describe("quit guard catalog messages", () => {
       "对“Archive”的未保存更改将丢失。",
     );
     expect(t("quitGuard.loss.presetUnnamed")).toBe("预设的未保存更改将丢失。");
-    expect(t("quitGuard.replace.segments", { count: 1 })).toBe(
-      "已标记的 1 个片段会保留在当前视频中，重新打开该视频即可看到。",
+    expect(t("quitGuard.clear.segments", { count: 1 })).toBe(
+      "已标记的 1 个片段将从时间轴上移除。撤销可以恢复。",
     );
     expect(t("quitGuard.quit.confirm")).toBe("退出");
   });

@@ -16,10 +16,10 @@ import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { startExportQueueRecovery } from "@/features/export/recovery";
-import { usePlaybackStore } from "@/features/playback";
 import { usePreferenceSync } from "@/features/settings/preferenceSync";
 import { useSettingsChangedSync } from "@/features/settings/settingsSync";
 import { useSettingsWindowDraftMirror } from "@/features/settings/settingsWindowDraft";
+import { useSequencePlaybackStore } from "@/features/sequence";
 
 export function AppShell() {
   useKeyboardShortcuts();
@@ -48,10 +48,10 @@ export function AppShell() {
   // Name the open file in the native window title, which the system shows outside the window.
   useEffect(() => startWindowTitleSync(), []);
 
-  const runtimeBrowserDurationSeconds = usePlaybackStore(
+  const runtimeBrowserDurationSeconds = useSequencePlaybackStore(
     (state) => state.runtimeBrowserDurationSeconds,
   );
-  const seekApproximate = usePlaybackStore((state) => state.seekApproximate);
+  const seekApproximate = useSequencePlaybackStore((state) => state.seekApproximate);
   const previewSlotRef = useRef<HTMLDivElement | null>(null);
 
   return (

@@ -8,6 +8,7 @@
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { importMedia } from "./client";
+import { getGeneratedSourceId } from "./sourceIdentity";
 import type {
   ImportMediaError,
   ImportMediaResult,
@@ -42,6 +43,7 @@ export function createMediaStore(
   return createStore<MediaStoreState>()((set) => ({
     status: initialState?.status ?? "idle",
     media: initialState?.media ?? null,
+    sources: initialState?.sources ?? {},
     error: initialState?.error ?? null,
 
     reset: () => {
@@ -50,6 +52,7 @@ export function createMediaStore(
       set({
         status: "idle",
         media: null,
+        sources: {},
         error: null,
       });
     },
@@ -97,11 +100,13 @@ export function createMediaStore(
           return null;
         }
 
-        set({
+        const id = getGeneratedSourceId(result);
+        set((state) => ({
           status: "ready",
           media: result,
+          sources: id === null ? state.sources : { ...state.sources, [id]: result },
           error: null,
-        });
+        }));
 
         return result;
       } catch (err) {

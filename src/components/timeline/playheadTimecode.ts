@@ -1,12 +1,9 @@
 import { useMemo } from "react";
 import { formatPreviewCurrentTime } from "@/components/preview/previewFrame";
-import {
-  usePlaybackStore,
-  type PlaybackState,
-  type PlaybackStoreState,
-} from "@/features/playback";
+import { type PlaybackState, type PlaybackStoreState } from "@/features/playback";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
+import { useSequencePlaybackStore } from "@/features/sequence";
 
 /** The playback facts that the displayed position reads. */
 export type PlayheadTimecodeState = Pick<
@@ -74,10 +71,10 @@ export function usePlayheadTimecode(
   videoTimeBase: Rational | null | undefined,
   display: TimecodeDisplay,
 ): string {
-  const seekTargetSeconds = usePlaybackStore(selectSeekTargetSeconds);
-  const presentedFrame = usePlaybackStore(selectPresentedFrame);
-  const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
-  const approximateBrowserTimeSeconds = usePlaybackStore(
+  const seekTargetSeconds = useSequencePlaybackStore(selectSeekTargetSeconds);
+  const presentedFrame = useSequencePlaybackStore(selectPresentedFrame);
+  const calibrationStatus = useSequencePlaybackStore(selectCalibrationStatus);
+  const approximateBrowserTimeSeconds = useSequencePlaybackStore(
     selectApproximateBrowserTimeSeconds,
   );
   return useMemo(

@@ -1,8 +1,7 @@
 import { useEffect } from "react";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
-import { mediaStore, openMediaFileDialog } from "@/features/media";
-import { playbackStore } from "@/features/playback";
+import { openMediaFileDialog } from "@/features/media";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
@@ -22,6 +21,7 @@ import {
   type ShortcutCommand,
   type ShortcutSnapshot,
 } from "./shortcutCommands";
+import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
 
 /**
  * One read of each store, so the condition that a plan tests and the call that runs after it
@@ -30,8 +30,8 @@ import {
  */
 export function readShortcutSnapshot(): ShortcutSnapshot {
   return {
-    probe: mediaStore.getState().media?.probe ?? null,
-    playback: playbackStore.getState(),
+    probe: sequenceMediaStore.getState().media?.probe ?? null,
+    playback: sequencePlayback.store.getState(),
     timeline: timelineStore.getState(),
     viewport: timelineViewportStore.getState(),
     isTrimDragging: segmentTrimSession.isDragging(),
@@ -44,7 +44,7 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
  * an action does the same thing from a key and from a menu item.
  */
 export function runShortcutCommand(command: ShortcutCommand): void {
-  const playback = playbackStore.getState();
+  const playback = sequencePlayback.store.getState();
   const timeline = timelineStore.getState();
   switch (command.kind) {
     case "togglePlayback":

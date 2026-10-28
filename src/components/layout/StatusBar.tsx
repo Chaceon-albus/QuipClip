@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFfmpegStore } from "@/features/ffmpeg";
-import { useMediaStore } from "@/features/media";
+import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { getResolvedLanguage } from "@/i18n";
@@ -30,7 +30,7 @@ const itemSeparatorClass = "h-4 bg-border data-vertical:self-center";
 
 export function StatusBar() {
   const { t, i18n } = useTranslation();
-  const media = useMediaStore((state) => state.media);
+  const media = useAttachedMediaStore((state) => state.media);
   // The key name comes from the binding table (ADR 026).
   const shortcutOf = useShortcutLabels();
   const settingsShortcut = shortcutOf("openSettings");
