@@ -180,6 +180,28 @@ applies gives the inputs:
 A command longer than the budget does not start. The export then fails with `ffmpegSpawnFailed`
 and a detail. The test of the budget makes this case impossible.
 
+(Changed on 2026-10-28.) The implementation applies the rules once, to all the pieces, and not
+once for each process. `piece_reads_audio` is decided for each source, so an input holds pieces
+that all read audio or none that does. The audio process of ADR 043 opens the inputs whose pieces
+read audio, with the same seeks and the same FLV slices as the encoder. So when an export has
+more than `MAX_EXPORT_INPUTS` pieces but fewer audio pieces, the audio process also uses runs.
+
+(Changed on 2026-10-28.) The measurement set `MAX_EXPORT_INPUTS` to 85. In the widest command,
+each FLV input costs 345 bytes. With 85 inputs the encoder needs 31,448 bytes and the audio
+process 29,531 bytes. With 86 inputs the encoder needs 31,793 bytes, which is above 31,743. The
+audio process opens a subset of the inputs of the encoder, with shorter fixed arguments, so the
+encoder sets the limit.
+
+(Changed on 2026-10-28.) Preparation runs in two passes, so that the plan knows the inputs before
+the FLV step. The first pass runs the revision check, the re-probe and the correction of the
+audio of each source. Then the plan assigns the inputs. The second pass runs the FLV input and
+the read of the audio gaps of each source. When two sources each have a failure, the reported
+code can now come from the later source.
+
+(Changed on 2026-10-28.) Before this record, 86 to 91 pieces that overlap, that repeat one range,
+or that run backwards exported with one input each. They need more than 85 runs, so they now
+fail with `piecesOutOfOrder`.
+
 ### The limits and their order
 
 - An export joins at most 256 pieces (`MAX_EXPORT_PIECES`). A segment that crosses a junction
@@ -205,6 +227,10 @@ command can name only one head ends. Each FLV source gets the FLV input of ADR 0
 - The head is the head of the earliest slice that starts an input of that source.
 - The slice check of ADR 046 decodes only the slices that start an input. So it runs at most
   `MAX_EXPORT_INPUTS` `ffprobe` processes in its one time limit, as before.
+- (Added on 2026-10-28.) The read of the audio gaps still opens one slice for each group of
+  touching pieces, and the slice check no longer decodes each of those slices. The reader of
+  ADR 046 still refuses a file with a known change of the decoder configuration. A change that
+  the reader misses gives the same decode in the export, which reads the same bytes.
 - The cache of ADR 046 keeps the keyframe table. It no longer holds `head.flv` for the export.
 - When a head cannot be written, that source uses the input seek, as before.
 

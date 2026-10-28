@@ -304,8 +304,8 @@ keeps the raw source PTS visible to the filter graph on every input. The rendere
 input to `inPts * videoTimeBase - formatStartTime - SEEK_MARGIN_SECONDS`, clamps that value
 at zero, and omits `-ss` when the result is zero. Each segment chain cuts with `trim` and
 `atrim` on those raw PTS values. Each audio chain pins its input link to the source sample
-rate with an `aformat` before `atrim`. Under the second shape below, that pin is emitted once,
-in front of `asplit`, because the chains share one input link. Each chain then resets the
+rate with an `aformat` before `atrim`. When the pieces of a run share one input, that pin is
+emitted once, in front of `asplit`, because the chains share one input link. Each chain then resets the
 timestamps to its In point, fills a late start or a gap of the audio with silence, and
 normalizes the streams (ADR 014 measurement 20). The fill holds its silence in memory. So a segment
 that starts long before the first audio sample gets a silence prefix, which streams all of that
@@ -345,9 +345,9 @@ stream holds no packets. An export with video then generates the silence of each
 `anullsrc` and reads no input for the audio. The plan refuses an audio-only export with
 `sourceHasNoAudio` (measurement 26).
 
-The renderer has two graph shapes, and each process chooses its own. It opens one input for each
-segment while the assembled command line stays inside the platform budget. It otherwise opens one
-input, seeks once, and divides that input with `split` or `asplit`.
+The plan chooses the inputs from the pieces (ADR 055). Up to 85 pieces get one input each.
+More pieces form runs in source order: each run opens one input, seeks once, and divides that
+input with `split` or `asplit`. One assignment serves both processes.
 
 The final `aformat` of each audio chain takes its sample rate and its channel layout from the
 preset (ADR 023). The value `source` selects the rate of the source stream, or omits the
