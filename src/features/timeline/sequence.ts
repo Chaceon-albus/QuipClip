@@ -15,7 +15,12 @@
  * (ADR 002).
  */
 
-import { isValidApproximateDuration, ptsToBigInt, tickCountToBigInt } from "@/lib/time";
+import {
+  isPtsString,
+  isValidApproximateDuration,
+  ptsToBigInt,
+  tickCountToBigInt,
+} from "@/lib/time";
 import type {
   Clip,
   EditPoint,
@@ -88,26 +93,37 @@ function ticksToRational(ticks: bigint, timeBase: Rational): BigIntRational {
  * time base is not positive, or the source has no `videoStartPts`. Such a clip holds no edit point,
  * and no segment can cross it.
  *
- * An end that is not after the start is metadata that cannot be right, and it reads as unknown.
+ * An end that is not after the start, or that does not parse, is metadata that cannot be right,
+ * and it reads as unknown. A start that does not parse gives no range.
  */
 export function clipRange(clip: Clip, sources: SequenceSources): ClipRange | null {
   const source = sources.get(clip.sourceId);
   if (
     !source ||
     source.videoStartPts === null ||
+    !isPtsString(source.videoStartPts) ||
     !isPositiveTimeBase(source.videoTimeBase)
   ) {
     return null;
   }
   const end = source.videoEndPts;
-  if (end !== null && ptsToBigInt(end) <= ptsToBigInt(source.videoStartPts)) {
+  if (
+    end !== null &&
+    (!isPtsString(end) || ptsToBigInt(end) <= ptsToBigInt(source.videoStartPts))
+  ) {
     return { startPts: source.videoStartPts, endPts: null };
   }
   return { startPts: source.videoStartPts, endPts: end };
 }
 
-/** True when `pts` lies in `[start, end]`, with no upper bound when the end is unknown. */
+/**
+ * True when `pts` lies in `[start, end]`, with no upper bound when the end is unknown. A PTS that
+ * does not parse lies nowhere.
+ */
 function isInsideRange(pts: Pts, range: ClipRange): boolean {
+  if (!isPtsString(pts)) {
+    return false;
+  }
   const value = ptsToBigInt(pts);
   return (
     value >= ptsToBigInt(range.startPts) &&
@@ -462,13 +478,17 @@ export function canonicalOut(
  * - Every clip from the In clip up to, but not including, the Out clip has a known end, and every
  *   clip that the segment crosses has a range.
  *
- * An unknown end does not bound a boundary on that clip.
+ * An unknown end does not bound a boundary on that clip. A boundary that does not parse makes the
+ * segment not valid.
  */
 export function isValidSequenceSegment(
   segment: SequenceSegment,
   clips: readonly Clip[],
   sources: SequenceSources,
 ): boolean {
+  if (!isPtsString(segment.inPts) || !isPtsString(segment.outPts)) {
+    return false;
+  }
   const indexes = clipIndexes(clips);
   const inIndex = indexes.get(segment.inClipId);
   const outIndex = indexes.get(segment.outClipId);

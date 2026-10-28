@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { Pts } from "@/types/project";
+import type { Clip, Pts, Segment } from "@/types/project";
 import { findCurrentSegment } from "./math";
-import { createTimelineStore } from "./store";
+import {
+  createTimelineStore,
+  singleClipIdOf,
+  type TimelineStoreDependencies,
+} from "./store";
+import type { SequenceSource } from "./sequence";
+import { TEST_SOURCE } from "./storeTestSupport";
+import { toVirtualPts } from "./virtualTime";
 
 const pts = (value: string) => value as Pts;
 
@@ -12,8 +19,78 @@ function createStore() {
 
 type Store = ReturnType<typeof createStore>;
 
-/** Reads the segments as plain comparable records, in project array order. */
+/** An initial state in the one-source shape of ADR 007, as these tests were written. */
+interface LegacyInitialState {
+  readonly sourceId?: string | null;
+  readonly sourceRevisionKey?: string | null;
+  readonly segments?: readonly Segment[];
+  readonly pendingInPts?: Pts | null;
+  readonly currentSegmentId?: string | null;
+  readonly selectedSegmentIds?: readonly string[];
+}
+
+/**
+ * A store from an initial state in the one-source shape. The active source is the one clip of
+ * the sequence, and each segment lies on the clip of its own source. A segment of another source
+ * is therefore not on the sequence, as a segment of an inactive source was not active.
+ */
+function createLegacyStore(
+  dependencies: TimelineStoreDependencies,
+  legacy: LegacyInitialState = {},
+): ReturnType<typeof createTimelineStore> {
+  const active = legacy.sourceId ?? null;
+  const sourceIds = new Set<string>(
+    [active, ...(legacy.segments ?? []).map((segment) => segment.sourceId)].filter(
+      (id): id is string => id !== null,
+    ),
+  );
+  const activeClipId = active === null ? null : singleClipIdOf(active);
+  return createTimelineStore(dependencies, {
+    clips: active === null ? [] : [{ id: singleClipIdOf(active), sourceId: active }],
+    sequenceSources: Object.fromEntries(
+      [...sourceIds].map((id) => [id, { ...TEST_SOURCE, id }]),
+    ),
+    sequenceSegments: (legacy.segments ?? []).map((segment) => ({
+      id: segment.id,
+      inClipId: singleClipIdOf(segment.sourceId),
+      inPts: segment.inPts,
+      outClipId: singleClipIdOf(segment.sourceId),
+      outPts: segment.outPts,
+    })),
+    pendingIn:
+      legacy.pendingInPts == null || activeClipId === null
+        ? null
+        : { clipId: activeClipId, pts: legacy.pendingInPts },
+    attachedClipId: activeClipId,
+    generation: active === null ? 0 : 1,
+    selectedSegmentIds: legacy.selectedSegmentIds,
+    currentSegmentId: legacy.currentSegmentId ?? null,
+  });
+}
+
+/**
+ * Makes the one clip of a source with the ID `sourceId` the sequence (ADR 052). A source of the
+ * widest range keeps every PTS of these tests inside its clip. The revision key of ADR 007 is
+ * part of the source ID now: a changed file is a new source (ADR 010).
+ */
+function show(store: Store, sourceId: string | null) {
+  store
+    .getState()
+    .showOnlySource(sourceId === null ? null : { ...TEST_SOURCE, id: sourceId });
+}
+
+/**
+ * Reads the anchored segments as plain comparable records, in project array order. A segment of
+ * a source that is not on the sequence stays in this list, in its place (ADR 052).
+ */
 function shape(store: Store) {
+  return store
+    .getState()
+    .sequenceSegments.map(({ id, inPts, outPts }) => ({ id, inPts, outPts }));
+}
+
+/** Reads the segments on the sequence, as the interface sees them. */
+function visible(store: Store) {
   return store
     .getState()
     .segments.map(({ id, inPts, outPts }) => ({ id, inPts, outPts }));
@@ -44,7 +121,7 @@ function expectOneInProgress(store: Store) {
 /** Makes three finished segments, `segment-1` to `segment-3`, with nothing selected. */
 function threeSegments(): Store {
   const store = createStore();
-  store.getState().setSource("source-1", "revision-1");
+  show(store, "source-1");
   for (const [inPts, outPts] of [
     ["0", "10"],
     ["20", "30"],
@@ -57,86 +134,92 @@ function threeSegments(): Store {
   return store;
 }
 
-describe("timeline store source ownership", () => {
-  it("keeps stable source ID separate from the revision key", () => {
+describe("timeline store source ownership (ADR 052)", () => {
+  it("shows the one clip of a source as the virtual source of a new generation", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "/clip.mov:10:20");
+    show(store, "source-1");
     expect(store.getState()).toMatchObject({
-      sourceId: "source-1",
-      sourceRevisionKey: "/clip.mov:10:20",
+      clips: [{ id: singleClipIdOf("source-1"), sourceId: "source-1" }],
+      attachedClipId: singleClipIdOf("source-1"),
+      sourceId: "sequence:1",
+      sourceRevisionKey: "sequence:1",
     });
+    // The same source again keeps its clip, its generation and its history. Only its facts
+    // refresh.
+    const before = store.getState();
+    show(store, "source-1");
+    expect(store.getState().clips).toBe(before.clips);
+    expect(store.getState().sourceId).toBe(before.sourceId);
+    const facts = { ...TEST_SOURCE, id: "source-1", videoEndPts: pts("90000") };
+    store.getState().showOnlySource(facts);
+    expect(store.getState().sequenceSources["source-1"]).toBe(facts);
+    expect(store.getState().clips).toBe(before.clips);
   });
 
-  it("preserves canonical edits and history when the source revision changes", () => {
+  it("keeps the segments of a replaced file and brings them back with its clip", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("-10"));
     store.getState().markOut(pts("20"));
-    // Without this the next Mark In would adjust the completed segment instead.
     store.getState().finishSegment(null);
     store.getState().markIn(pts("30"));
-    store.getState().setSource("source-1", "revision-1");
-    expect(store.getState().segments).toHaveLength(1);
-    expect(store.getState().pendingInPts).toBe("30");
 
-    store.getState().setSource("source-1", "revision-2");
+    // Another file (or a changed file, which is a new source) replaces the open one (ADR 027).
+    show(store, "source-2");
     expect(store.getState()).toMatchObject({
-      sourceId: "source-1",
-      sourceRevisionKey: "revision-2",
-      segments: [
-        expect.objectContaining({ sourceId: "source-1", inPts: "-10", outPts: "20" }),
-      ],
+      sourceId: "sequence:2",
+      segments: [],
       pendingInPts: null,
-      canUndo: true,
+      canUndo: false,
       canRedo: false,
     });
-    store.getState().undo();
-    expect(store.getState().segments).toEqual([]);
+    expect(store.getState().sequenceSegments).toHaveLength(1);
+
+    show(store, "source-1");
+    expect(store.getState()).toMatchObject({
+      sourceId: "sequence:3",
+      segments: [
+        expect.objectContaining({ sourceId: "sequence:3", inPts: "-10", outPts: "20" }),
+      ],
+      pendingInPts: null,
+    });
   });
 
-  it("preserves ordered segments and history when the active source changes", () => {
+  it("empties the sequence with no source", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("10"));
-    store.getState().markOut(pts("20"));
-    store.getState().finishSegment(null);
-    store.getState().markIn(pts("30"));
-
-    store.getState().setSource("source-2", "revision-2");
+    show(store, null);
     expect(store.getState()).toMatchObject({
-      sourceId: "source-2",
-      sourceRevisionKey: "revision-2",
+      clips: [],
+      sourceId: null,
+      sourceRevisionKey: null,
+      segments: [],
       pendingInPts: null,
-      canUndo: true,
     });
-    expect(store.getState().segments.map((segment) => segment.sourceId)).toEqual([
-      "source-1",
-    ]);
-
-    store.getState().markIn(pts("100"));
-    store.getState().markOut(pts("200"));
-    expect(store.getState().segments.map((segment) => segment.sourceId)).toEqual([
-      "source-1",
-      "source-2",
-    ]);
-    store.getState().undo();
-    expect(store.getState().segments.map((segment) => segment.sourceId)).toEqual([
-      "source-1",
-    ]);
   });
 });
 
 describe("timeline store half-open editing", () => {
   it("stores Mark Out directly as the first excluded PTS", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("-100"));
     store.getState().markOut(pts("-40"));
     expect(store.getState().segments).toEqual([
       {
         id: "segment-1",
-        sourceId: "source-1",
+        sourceId: "sequence:1",
         inPts: pts("-100"),
+        outPts: pts("-40"),
+      },
+    ]);
+    expect(store.getState().sequenceSegments).toEqual([
+      {
+        id: "segment-1",
+        inClipId: singleClipIdOf("source-1"),
+        inPts: pts("-100"),
+        outClipId: singleClipIdOf("source-1"),
         outPts: pts("-40"),
       },
     ]);
@@ -144,7 +227,7 @@ describe("timeline store half-open editing", () => {
 
   it("rejects equal and earlier Out points while preserving pending In", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("50"));
     store.getState().markOut(pts("50"));
     store.getState().markOut(pts("49"));
@@ -154,7 +237,7 @@ describe("timeline store half-open editing", () => {
 
   it("represents one frame with the following distinct PTS", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("9000"));
     store.getState().markOut(pts("9001"));
     expect(store.getState().segments[0]).toMatchObject({
@@ -165,7 +248,7 @@ describe("timeline store half-open editing", () => {
 
   it("preserves insertion order instead of sorting raw PTS", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("100"));
     store.getState().markOut(pts("200"));
     store.getState().finishSegment(null);
@@ -179,7 +262,7 @@ describe("timeline store half-open editing", () => {
 
   it("adjusts the current segment when New Segment does not end it first", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("100"));
     store.getState().markOut(pts("200"));
     // No New Segment, so the second pair moves the boundaries of the same segment.
@@ -191,7 +274,7 @@ describe("timeline store half-open editing", () => {
 
   it("splits at a strict interior PTS into adjacent half-open segments", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
     store.getState().split(pts("18"));
@@ -203,12 +286,11 @@ describe("timeline store half-open editing", () => {
     ]);
   });
 
-  it("splits only the active source and supports undo and redo", () => {
-    const store = createTimelineStore(
+  it("splits only a segment on the sequence and supports undo and redo", () => {
+    const store = createLegacyStore(
       { generateId: () => "new" },
       {
         sourceId: "source-1",
-        sourceRevisionKey: "revision-1",
         currentSegmentId: "a",
         segments: [
           { id: "a", sourceId: "source-1", inPts: pts("10"), outPts: pts("30") },
@@ -217,20 +299,25 @@ describe("timeline store half-open editing", () => {
       },
     );
     store.getState().split(pts("20"));
-    expect(store.getState().segments.map((segment) => segment.sourceId)).toEqual([
-      "source-1",
-      "source-1",
-      "source-2",
+    expect(visible(store)).toEqual([
+      { id: "a", inPts: "10", outPts: "20" },
+      { id: "new", inPts: "20", outPts: "30" },
+    ]);
+    // The segment of the other source stays in the array, after the parts, in its place.
+    expect(store.getState().sequenceSegments.map((segment) => segment.id)).toEqual([
+      "a",
+      "new",
+      "b",
     ]);
     store.getState().undo();
-    expect(store.getState().segments).toHaveLength(2);
+    expect(store.getState().segments).toHaveLength(1);
     store.getState().redo();
-    expect(store.getState().segments).toHaveLength(3);
+    expect(store.getState().segments).toHaveLength(2);
   });
 
   it("restores pending In mark on undo after markOut and clears it on redo", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("9000"));
     expect(store.getState().pendingInPts).toBe(pts("9000"));
 
@@ -252,39 +339,25 @@ describe("timeline store half-open editing", () => {
     expect(store.getState().canRedo).toBe(false);
   });
 
-  it("does not restore a pending In mark from another source on undo or redo", () => {
+  it("clears the history when another file replaces the open one", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("9000"));
     store.getState().markOut(pts("27000"));
-
-    store.getState().setSource("source-2", "revision-2");
-    expect(store.getState().pendingInPts).toBeNull();
     expect(store.getState().canUndo).toBe(true);
 
-    // The undo entry carries source-1's pending mark, which is not a PTS on source-2.
+    show(store, "source-2");
+    expect(store.getState()).toMatchObject({
+      pendingInPts: null,
+      canUndo: false,
+      canRedo: false,
+    });
     store.getState().undo();
-    expect(store.getState().segments).toHaveLength(0);
-    expect(store.getState().pendingInPts).toBeNull();
+    expect(store.getState().sequenceSegments).toHaveLength(1);
 
     // With no pending mark, Mark Out on source-2 cannot complete a segment.
     store.getState().markOut(pts("18000"));
     expect(store.getState().segments).toHaveLength(0);
-
-    store.getState().redo();
-    expect(store.getState().segments).toHaveLength(1);
-    expect(store.getState().pendingInPts).toBeNull();
-  });
-
-  it("does not restore a pending In mark from an earlier revision of the same source", () => {
-    const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
-    store.getState().markIn(pts("9000"));
-    store.getState().markOut(pts("27000"));
-
-    store.getState().setSource("source-1", "revision-2");
-    store.getState().undo();
-    expect(store.getState().pendingInPts).toBeNull();
   });
 });
 
@@ -292,7 +365,7 @@ describe("timeline store current segment", () => {
   /** Builds A = [0, 100) first in the array, then B = [20, 80) painting on top of it. */
   function createOverlapping(): Store {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("0"));
     store.getState().markOut(pts("100"));
     store.getState().finishSegment(null);
@@ -325,7 +398,7 @@ describe("timeline store current segment", () => {
 
   it("keeps the left half current after a split", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
     store.getState().split(pts("18"));
@@ -352,7 +425,7 @@ describe("timeline store current segment", () => {
 
   it("rejects a boundary move that would not leave inPts < outPts", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
 
@@ -371,7 +444,7 @@ describe("timeline store current segment", () => {
 
   it("rejects an equal or earlier Out point while completing a pending In mark", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("50"));
     store.getState().markOut(pts("50"));
     store.getState().markOut(pts("49"));
@@ -384,7 +457,7 @@ describe("timeline store current segment", () => {
     /** Mark In at 10 and Mark Out at 30: segment-1 = [10, 30) is current. */
     function createMarked(): Store {
       const store = createStore();
-      store.getState().setSource("source-1", "revision-1");
+      show(store, "source-1");
       store.getState().markIn(pts("10"));
       store.getState().markOut(pts("30"));
       return store;
@@ -423,7 +496,7 @@ describe("timeline store current segment", () => {
     });
 
     it("compares the frame with the Out exactly, beyond the safe integer range", () => {
-      const store = createTimelineStore(
+      const store = createLegacyStore(
         { generateId: () => "unused" },
         {
           sourceId: "source-1",
@@ -545,81 +618,36 @@ describe("timeline store current segment", () => {
       });
     });
 
-    it("restores no pending In from an earlier revision, and keeps the segment", () => {
-      const store = createMarked();
-      store.getState().markIn(pts("30"));
-
-      // A revision change clears the pending In. Canonical segments survive it, so Undo
-      // still makes the segment current (ADR 007).
-      store.getState().setSource("source-1", "revision-2");
-      expect(store.getState().pendingInPts).toBeNull();
-      store.getState().undo();
-      expect(store.getState()).toMatchObject({
-        currentSegmentId: "segment-1",
-        pendingInPts: null,
-      });
-
-      // The redo entry was captured after the revision change cleared the pending In, so it
-      // holds none. Nothing is current after the redo either.
-      store.getState().redo();
-      expect(store.getState()).toMatchObject({
-        currentSegmentId: null,
-        pendingInPts: null,
-      });
-      expectOneInProgress(store);
-    });
-
-    it("does not redo a pending In of an earlier revision", () => {
-      const store = createMarked();
-      store.getState().markIn(pts("30"));
-
-      // Undo on the same revision captures a redo entry that holds the pending In "30".
-      store.getState().undo();
-      expect(store.getState()).toMatchObject({
-        currentSegmentId: "segment-1",
-        pendingInPts: null,
-      });
-
-      // After a revision change, that pending In belongs to the earlier revision, so the redo
-      // does not bring it back, and nothing is current. The segment does not change.
-      store.getState().setSource("source-1", "revision-2");
-      store.getState().redo();
-      expect(store.getState()).toMatchObject({
-        currentSegmentId: null,
-        pendingInPts: null,
-      });
-      expect(shape(store)).toEqual([{ id: "segment-1", inPts: "10", outPts: "30" }]);
-      expectOneInProgress(store);
-    });
-
-    it("leaves a current segment that does not parse to the boundary move", () => {
-      const store = createTimelineStore(
+    it("does not resolve a current segment that does not parse", () => {
+      const store = createLegacyStore(
         { generateId: () => "unused" },
         {
           sourceId: "source-1",
-          sourceRevisionKey: "revision-1",
           segments: [
             { id: "bad", sourceId: "source-1", inPts: pts("10"), outPts: pts("030") },
           ],
           currentSegmentId: "bad",
         },
       );
-      // The Out does not parse, so the store cannot tell whether the frame is after it, and
-      // the move to a range that is not valid changes nothing.
+      // A boundary that does not parse keeps the segment off the sequence (ADR 052), so it is
+      // in the array but not current, and Mark In starts a pending In.
+      expect(store.getState().segments).toEqual([]);
       store.getState().markIn(pts("40"));
       expect(store.getState()).toMatchObject({
-        currentSegmentId: "bad",
-        pendingInPts: null,
+        currentSegmentId: null,
+        pendingInPts: "40",
         canUndo: false,
       });
-      expect(shape(store)).toEqual([{ id: "bad", inPts: "10", outPts: "030" }]);
+      expect(store.getState().sequenceSegments.map((segment) => segment.id)).toEqual([
+        "bad",
+      ]);
     });
   });
 
   describe("Mark Out on the Out of the current segment", () => {
     it("finishes the segment, moves no point, and adds no history entry", () => {
       const store = createStore();
-      store.getState().setSource("source-1", "revision-1");
+      show(store, "source-1");
       store.getState().markIn(pts("10"));
       store.getState().markOut(pts("30"));
       expect(store.getState().currentSegmentId).toBe("segment-1");
@@ -640,7 +668,7 @@ describe("timeline store current segment", () => {
 
     it("compares the frame with the Out exactly, and moves the Out elsewhere", () => {
       const store = createStore();
-      store.getState().setSource("source-1", "revision-1");
+      show(store, "source-1");
       store.getState().markIn(pts("9007199254740990"));
       store.getState().markOut(pts("9007199254740993"));
       // A number would round both values to the same double. BigInt does not.
@@ -655,7 +683,7 @@ describe("timeline store current segment", () => {
   describe("Finish Segment", () => {
     it("completes a pending In at the given Out, leaves nothing current, and undoes", () => {
       const store = createStore();
-      store.getState().setSource("source-1", "revision-1");
+      show(store, "source-1");
       store.getState().markIn(pts("10"));
 
       store.getState().finishSegment(pts("30"));
@@ -680,7 +708,7 @@ describe("timeline store current segment", () => {
     it("drops a pending In that the Out cannot complete, with no history entry", () => {
       for (const outPts of [null, pts("10"), pts("5"), pts("x")]) {
         const store = createStore();
-        store.getState().setSource("source-1", "revision-1");
+        show(store, "source-1");
         store.getState().markIn(pts("10"));
         store.getState().finishSegment(outPts);
         expect(store.getState()).toMatchObject({
@@ -694,7 +722,7 @@ describe("timeline store current segment", () => {
 
     it("only ends a current segment, whatever the Out", () => {
       const store = createStore();
-      store.getState().setSource("source-1", "revision-1");
+      show(store, "source-1");
       store.getState().markIn(pts("10"));
       store.getState().markOut(pts("30"));
       store.getState().finishSegment(pts("50"));
@@ -716,7 +744,7 @@ describe("timeline store current segment", () => {
 
   it("records no history for a boundary equal to the stored one", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("10"));
     store.getState().markOut(pts("30"));
     store.getState().undo();
@@ -733,7 +761,7 @@ describe("timeline store current segment", () => {
 
   it("holds one thing in progress at a time", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     expectOneInProgress(store);
 
     store.getState().markIn(pts("10"));
@@ -797,7 +825,7 @@ describe("timeline store current segment", () => {
   });
 
   it("refuses to select an unknown ID or a segment of another source", () => {
-    const store = createTimelineStore(
+    const store = createLegacyStore(
       { generateId: () => "new" },
       {
         sourceId: "source-1",
@@ -824,7 +852,7 @@ describe("timeline store current segment", () => {
 
   it("deletes the current segment, preserves export order, and selects nothing", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("0"));
     store.getState().markOut(pts("10"));
     store.getState().finishSegment(null);
@@ -859,29 +887,8 @@ describe("timeline store current segment", () => {
     expect(store.getState().currentSegmentId).toBe("segment-2");
   });
 
-  it("restores the current segment across a revision change but not across a source change", () => {
-    const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
-    store.getState().markIn(pts("10"));
-    store.getState().markOut(pts("30"));
-    store.getState().markOut(pts("40"));
-    expect(store.getState().currentSegmentId).toBe("segment-1");
-
-    // Canonical segments survive a revision change, so the selection survives with them.
-    store.getState().setSource("source-1", "revision-2");
-    store.getState().undo();
-    expect(store.getState().segments[0]).toMatchObject({ outPts: "30" });
-    expect(store.getState().currentSegmentId).toBe("segment-1");
-
-    // A segment of another source can never be the target on this timeline.
-    store.getState().setSource("source-2", "revision-3");
-    store.getState().redo();
-    expect(store.getState().segments[0]).toMatchObject({ outPts: "40" });
-    expect(store.getState().currentSegmentId).toBeNull();
-  });
-
   it("does not restore a current segment ID that the restored array does not hold", () => {
-    const store = createTimelineStore(
+    const store = createLegacyStore(
       { generateId: () => "made" },
       {
         sourceId: "source-1",
@@ -934,7 +941,7 @@ describe("timeline store selection of several segments", () => {
   });
 
   it("refuses to toggle an unknown ID or a segment of another source", () => {
-    const store = createTimelineStore(
+    const store = createLegacyStore(
       { generateId: () => "new" },
       {
         sourceId: "source-1",
@@ -959,7 +966,7 @@ describe("timeline store selection of several segments", () => {
   });
 
   it("selects every segment of the active source and clears the pending In mark", () => {
-    const store = createTimelineStore(
+    const store = createLegacyStore(
       { generateId: () => "new" },
       {
         sourceId: "source-1",
@@ -982,7 +989,7 @@ describe("timeline store selection of several segments", () => {
 
   it("makes the only segment current when Select All selects one segment", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("0"));
     store.getState().markOut(pts("10"));
     store.getState().finishSegment(null);
@@ -994,7 +1001,7 @@ describe("timeline store selection of several segments", () => {
 
   it("changes nothing on Select All when the active source has no segment", () => {
     const store = createStore();
-    store.getState().setSource("source-1", "revision-1");
+    show(store, "source-1");
     store.getState().markIn(pts("5"));
 
     store.getState().selectAllSegments();
@@ -1027,21 +1034,6 @@ describe("timeline store selection of several segments", () => {
     store.getState().redo();
     expect(shape(store).map((segment) => segment.id)).toEqual(["segment-2"]);
     expect(store.getState().selectedSegmentIds).toEqual([]);
-  });
-
-  it("restores no selection after a change of the source", () => {
-    const store = threeSegments();
-    store.getState().toggleSegmentSelection("segment-1");
-    store.getState().toggleSegmentSelection("segment-3");
-    store.getState().deleteSelectedSegments();
-
-    store.getState().setSource("source-2", "revision-2");
-    store.getState().undo();
-    // The segments are project state and come back. They belong to another source now, so
-    // the selection does not.
-    expect(store.getState().segments).toHaveLength(3);
-    expect(store.getState().selectedSegmentIds).toEqual([]);
-    expect(store.getState().currentSegmentId).toBeNull();
   });
 
   it("deletes every segment after Select All", () => {
@@ -1098,7 +1090,7 @@ describe("timeline store selection of several segments", () => {
   });
 
   it("starts with the current segment selected when a test gives it alone", () => {
-    const store = createTimelineStore(
+    const store = createLegacyStore(
       {},
       {
         sourceId: "source-1",
@@ -1123,7 +1115,7 @@ describe("timeline store selection of several segments", () => {
 describe("timeline store trimSegmentEdge", () => {
   /** A store with two segments of source-1, and one of source-2 between them. */
   function createTrimStore() {
-    return createTimelineStore(
+    return createLegacyStore(
       { generateId: () => "unused" },
       {
         sourceId: "source-1",
@@ -1212,7 +1204,7 @@ describe("timeline store trimSegmentEdge", () => {
 
   it("refuses every move while no source is active", () => {
     const store = createTrimStore();
-    store.getState().setSource(null, null);
+    show(store, null);
     const before = store.getState().segments;
     store.getState().trimSegmentEdge("a", "in", pts("120"));
     expect(store.getState().segments).toBe(before);
@@ -1228,5 +1220,282 @@ describe("timeline store trimSegmentEdge", () => {
     expect(store.getState().canRedo).toBe(false);
     store.getState().redo();
     expect(shape(store)[0]).toEqual({ id: "a", inPts: "130", outPts: "200" });
+  });
+});
+
+describe("timeline store on a sequence of clips (ADR 052)", () => {
+  const A: SequenceSource = {
+    id: "A",
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: pts("0"),
+    videoEndPts: pts("10000"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 10,
+  };
+  const B: SequenceSource = {
+    id: "B",
+    videoTimeBase: { n: 1, d: 90000 },
+    videoStartPts: pts("9000"),
+    videoEndPts: pts("459000"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 5,
+  };
+  const a1: Clip = { id: "a1", sourceId: "A" };
+  const b1: Clip = { id: "b1", sourceId: "B" };
+
+  /** A store of the clips a1 (10 s) and b1 (5 s). The virtual time base is 1/90000. */
+  function twoClips() {
+    let nextId = 1;
+    const store = createTimelineStore({ generateId: () => `segment-${nextId++}` });
+    expect(store.getState().insertClips(0, [a1, b1], [A, B])).toBe(true);
+    return store;
+  }
+
+  /** The virtual PTS of a point on a clip. */
+  function virtual(
+    store: ReturnType<typeof twoClips>,
+    clipId: string,
+    value: string,
+  ): Pts {
+    const timeline = store.getState().virtual;
+    const result = timeline && toVirtualPts(timeline, { clipId, pts: pts(value) });
+    if (!result) throw new Error("virtual");
+    return result;
+  }
+
+  it("lays the clips out end to end on one virtual axis", () => {
+    const store = twoClips();
+    expect(store.getState()).toMatchObject({
+      sourceId: "sequence:1",
+      clips: [a1, b1],
+      canUndo: true,
+    });
+    expect(store.getState().virtual?.timeBase).toEqual({ n: 1, d: 90000 });
+    expect(virtual(store, "a1", "10000")).toBe(virtual(store, "b1", "9000"));
+  });
+
+  it("marks a segment across the junction on the attached clips", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    store.getState().markIn(virtual(store, "a1", "8000"));
+    store.getState().setAttachedClip("b1");
+    store.getState().markOut(virtual(store, "b1", "99000"));
+    expect(store.getState().sequenceSegments).toEqual([
+      {
+        id: "segment-1",
+        inClipId: "a1",
+        inPts: "8000",
+        outClipId: "b1",
+        outPts: "99000",
+      },
+    ]);
+    expect(store.getState().segments).toEqual([
+      {
+        id: "segment-1",
+        sourceId: "sequence:1",
+        inPts: virtual(store, "a1", "8000"),
+        outPts: virtual(store, "b1", "99000"),
+      },
+    ]);
+  });
+
+  it("writes an Out on the first frame of a clip as the end of the clip before it", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    store.getState().markIn(virtual(store, "a1", "8000"));
+    store.getState().setAttachedClip("b1");
+    store.getState().markOut(virtual(store, "b1", "9000"));
+    expect(store.getState().sequenceSegments[0]).toMatchObject({
+      outClipId: "a1",
+      outPts: "10000",
+    });
+  });
+
+  it("splits a crossing segment at the junction into two segments that meet there", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    store.getState().markIn(virtual(store, "a1", "8000"));
+    store.getState().setAttachedClip("b1");
+    store.getState().markOut(virtual(store, "b1", "99000"));
+    store.getState().split(virtual(store, "b1", "9000"));
+    expect(store.getState().sequenceSegments).toEqual([
+      {
+        id: "segment-1",
+        inClipId: "a1",
+        inPts: "8000",
+        outClipId: "a1",
+        outPts: "10000",
+      },
+      {
+        id: "segment-2",
+        inClipId: "b1",
+        inPts: "9000",
+        outClipId: "b1",
+        outPts: "99000",
+      },
+    ]);
+    expect(store.getState().currentSegmentId).toBe("segment-1");
+  });
+
+  it("refuses a virtual PTS that the attached clip does not hold on its grid", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    // A tick of 1/90000 between two ticks of 1/1000 is no frame of a1.
+    const off = (BigInt(virtual(store, "a1", "5000")) + 1n).toString() as Pts;
+    store.getState().markIn(off);
+    expect(store.getState().pendingIn).toBeNull();
+  });
+
+  it("moves a clip, splits the crossing segment, and undoes both as one edit", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    store.getState().markIn(virtual(store, "a1", "8000"));
+    store.getState().setAttachedClip("b1");
+    store.getState().markOut(virtual(store, "b1", "99000"));
+    store.getState().finishSegment(null);
+
+    store.getState().moveClip(1, 0);
+    expect(store.getState().clips).toEqual([b1, a1]);
+    expect(store.getState().sequenceSegments).toEqual([
+      {
+        id: "segment-1",
+        inClipId: "a1",
+        inPts: "8000",
+        outClipId: "a1",
+        outPts: "10000",
+      },
+      {
+        id: "segment-2",
+        inClipId: "b1",
+        inPts: "9000",
+        outClipId: "b1",
+        outPts: "99000",
+      },
+    ]);
+    // A clip operation keeps the generation, so the view does not reset.
+    expect(store.getState().sourceId).toBe("sequence:1");
+
+    store.getState().undo();
+    expect(store.getState().clips).toEqual([a1, b1]);
+    expect(store.getState().sequenceSegments).toHaveLength(1);
+    store.getState().redo();
+    expect(store.getState().clips).toEqual([b1, a1]);
+  });
+
+  it("removes a clip with its segments and its pending In", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("b1");
+    store.getState().markIn(virtual(store, "b1", "50000"));
+    store.getState().removeClip(1);
+    expect(store.getState()).toMatchObject({
+      clips: [a1],
+      pendingIn: null,
+      pendingInPts: null,
+    });
+    store.getState().undo();
+    expect(store.getState().clips).toEqual([a1, b1]);
+    // The pending In comes back with its clip.
+    expect(store.getState().pendingIn).toEqual({ clipId: "b1", pts: "50000" });
+  });
+
+  it("clears the timeline as one edit, and the first clip after it starts a new generation", () => {
+    const store = twoClips();
+    store.getState().clearTimeline();
+    expect(store.getState()).toMatchObject({ clips: [], sourceId: null, segments: [] });
+    store.getState().undo();
+    expect(store.getState()).toMatchObject({ clips: [a1, b1], sourceId: "sequence:2" });
+  });
+
+  it("refuses a known clip identifier and a clip with no extent next to another", () => {
+    const store = twoClips();
+    expect(store.getState().insertClips(2, [a1], [A])).toBe(false);
+    const X: SequenceSource = {
+      ...A,
+      id: "X",
+      videoEndPts: null,
+      approximateDurationSeconds: null,
+    };
+    expect(store.getState().insertClips(2, [{ id: "x1", sourceId: "X" }], [X])).toBe(
+      false,
+    );
+    expect(store.getState().clips).toEqual([a1, b1]);
+  });
+
+  it("keeps one list of segments through a selection and a pending In", () => {
+    const store = twoClips();
+    store.getState().setAttachedClip("a1");
+    store.getState().markIn(virtual(store, "a1", "1000"));
+    store.getState().markOut(virtual(store, "a1", "2000"));
+    const segments = store.getState().segments;
+    store.getState().finishSegment(null);
+    store.getState().selectSegment("segment-1");
+    store.getState().markIn(virtual(store, "a1", "500"));
+    expect(store.getState().segments).not.toBe(segments);
+    const moved = store.getState().segments;
+    store.getState().finishSegment(null);
+    store.getState().markIn(virtual(store, "a1", "3000"));
+    expect(store.getState().segments).toBe(moved);
+  });
+});
+
+describe("timeline store on one clip with a bounded range (ADR 052)", () => {
+  // A source of 10 s that starts at -1800 in 1/90000, with a known end.
+  const BOUNDED: SequenceSource = {
+    id: "bounded",
+    videoTimeBase: { n: 1, d: 90000 },
+    videoStartPts: pts("-1800"),
+    videoEndPts: pts("898200"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 10,
+  };
+
+  function bounded() {
+    let nextId = 1;
+    const store = createTimelineStore({ generateId: () => `segment-${nextId++}` });
+    store.getState().showOnlySource(BOUNDED);
+    return store;
+  }
+
+  it("keeps the PTS of the source as the virtual PTS", () => {
+    const store = bounded();
+    store.getState().markIn(pts("-1800"));
+    store.getState().markOut(pts("3003"));
+    expect(visible(store)).toEqual([
+      { id: "segment-1", inPts: "-1800", outPts: "3003" },
+    ]);
+  });
+
+  it("refuses an In before the start and an Out after the end", () => {
+    const store = bounded();
+    store.getState().markIn(pts("-1801"));
+    expect(store.getState().pendingIn).toBeNull();
+    store.getState().markIn(pts("0"));
+    store.getState().markOut(pts("898201"));
+    expect(store.getState().sequenceSegments).toEqual([]);
+  });
+
+  it("refuses an Out on the first frame, where no clip comes before", () => {
+    const store = bounded();
+    store.getState().markIn(pts("-1800"));
+    store.getState().finishSegment(pts("-1800"));
+    expect(store.getState().sequenceSegments).toEqual([]);
+  });
+
+  it("uses no identifier for a refused mark", () => {
+    const store = bounded();
+    store.getState().markIn(pts("0"));
+    store.getState().markOut(pts("898201"));
+    store.getState().markOut(pts("9000"));
+    expect(store.getState().sequenceSegments.map((segment) => segment.id)).toEqual([
+      "segment-1",
+    ]);
+  });
+
+  it("trims an Out to the end of the clip", () => {
+    const store = bounded();
+    store.getState().markIn(pts("0"));
+    store.getState().markOut(pts("9000"));
+    store.getState().trimSegmentEdge("segment-1", "out", pts("898200"));
+    expect(visible(store)).toEqual([{ id: "segment-1", inPts: "0", outPts: "898200" }]);
   });
 });

@@ -1,11 +1,15 @@
 /**
- * Domain types, store state, and action signatures for single-source timeline editing.
+ * Domain types, store state, and action signatures for the timeline of a sequence of clips.
  *
- * See ADR 002, ADR 003, ADR 007, and ADR 010.
- * Edit points are represented as presentation timestamps (PTS) in source video stream timebase.
+ * See ADR 002, ADR 003, ADR 007, ADR 010 and ADR 052.
+ * The truth is anchored: each boundary is a clip and a source PTS (ADR 052). The interface reads
+ * a derived view in which the sequence is one virtual source (`virtualTime.ts`). With one clip,
+ * a virtual PTS is the source PTS of that clip.
  */
 
-import type { Pts, Segment } from "@/types/project";
+import type { Clip, EditPoint, Pts, Segment, SequenceSegment } from "@/types/project";
+import type { SequenceSource } from "./sequence";
+import type { VirtualTimeline } from "./virtualTime";
 
 /**
  * One boundary of a half-open segment `[inPts, outPts)` (ADR 002): `in` names `inPts`, and
@@ -14,43 +18,73 @@ import type { Pts, Segment } from "@/types/project";
 export type SegmentEdge = "in" | "out";
 
 /**
+ * The anchored truth of the timeline (ADR 052). Every edit changes these fields, and the history
+ * of undo and redo stores them.
+ */
+export interface TimelineTruth {
+  /** The clips of the sequence in sequence order. */
+  readonly clips: readonly Clip[];
+  /** The segments in project array order, which is the export order (ADR 007). */
+  readonly sequenceSegments: readonly SequenceSegment[];
+  /** The pending In mark awaiting a matching Out mark, or null. */
+  readonly pendingIn: EditPoint | null;
+  /**
+   * The timing facts of every source that a clip named during the session, by source ID. A
+   * source stays after its last clip leaves, so an Undo finds it again (ADR 052).
+   */
+  readonly sequenceSources: Readonly<Record<string, SequenceSource>>;
+  /**
+   * A finite media element duration by source ID, the last extent fallback of ADR 007. It is
+   * kept for every source of the session, not only for the attached one.
+   */
+  readonly browserDurations: Readonly<Record<string, number>>;
+  /**
+   * The clip whose source the preview attached, or null. A virtual PTS from the interface goes
+   * back to an edit point on this clip (ADR 052).
+   */
+  readonly attachedClipId: string | null;
+  /**
+   * Counts the times the sequence got its first clip, or got a new single source. The derived
+   * revision key changes with it, so the view state of a new sequence starts fresh.
+   */
+  readonly generation: number;
+}
+
+/**
  * Public, strictly serializable state of the timeline store.
  */
-export interface TimelineState {
+export interface TimelineState extends TimelineTruth {
+  /** The virtual axis of the sequence, or null for an empty sequence or one with no axis. */
+  readonly virtual: VirtualTimeline | null;
+
   /**
-   * Active media source stable identifier, or null if no media source is loaded.
+   * The virtual source of the sequence, or null while the sequence has no clip. Every derived
+   * segment carries it as its `sourceId`.
    */
   readonly sourceId: string | null;
 
   /**
-   * Active media source revision key string (path:size:mtime), or null if no media source is loaded.
+   * The revision key of the virtual source, or null while the sequence has no clip. It changes
+   * with `generation`, and not with a clip operation.
    */
   readonly sourceRevisionKey: string | null;
 
   /**
-   * Completed timeline segments in project array order (ADR 007).
-   * Export order is array order.
+   * The segments as virtual source segments, in project array order (ADR 007). Derived from
+   * `sequenceSegments`. A segment whose clips are not on the sequence is not in this list.
    */
   readonly segments: Segment[];
 
-  /**
-   * Presentation timestamp (PTS) of a pending In mark awaiting a matching Out mark,
-   * or null if no In mark is pending.
-   */
+  /** The pending In mark as a virtual PTS, or null. Derived from `pendingIn`. */
   readonly pendingInPts: Pts | null;
 
   /**
    * Identifier of the segment every segment operation names as its target, or null
    * when nothing is current.
    *
-   * The identifier is canonical project state. It can name a segment of an inactive
-   * source, so it is always read through `findCurrentSegment`, which refuses an
-   * unknown identifier and a foreign source (ADR 002 forbids a cross-source PTS
-   * comparison).
-   *
-   * Invariant: while a current segment resolves for the active source,
-   * `pendingInPts` is null. The two fields describe the same thing — the segment
-   * being built or adjusted — so only one of them is ever in progress.
+   * Invariant: while a current segment resolves, `pendingIn` is null. The two fields describe
+   * the same thing — the segment being built or adjusted — so only one of them is ever in
+   * progress.
    *
    * Invariant: it is the only selected segment while exactly one segment is selected, and
    * null in every other case (`selectedSegmentIds`).
@@ -60,16 +94,13 @@ export interface TimelineState {
   /**
    * Identifiers of the selected segments, in project array order (ADR 045). A plain click
    * selects one segment. The primary modifier with a click adds or removes one, and primary+A
-   * selects every segment of the active source.
+   * selects every segment of the sequence.
    *
    * A selection of one segment makes that segment current. A selection of several segments
    * leaves nothing current, so Mark In, Mark Out, Split and the boundary seeks do not guess
    * between them (ADR 007). Delete removes every selected segment.
    *
-   * Invariant: while any segment is selected, `pendingInPts` is null.
-   *
-   * Like `currentSegmentId`, an identifier can name a segment of an inactive source, so it is
-   * always read through `findSelectedSegments`.
+   * Invariant: while any segment is selected, `pendingIn` is null.
    */
   readonly selectedSegmentIds: readonly string[];
 
@@ -89,14 +120,47 @@ export interface TimelineState {
  */
 export interface TimelineActions {
   /**
-   * Activates a media source on the timeline.
-   * Canonical ordered segments and undo/redo history are project state and remain unchanged.
-   * A changed source or revision clears the source-view pending In mark.
-   *
-   * @param sourceId Canonical stable source identifier (non-empty string, or null to clear).
-   * @param sourceRevisionKey Canonical source revision key string (non-empty string, or null to clear).
+   * Makes the sequence the one clip of `source`, or empty for null. The clip of a source has a
+   * fixed identifier, so a source that comes back finds the segments of its clip again. A
+   * different source starts a new generation, clears the pending In mark, the selection and the
+   * history. The same source changes nothing. This is the import of one file that replaces the
+   * open one (ADR 027); several sources use `insertClips`.
    */
-  setSource: (sourceId: string | null, sourceRevisionKey: string | null) => void;
+  showOnlySource: (source: SequenceSource | null) => void;
+
+  /**
+   * Inserts clips at junction `index` (ADR 052), with one history entry, and records the timing
+   * facts of their sources. A segment that crosses the junction is split there first. Refuses an
+   * index out of range, a known clip identifier, and a sequence that `layoutSequence` refuses.
+   * Returns whether it inserted.
+   */
+  insertClips: (
+    index: number,
+    clips: readonly Clip[],
+    sources: readonly SequenceSource[],
+  ) => boolean;
+
+  /**
+   * Moves clip `from` to junction `to` (ADR 052), with one history entry. Each segment that
+   * crosses a junction of the clip or the target junction is split there first. A move to either
+   * junction of the clip itself changes nothing and adds no history entry.
+   */
+  moveClip: (from: number, to: number) => void;
+
+  /**
+   * Removes clip `index` (ADR 052), with one history entry. The segments on it go, and a segment
+   * with one end on it keeps the part outside it. A pending In on the clip is cleared.
+   */
+  removeClip: (index: number) => void;
+
+  /** Removes every clip and every segment, with one history entry (ADR 052). */
+  clearTimeline: () => void;
+
+  /** Records the clip whose source the preview attached, or null. */
+  setAttachedClip: (clipId: string | null) => void;
+
+  /** Records a finite media element duration of a source, or forgets it with null (ADR 007). */
+  setBrowserDuration: (sourceId: string, seconds: number | null) => void;
 
   /**
    * Marks an inclusive In point at the given presentation timestamp (PTS).
@@ -108,11 +172,13 @@ export interface TimelineActions {
    * With a current segment and `pts` at or after its `outPts`, finishes that segment and
    * records the pending In mark at `pts`, as one action with one history entry. Undo then
    * makes the segment current again and clears the pending In mark.
-   * Rejects silently, with no history entry, when there is no active source, `pts` is
-   * malformed, the current segment has a stored PTS that does not parse, a boundary move would
-   * not leave `inPts < outPts` (ADR 002), or `pts` already equals the stored boundary.
+   * Rejects silently, with no history entry, when the sequence has no clip, `pts` is malformed or
+   * not a frame of the attached clip, a boundary move would break a rule of ADR 052, or `pts`
+   * already equals the stored boundary. A segment whose stored PTS does not parse is not on the
+   * sequence, so it is never current.
    *
-   * @param pts Presentation timestamp in source video time base.
+   * @param pts Virtual PTS of the frame on screen. It goes back to an edit point on the attached
+   *   clip (ADR 052).
    */
   markIn: (pts: Pts) => void;
 
@@ -129,7 +195,7 @@ export interface TimelineActions {
    * `finishSegment` does: nothing is current after it, and no history entry is added.
    * Rejects silently under the same conditions as `markIn`.
    *
-   * @param currentPts Presentation timestamp in source video time base (must satisfy inPts < currentPts).
+   * @param currentPts Virtual PTS of the frame on screen (must lie after the In).
    */
   markOut: (currentPts: Pts) => void;
 
@@ -150,7 +216,7 @@ export interface TimelineActions {
    * restores the old boundary. The drag trim of a segment edge commits with it (ADR 030).
    *
    * The move has the semantics of a boundary move by Mark In and Mark Out on a current
-   * segment: it rejects silently, with no history entry, when there is no active source, `pts`
+   * segment: it rejects silently, with no history entry, when the sequence has no clip, `pts`
    * is malformed, the move would not leave `inPts < outPts` (ADR 002), or `pts` already equals
    * the stored boundary. It also rejects an unknown identifier and a segment of another
    * source, as `findCurrentSegment` does. An In edge moved to or after the Out is rejected
@@ -160,9 +226,9 @@ export interface TimelineActions {
    * selection can change between the start of a trim and the frame that commits it. The
    * action changes neither `currentSegmentId` nor `pendingInPts`.
    *
-   * @param segmentId Identifier of a segment of the active source.
+   * @param segmentId Identifier of a segment on the sequence.
    * @param edge The boundary to move: `in` for `inPts`, `out` for `outPts`.
-   * @param pts Presentation timestamp in source video time base.
+   * @param pts Virtual PTS of the frame on screen.
    */
   trimSegmentEdge: (segmentId: string, edge: SegmentEdge, pts: Pts) => void;
 
@@ -184,7 +250,7 @@ export interface TimelineActions {
   finishSegment: (outPts: Pts | null) => void;
 
   /**
-   * Removes every selected segment of the active source, with one history entry, and leaves
+   * Removes every selected segment on the sequence, with one history entry, and leaves
    * nothing selected (ADR 045). Undo restores the segments and selects them again.
    * Does not select a neighbour, so the next Delete or Split cannot act on a segment the
    * user did not name. Preserves the array order of the remaining segments, which is the
@@ -194,38 +260,38 @@ export interface TimelineActions {
   deleteSelectedSegments: () => void;
 
   /**
-   * Selects only an existing segment of the active source, which makes it current, and clears
+   * Selects only an existing segment on the sequence, which makes it current, and clears
    * the pending In mark.
-   * Refuses an unknown identifier and a segment of another source.
+   * Refuses an unknown identifier and a segment that is not on the sequence.
    * Adds no history entry: selection is not an edit.
    *
-   * @param id Identifier of a segment of the active source.
+   * @param id Identifier of a segment on the sequence.
    */
   selectSegment: (id: string) => void;
 
   /**
-   * Adds a segment of the active source to the selection, or removes it when it is selected
+   * Adds a segment on the sequence to the selection, or removes it when it is selected
    * (ADR 045), and clears the pending In mark. The selection stays in project array order.
-   * Refuses an unknown identifier and a segment of another source.
+   * Refuses an unknown identifier and a segment that is not on the sequence.
    * Adds no history entry: selection is not an edit.
    *
-   * @param id Identifier of a segment of the active source.
+   * @param id Identifier of a segment on the sequence.
    */
   toggleSegmentSelection: (id: string) => void;
 
   /**
-   * Selects every segment of the active source (ADR 045), and clears the pending In mark.
-   * Does nothing when the active source has no segment.
+   * Selects every segment on the sequence (ADR 045), and clears the pending In mark.
+   * Does nothing when the sequence has no segment.
    * Adds no history entry: selection is not an edit.
    */
   selectAllSegments: () => void;
 
   /**
    * Undoes the last segment edit.
-   * Restores the pending In mark of that edit only while the active source identity is
-   * the one the edit was made on, otherwise clears it.
+   * Restores the clips and the segments of that edit, and its pending In mark only while its
+   * clip is on the restored sequence.
    * Restores the selection of that edit, and so its current segment, only for the segments
-   * that the restored array still holds and that belong to the source active now.
+   * that the restored array still holds and that lie on the restored sequence.
    */
   undo: () => void;
 

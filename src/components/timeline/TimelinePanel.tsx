@@ -10,12 +10,8 @@ import { useTranslation } from "react-i18next";
 import { isSourceActive } from "@/components/layout/actionConditions";
 import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
 import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
-import {
-  getGeneratedSourceId,
-  getSourceRevisionKey,
-  useMediaStore,
-  type MediaStoreState,
-} from "@/features/media";
+import { useMediaStore, type MediaStoreState } from "@/features/media";
+import { toSequenceSource } from "@/features/media/sequenceSource";
 import {
   getDisplayedElapsedSeconds,
   getNominalFrameRate,
@@ -125,8 +121,6 @@ import {
 import { TrimNotice } from "./TrimNotice";
 
 export interface TimelinePanelProps {
-  /** Stable project source ID when project state already owns one. */
-  activeSourceId?: string | null;
   /** Finite HTMLMediaElement.duration supplied by preview runtime state. */
   runtimeBrowserDurationSeconds?: number | null;
   /** Browser-time seek request used when calibrated PTS seeking is unavailable (ADR 022). */
@@ -141,7 +135,8 @@ const selectIsReady = (state: PlaybackStoreState) => state.isReady;
 const selectIsDecodeStalled = (state: PlaybackStoreState) => state.decodeStall !== null;
 const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
 
-const selectSetSource = (state: TimelineStoreState) => state.setSource;
+const selectShowOnlySource = (state: TimelineStoreState) => state.showOnlySource;
+const selectSequenceSourceId = (state: TimelineStoreState) => state.sourceId;
 
 const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
 
@@ -194,7 +189,6 @@ function readVisibleLane(scrollEl: HTMLElement): ClientRange {
  * presents. A release before the threshold is the click of the edge (ADR 007).
  */
 export function TimelinePanel({
-  activeSourceId,
   runtimeBrowserDurationSeconds = null,
   onApproximateSeek,
 }: TimelinePanelProps = {}) {
@@ -207,21 +201,22 @@ export function TimelinePanel({
   const isDecodeStalled = usePlaybackStore(selectIsDecodeStalled);
   const seekToPts = usePlaybackStore(selectSeekToPts);
 
-  const setSource = useTimelineStore(selectSetSource);
+  const showOnlySource = useTimelineStore(selectShowOnlySource);
+  // The virtual source of the sequence (ADR 052). Its ID changes with each new generation of the
+  // sequence, so the view state below resets as it did for a new source.
+  const sourceId = useTimelineStore(selectSequenceSourceId);
 
-  const sourceRevisionKey = getSourceRevisionKey(media);
   // The generated ID is keyed by the revision key, not by the path, so a file that changed on
-  // disk becomes a new source and its old marks stop matching the active source.
-  const sourceId = media ? (activeSourceId ?? getGeneratedSourceId(media)) : null;
+  // disk becomes a new source and its old marks stop matching it (ADR 010).
+  const sequenceSource = useMemo(
+    () => (media ? toSequenceSource(media) : null),
+    [media],
+  );
 
-  // Synchronize active media source with the timeline store
+  // The open media file is the one clip of the sequence.
   useLayoutEffect(() => {
-    if (sourceId && sourceRevisionKey) {
-      setSource(sourceId, sourceRevisionKey);
-    } else {
-      setSource(null, null);
-    }
-  }, [sourceId, sourceRevisionKey, setSource]);
+    showOnlySource(sequenceSource);
+  }, [sequenceSource, showOnlySource]);
 
   const totalDurationSeconds = useMemo(() => {
     if (!media) return null;

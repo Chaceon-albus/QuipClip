@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  createOneClipTimelineStore,
+  TEST_SEQUENCE_SOURCE_ID,
+} from "@/features/timeline/storeTestSupport";
 import { getSourceRevisionKey } from "@/features/media";
 import {
   createPlaybackStore,
@@ -7,7 +11,7 @@ import {
   type PlaybackMediaElement,
   type PlaybackSource,
 } from "@/features/playback";
-import { createTimelineStore, createTimelineViewportStore } from "@/features/timeline";
+import { createTimelineViewportStore } from "@/features/timeline";
 import type { Pts, Segment, TickCount } from "@/types/project";
 import { SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import {
@@ -26,7 +30,7 @@ import { TIME_JUMP_SECONDS, type TimeJumpAction } from "./timeJump";
 const pts = (value: string): Pts => value as Pts;
 const ticks = (value: string): TickCount => value as TickCount;
 
-const SOURCE_ID = "source-1";
+const SOURCE_ID = TEST_SEQUENCE_SOURCE_ID;
 
 function createProbe(overrides: Partial<ShortcutProbe> = {}): ShortcutProbe {
   return {
@@ -193,14 +197,16 @@ function createStoreHarness({
   const key = getSourceRevisionKey(source);
   const playback = createPlaybackStore();
   let nextId = 0;
-  const timeline = createTimelineStore({ generateId: () => `segment-${++nextId}` });
+  const timeline = createOneClipTimelineStore(
+    {},
+    { generateId: () => `segment-${++nextId}` },
+  );
   const element = createFakeElement(duration);
   let presentedFrames = 0;
 
   playback.getState().attach(source, element);
   playback.getState().syncReady(key, element);
   playback.getState().syncBrowserDuration(key, element);
-  timeline.getState().setSource(SOURCE_ID, key);
   // The first presented frame anchors the calibration on videoStartPts (ADR 003). A first frame
   // after 0 on the browser timeline models an audio track that starts before the video.
   const anchor = (mediaTime = 0): void => {

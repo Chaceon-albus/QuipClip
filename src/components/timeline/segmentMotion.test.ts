@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createTimelineStore } from "@/features/timeline";
+import {
+  createOneClipTimelineStore,
+  TEST_SEQUENCE_SOURCE_ID,
+} from "@/features/timeline/storeTestSupport";
 import type { Pts, Segment } from "@/types/project";
 import {
   advanceSegmentMotion,
@@ -9,12 +12,14 @@ import {
 
 const pts = (value: string) => value as Pts;
 
-const SOURCE = "source-1";
+const SOURCE = TEST_SEQUENCE_SOURCE_ID;
 
 function createStore() {
   let nextId = 1;
-  const store = createTimelineStore({ generateId: () => `segment-${nextId++}` });
-  store.getState().setSource(SOURCE, "revision-1");
+  const store = createOneClipTimelineStore(
+    {},
+    { generateId: () => `segment-${nextId++}` },
+  );
   return store;
 }
 

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  createOneClipTimelineStore,
+  TEST_SEQUENCE_SOURCE_ID,
+} from "@/features/timeline/storeTestSupport";
 import { getSourceRevisionKey } from "@/features/media";
 import {
   createPlaybackStore,
@@ -6,7 +10,7 @@ import {
   type PlaybackSource,
   type PlaybackStore,
 } from "@/features/playback";
-import { createTimelineStore, type TimelineStore } from "@/features/timeline";
+import type { TimelineStore } from "@/features/timeline";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { SnapBoundary } from "./scrubSnap";
 import { clampTrimPts, TRIM_FRAME_WAIT_MS, type SegmentTrimProbe } from "./segmentTrim";
@@ -18,7 +22,7 @@ import {
 
 const pts = (value: string) => value as Pts;
 
-const SOURCE_ID = "source-1";
+const SOURCE_ID = TEST_SEQUENCE_SOURCE_ID;
 const tb90k: Rational = { n: 1, d: 90_000 };
 const fps25: Rational = { n: 25, d: 1 };
 /** One nominal frame at 25 fps on a 1/90000 time base. */
@@ -151,16 +155,14 @@ function createHarness(
     playback.getState().syncPresentedFrame(identity, 0, 1, video);
   }
 
-  const timeline = createTimelineStore(
-    { generateId: () => "unused" },
+  const timeline = createOneClipTimelineStore(
     {
-      sourceId: SOURCE_ID,
-      sourceRevisionKey: identity,
       segments: [
         { id: "a", sourceId: SOURCE_ID, inPts: pts(aIn), outPts: pts(aOut) },
         { id: "b", sourceId: SOURCE_ID, inPts: pts("270000"), outPts: pts("360000") },
       ],
     },
+    { generateId: () => "unused" },
   );
 
   const timers = createManualClock();

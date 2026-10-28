@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createOneClipTimelineStore,
+  TEST_CLIP_ID,
+  TEST_SEQUENCE_SOURCE_ID,
+  type OneSourceSegment,
+} from "@/features/timeline/storeTestSupport";
+import {
   resolveShortcut,
   type ShortcutKeyEvent,
 } from "@/components/layout/keyboardShortcutController";
@@ -15,7 +21,6 @@ import {
   type ShortcutProbe,
   type ShortcutSnapshot,
 } from "@/components/layout/shortcutCommands";
-import { createTimelineStore } from "@/features/timeline";
 import { en } from "@/i18n/locales/en";
 import type { Pts, TickCount } from "@/types/project";
 import type { SegmentMenuBackend } from "./nativeSegmentMenu";
@@ -33,7 +38,7 @@ import type {
 const pts = (value: string): Pts => value as Pts;
 const ticks = (value: string): TickCount => value as TickCount;
 
-const SOURCE_ID = "source-1";
+const SOURCE_ID = TEST_SEQUENCE_SOURCE_ID;
 
 /**
  * Walks a dotted key through the English catalog, the way i18next resolves it. A count picks
@@ -76,17 +81,17 @@ interface Show {
   readonly fail: (error: Error) => void;
 }
 
-function createHarness() {
-  const timeline = createTimelineStore(
-    { generateId: () => "unused" },
+function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
+  const timeline = createOneClipTimelineStore(
     {
-      sourceId: SOURCE_ID,
       segments: [
         { id: "a", sourceId: SOURCE_ID, inPts: pts("90000"), outPts: pts("180000") },
         { id: "b", sourceId: SOURCE_ID, inPts: pts("270000"), outPts: pts("360000") },
+        ...extraSegments,
       ],
       currentSegmentId: "a",
     },
+    { generateId: () => "unused" },
   );
   const facts: {
     isTrimDragging: boolean;
@@ -226,6 +231,7 @@ describe("createSegmentContextMenu", () => {
       harness.timeline.setState({
         currentSegmentId: null,
         selectedSegmentIds: [],
+        pendingIn: { clipId: TEST_CLIP_ID, pts: pts("30000") },
         pendingInPts: pts("30000"),
       });
       expect(harness.open()).not.toBeNull();
@@ -321,15 +327,11 @@ describe("createSegmentContextMenu", () => {
     it("clears the mark when the menu throws before it returns a promise", async () => {
       const menuState = createNativeContextMenuState();
       const onError = vi.fn<(error: unknown) => void>();
-      const timeline = createTimelineStore(
-        {},
-        {
-          sourceId: SOURCE_ID,
-          segments: [
-            { id: "b", sourceId: SOURCE_ID, inPts: pts("0"), outPts: pts("90000") },
-          ],
-        },
-      );
+      const timeline = createOneClipTimelineStore({
+        segments: [
+          { id: "b", sourceId: SOURCE_ID, inPts: pts("0"), outPts: pts("90000") },
+        ],
+      });
       const menu = createSegmentContextMenu({
         timeline,
         readSnapshot: () => ({
@@ -583,13 +585,9 @@ describe("createSegmentContextMenu", () => {
     });
 
     it("selects only the segment of a request outside the selection", () => {
-      const harness = createHarness();
-      harness.timeline.setState({
-        segments: [
-          ...harness.timeline.getState().segments,
-          { id: "c", sourceId: SOURCE_ID, inPts: pts("540000"), outPts: pts("630000") },
-        ],
-      });
+      const harness = createHarness([
+        { id: "c", sourceId: SOURCE_ID, inPts: pts("540000"), outPts: pts("630000") },
+      ]);
       harness.timeline.getState().toggleSegmentSelection("b");
       expect(harness.timeline.getState().selectedSegmentIds).toEqual(["a", "b"]);
       void harness.open({ segmentId: "c" });
