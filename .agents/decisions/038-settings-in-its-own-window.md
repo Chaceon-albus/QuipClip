@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 011, ADR 013, ADR 020, ADR 021, ADR 024, ADR 026, ADR 027, ADR 031, ADR 032
-- Amended by: ADR 041, ADR 047
+- Amended by: ADR 041, ADR 047, ADR 056
 
 ## Context
 
@@ -108,6 +108,9 @@ manifest existed, so every page could call every command.
   permissions (set the title, set the theme, show, set the focus) and `dialog:allow-open` for
   the FFmpeg path. It holds no
   menu permission, so it cannot replace the macOS menu that holds Quit.
+- (Added on 2026-10-28.) The Settings window may call `waveform_cache_usage` and
+  `clear_waveform_cache` of ADR 056, and only the Settings window may call them. The main window
+  may call `start_waveform` and `cancel_waveform` of ADR 056.
 - `load_project` and `save_project` are granted to no window, because version 1 keeps no project
   file.
 

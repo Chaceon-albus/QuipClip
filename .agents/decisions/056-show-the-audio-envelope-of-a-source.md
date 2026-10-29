@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-28
 - Deciders: capric98
-- Amends: ADR 007, ADR 017, ADR 046, ADR 052
+- Amends: ADR 007, ADR 017, ADR 038, ADR 046, ADR 052
 
 ## Context
 
@@ -137,8 +137,11 @@ The input of FFmpeg depends on the container:
 - **FLV.** Rust reads the tags of the file in order and sends the audio tags only, in runs
   (measurement 6). A new run starts at one of these:
   - A timestamp that jumps more than 10 s forward or backward from the previous audio tag.
-  - An AAC configuration tag whose data differs from the current configuration. A copy of the
+  - A configuration tag whose data differs from the current configuration. A copy of the
     current configuration does not start a run.
+  - (Added with the implementation.) A frame of a codec other than the codec of the current run.
+    FFmpeg reads such a frame as a second stream, which `-map 0:a:0` drops. A frame with no
+    payload after its codec header carries no audio, and Rust skips it.
 
   Each run has its own process. The start of a run is the later of `videoStartPts` and the time
   of its first audio tag, rounded down to a bucket boundary. Bucket boundaries count from
@@ -150,15 +153,17 @@ The input of FFmpeg depends on the container:
   (ADR 046). When it finds none, the job ends with the envelope that it has and the flag
   `damaged`.
 
-  An FLV with audio that is not AAC, such as MP3, has no configuration tag. Its runs start only
-  at a jump of the timestamps.
+  An FLV with MP3 audio has no configuration tag. Its runs start only at a jump of the timestamps
+  or at a change of codec.
 
 The audio format can change in the middle of a file that is not FLV, and in an FLV run of audio
 that is not AAC. FFmpeg then adds silence (measurement 4). The job runs FFmpeg at
 `-loglevel info -nostats` and reads each line of its error output. When a line holds
 "Reconfiguring filter graph", the end message has the flag `alignmentUncertain`. As a second
-check, when the output is more than 1 s longer than `approximateDurationSeconds`, the job sets
-the same flag. With no duration, only the first check applies.
+check, when the output of a file that is not FLV is more than 1 s longer than
+`approximateDurationSeconds`, the job sets the same flag. An FLV gets no such check, because a
+restart of its timestamps can make the envelope longer than the probe. With no duration, only
+the first check applies.
 
 For each bucket, Rust keeps the peak and the RMS of the samples. Each value is one byte in steps
 of 0.25 dB. Code 0 is silence, and code `c` is `c / 4 − 63.75` dB. One hour of audio is 720 kB.
@@ -181,6 +186,13 @@ message has the flag `truncated`. A damaged timestamp therefore cannot allocate 
 The other flags are `timestampsDecrease`, `damaged` and `truncated`. The cache keeps them with
 the envelope, and a cache hit gives them again.
 
+(Added with the implementation.) Two exceptions to the table:
+
+- A job that ends `complete` with no bucket does not go into the cache. An example is an FLV
+  whose frames all wait for a configuration.
+- A cache hit takes no slot, so Rust cannot cancel it. When the user cancels a cache hit, the
+  page drops its data at the `complete` end, and the item shows Show Waveform again.
+
 ### Cancel, reload and exit
 
 A cancel sets the cancel flag of the job and kills its process. The reads of the file run on a
@@ -192,10 +204,11 @@ windows (ADR 046). When a page load of the main window starts, Rust sets the flo
 now and cancels the running job. Rust refuses each request below the floor. A late request of
 the old page therefore cannot take the slot.
 
-When the main window is destroyed, Rust cancels the job. The exit handler kills the job, refuses
-each later request, and gives the job no part of the budget of ADR 017. The job writes its cache
-file only at its end, with one atomic replace. A kill during that write can leave a temporary
-file, and the cleanup deletes it after 1 hour.
+When the main window is destroyed, Rust cancels the job and refuses each later request, as at the
+exit. A destroyed main window ends the application (ADR 046). The exit handler kills the job,
+refuses each later request, and gives the job no part of the budget of ADR 017. The job
+writes its cache file only at its end, with one atomic replace. A kill during that write can
+leave a temporary file, and the cleanup deletes it after 1 hour.
 
 ### The channel
 
@@ -212,8 +225,9 @@ The start command returns at once, and the data comes through a Tauri channel:
 Error codes are stable names (ADR 011):
 
 - The start command: `invalidRequest`, `sourceUnreadable`, `sourceNotAllowed`, `sourceChanged`,
-  `noAudio`, `busy`, `superseded`, `closed`, `cacheUnavailable`, `ffmpegNotFound` and
-  `commandExecutionFailed`.
+  `busy`, `superseded`, `closed`, `cacheUnavailable`, `ffmpegNotFound` and
+  `commandExecutionFailed`. (Changed with the implementation.) The page never asks for a source
+  with no audio, so Rust has no code for it.
 - The end message: `spawnFailed`, `readFailed`, `decodeFailed` and `sourceChanged`. A failure
   of FFmpeg also gives the last lines of its error output, untranslated (ADR 011).
 
@@ -268,12 +282,26 @@ time in a source comes from the clip range and the virtual timeline only (ADR 05
 The envelope grows while the data comes. The growth comes from new data. It is not an animation,
 so the motion rule of ADR 007 does not apply to it.
 
+(Added with the implementation.) The canvas starts 44 px below the top of the track, below the
+clip label and the two lines of a segment label, so the envelope never covers their text. In a
+track less than 100 px high, the canvas covers the height of the segments, and the envelope can
+cover the labels. Below the labels, the envelope covers
+the outlines and the focus ring of a segment where the audio is loud. The segment layer is one
+stacking context, so no layer can go between its fill and its outlines. The user accepted this
+when the user chose a layer above the segments.
+
 ### The notice
 
 When a job starts without a cache hit, the notification area of the preview shows a warning. The
 warning gives the name of the file and the progress. It says that the preview can stutter until
 the job ends. The user can close it. It closes when the job ends. A failed job shows an error
 notice.
+
+(Added with the implementation.) The warning shows only after the reply of the start, which says
+whether the job reads the file or the cache, so a cache hit never shows it. The progress is a
+progress bar beside the text of the alert, so a screen reader does not read the alert again at
+each percent. The error notice holds the diagnostic text of the failure, so it stays until the
+user closes it.
 
 ## Rejected alternatives
 
