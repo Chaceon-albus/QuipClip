@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048, ADR 055
+- Amended by: ADR 048, ADR 055, ADR 056
 
 ## Context
 
@@ -799,6 +799,8 @@ time, and their answers join in the order of the groups (ADR 055).
   WKWebView (measurement 21).
 - **A second read of the source for the cue.** FLV interleaves audio and video. An audio window
   would therefore read all the video bytes again: about 35 MB for 20 s at 14 Mbit/s.
+  (Added on 2026-10-28.) ADR 056 reads the whole source once for the audio envelope. The user
+  starts that read, and its result goes into a cache.
 - **`negative_cts_offsets`.** It moves the PTS (measurement 6).
 - **A delay filter on the AAC transcode.** It makes the audio late (measurement 15).
 

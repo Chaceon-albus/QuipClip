@@ -5,6 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 007, ADR 010, ADR 022, ADR 024, ADR 026, ADR 027, ADR 028,
   ADR 030, ADR 037, ADR 045, ADR 048
+- Amended by: ADR 056
 
 ## Context
 
@@ -253,6 +254,9 @@ after the sequence gets its first clip.
 
 - The ruler spans the sequence.
 - The track lane shows each clip, with its file name and a line at each junction.
+- (Added on 2026-10-28.) The audio envelope of ADR 056 belongs to a source. Each clip of the
+  source draws the part of the envelope in its range. The menu of the clip label shows, cancels
+  and hides it.
 - A segment that crosses a junction is one block. Its number counts the segment, not its
   parts.
 - The timecode shows `HH:MM:SS:FF` only when all of these are true. Otherwise it shows

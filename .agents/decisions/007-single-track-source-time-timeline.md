@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 030, ADR 045, ADR 052
+- Amended by: ADR 030, ADR 045, ADR 052, ADR 056
 
 ## Context
 
@@ -291,6 +291,11 @@ Redo that brings a segment back. The first list after a source loads is the base
 zoom, a scroll, a selection, a trim or a Mark on the current segment does not replay the
 fade. After a Split, the cut point flashes once. With reduced motion, neither the fade nor
 the flash runs.
+
+(Added on 2026-10-28.) The audio envelope of ADR 056 is a translucent layer above the segments
+and below the clip labels. It takes no pointer events. It grows while its data comes from the
+backend. That growth is data, not an animation, so it has no transition and reduced motion does
+not change it.
 
 The gutter of the track row shows the number of segments and the total export duration. They
 come from the same selectors and the same formatter as the Export button (ADR 024), so the two
