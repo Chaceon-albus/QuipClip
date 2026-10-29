@@ -476,6 +476,11 @@
    * beside the playhead line, where the playhead line never draws. */
   --timeline-mark: oklch(0.43 0.08 192);
 
+  /* The audio envelope of a source (WaveformLayer, ADR 056). The canvas draws it over the
+   * segments at 30 % for the peak and 60 % for the RMS, so it must read over the track and over
+   * the segment fill: a deep teal of the palette, darker than the segments. */
+  --timeline-waveform: oklch(0.36 0.07 200);
+
   /* ---------------------------------------------------------
    * Video clips
    *
@@ -805,6 +810,10 @@
    * ruler, 6.0:1 against the fill of an unselected segment and 4.6:1 against the hover fill.
    * Against the playhead colour it keeps 1.3:1. */
   --timeline-mark: oklch(0.86 0.07 190);
+
+  /* The audio envelope: a pale teal, lighter than the segments, so it reads over the dark track
+   * and over the segment fill. */
+  --timeline-waveform: oklch(0.84 0.06 190);
 
   /* ---------------------------------------------------------
    * Video clips

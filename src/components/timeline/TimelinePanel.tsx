@@ -125,6 +125,7 @@ import { TrimNotice } from "./TrimNotice";
 import { ClipBars, ClipLabels } from "./ClipLayer";
 import { calculateClipBarLayouts } from "./clipBarLayout";
 import { DropJunctionLine } from "./DropJunctionLine";
+import { WaveformLayer } from "./WaveformLayer";
 import { registerTrackLane } from "@/components/layout/fileDropTarget";
 
 export interface TimelinePanelProps {
@@ -1573,6 +1574,17 @@ export function TimelinePanel({
                     onSegmentContextMenu={segmentContextMenuHandler}
                     canTrimEdges={canTrimEdges}
                     outFrameRate={frameBandRate}
+                  />
+
+                  {/*
+                   * The audio envelope of each clip whose source shows it, over the segments
+                   * and under the clip labels (see WaveformLayer, ADR 056)
+                   */}
+                  <WaveformLayer
+                    totalDurationSeconds={totalDurationSeconds}
+                    laneWidthPx={laneWidthPx}
+                    viewportWidthPx={viewportWidthPx}
+                    scrollRef={scrollRef}
                   />
 
                   {/* The file name and the menu of each clip (see ClipLabels, ADR 052) */}
