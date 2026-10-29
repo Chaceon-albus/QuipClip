@@ -318,6 +318,38 @@ fn classify_audio(data: &[u8]) -> TagRole {
     }
 }
 
+/// The codec of an audio tag: the sound format of a legacy tag, or the FourCC of an enhanced tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    Legacy(u8),
+    Enhanced([u8; 4]),
+}
+
+impl AudioCodec {
+    /// True when the frames of this codec need a configuration tag before them: legacy AAC, and
+    /// every enhanced codec but MP3.
+    pub fn needs_config(self) -> bool {
+        match self {
+            AudioCodec::Legacy(format) => format == SOUND_FORMAT_AAC,
+            AudioCodec::Enhanced(fourcc) => &fourcc != b".mp3",
+        }
+    }
+}
+
+/// The codec of the data of an audio tag and the length of its codec header, or `None` when the
+/// data is too short to name a codec.
+pub fn audio_codec(data: &[u8]) -> Option<(AudioCodec, usize)> {
+    let first = *data.first()?;
+    match first >> 4 {
+        SOUND_FORMAT_EX_HEADER => {
+            let fourcc: [u8; 4] = data.get(1..5)?.try_into().ok()?;
+            Some((AudioCodec::Enhanced(fourcc), 5))
+        }
+        SOUND_FORMAT_AAC => Some((AudioCodec::Legacy(SOUND_FORMAT_AAC), 2)),
+        format => Some((AudioCodec::Legacy(format), 1)),
+    }
+}
+
 /// Read a big-endian signed 24-bit integer.
 fn signed_24(bytes: &[u8]) -> i32 {
     let value = (i32::from(bytes[0]) << 16) | (i32::from(bytes[1]) << 8) | i32::from(bytes[2]);
@@ -515,6 +547,25 @@ mod tests {
         assert_eq!(frame_nal_units(&[0x91, b'a', b'v', b'0', b'1', 1, 2]), None);
         assert_eq!(frame_nal_units(&[0x57, 1, 0, 0, 0]), None);
         assert_eq!(frame_nal_units(&[]), None);
+    }
+
+    #[test]
+    fn names_the_codec_of_audio_data() {
+        assert_eq!(
+            audio_codec(&[0xAF, 1, 9]),
+            Some((AudioCodec::Legacy(10), 2))
+        );
+        assert_eq!(audio_codec(&[0x2F, 0xFF]), Some((AudioCodec::Legacy(2), 1)));
+        assert_eq!(
+            audio_codec(&[0x91, b'O', b'p', b'u', b's', 7]),
+            Some((AudioCodec::Enhanced(*b"Opus"), 5))
+        );
+        assert_eq!(audio_codec(&[0x91, b'O', b'p']), None);
+        assert_eq!(audio_codec(&[]), None);
+        assert!(AudioCodec::Legacy(10).needs_config());
+        assert!(!AudioCodec::Legacy(2).needs_config());
+        assert!(AudioCodec::Enhanced(*b"mp4a").needs_config());
+        assert!(!AudioCodec::Enhanced(*b".mp3").needs_config());
     }
 
     #[test]
