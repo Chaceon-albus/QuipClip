@@ -15,11 +15,14 @@ QuipClip is at an early stage.
 QuipClip can do these things:
 
 - Open a video, play it, and move one frame forward or back.
-- Mark segments on the presentation timestamps (PTS) of the source video.
+- Put several videos one after another on the timeline.
+- Preview FLV, MPEG-TS, and MKV files.
+- Mark segments on the presentation timestamps (PTS) of the source videos.
 - Change segments on the timeline. You can drag a segment edge, split a segment, and undo
   an edit.
 - Export the segments with a preset. The output can hold the video and the audio, the
-  video only, or the audio only.
+  video only, or the audio only. An export of one segment can copy the source audio.
+- Add an export to a queue while another export runs.
 - Find `ffmpeg`, and test which encoders work on your machine.
 - Show the interface in English or Simplified Chinese, with a light or a dark theme.
 
@@ -28,9 +31,8 @@ QuipClip cannot do these things yet:
 - Save a project file. QuipClip keeps the segments only until you quit. It asks before a
   quit that would lose segments.
 - Download `ffmpeg`. You must install it yourself.
-- Preview a video that the system web view cannot decode. On Windows, install the HEVC
-  Video Extensions from the Microsoft Store to preview HEVC.
-- Edit more than one source video.
+- Preview AVI or WMV files, or a video in a codec that the system web view cannot decode.
+  On Windows, install the HEVC Video Extensions from the Microsoft Store to preview HEVC.
 
 ## Install
 
@@ -61,27 +63,23 @@ QuipClip does not bundle `ffmpeg`. It needs `ffmpeg` and `ffprobe` in the same f
 cannot open a video without them.
 
 - macOS, with [Homebrew](https://brew.sh): `brew install ffmpeg`. After the install, click
-  **Check Again** in Settings. You do not have to restart QuipClip.
+  **Check Again** in Settings.
 - Windows, in PowerShell or Command Prompt:
   `winget install -e --id Gyan.FFmpeg --source winget`. After the install, quit QuipClip,
-  and open it again from the Start menu. QuipClip gets `PATH` when it starts.
+  and open it again from the Start menu.
 
 QuipClip searches for the programs in this order:
 
 1. A path you set in Settings.
-2. Your `PATH`. On macOS, QuipClip also searches `/opt/homebrew/bin` and `/usr/local/bin`,
-   the standard Homebrew folders.
+2. Your `PATH`. On macOS, QuipClip also searches `/opt/homebrew/bin` and `/usr/local/bin`.
 3. The `bin` folder in the application data folder:
    - Windows: `%APPDATA%\io.github.capric98.quipclip\bin`
    - macOS: `~/Library/Application Support/io.github.capric98.quipclip/bin`
 
-After it finds the programs, it tests which encoders work on your machine, and marks the
-ones that do not work. Settings shows which `ffmpeg` QuipClip uses, and where it found it.
-
 ## Use
 
 1. Open a video. Press `Cmd+O` on macOS or `Ctrl+O` on Windows, or drop the file on the
-   window.
+   window. Open or drop more videos to add them to the timeline.
 2. Go to the first frame that you want to keep. Press `I`.
 3. Go to the frame after the last frame that you want to keep. Press `O`. The Out frame is
    not in the segment.
@@ -94,16 +92,11 @@ QuipClip numbers the segments in the order that you mark them. A split puts the 
 directly after the left half. The export joins the segments in the order of their numbers,
 not in the order of their positions on the timeline.
 
-Click a segment to select it. Hold `Cmd` on macOS or `Ctrl` on Windows and click to add a
-segment to the selection or to remove it. Press `Delete` to delete the selected segments.
+One export joins at most 256 parts and uses at most 85 source files. A segment that crosses
+the end of a video on the timeline gives one part for each video.
 
-The export dialog shows the progress. Click **Run in Background** to hide the dialog. The
-status bar then shows the progress.
-
-Settings holds the `ffmpeg` path, the language, the **Appearance** (the theme), the
-timecode format, and the export presets. A preset sets the container (MP4, MOV, or MKV),
-the encoders, the quality, and the output size, frame rate, and audio format. You can test
-a preset on your machine before you use it.
+Settings holds the `ffmpeg` path, the language, the theme, the timecode format, and the
+export presets.
 
 When a control has a key, its tooltip names the key. The table gives the main keys. `Cmd`
 is the macOS key. On Windows, use `Ctrl`.
@@ -130,16 +123,16 @@ is the macOS key. On Windows, use `Ctrl`.
 
 ## How it works
 
-- The preview plays the file in the system web view. A planned fallback will build an
-  ffmpeg proxy when the web view cannot decode the source.
-- Every edit point is a presentation timestamp from the source video stream. This model
-  preserves variable-frame-rate timing and keeps each source in its own timestamp domain.
-- The preview infers source PTS from browser-presented frames through a calibrated linear
-  mapping. When precise mapping is unavailable, playback remains available and edit actions
-  are disabled.
-- Segments use half-open `[inPts, outPts)` boundaries. The renderer seeks each input, cuts
-  on the raw source PTS with `trim`, then normalizes and joins the segments in project
-  order. It compares the frame count of the output with the expected count, and reports a
+- The preview plays the file in the system web view. For FLV and MPEG-TS, and for MKV on
+  macOS, `ffmpeg` copies the range that plays into fragmented MP4, and it does not decode
+  the video. The web view then plays it through MediaSource.
+- Every edit point is a presentation timestamp from the source video stream. So an edit
+  point keeps the timing of a variable frame rate, and each source keeps its own
+  timestamps.
+- Segments use half-open `[inPts, outPts)` boundaries. The export cuts each part on the
+  source PTS with `trim`. It gives the parts of different sources one frame size, frame
+  rate, and audio format, and then joins them in segment order.
+- The export compares the frame count of the output with the expected count. It reports a
   difference instead of writing a wrong cut.
 
 ## Build
