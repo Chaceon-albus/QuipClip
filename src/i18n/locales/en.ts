@@ -555,6 +555,19 @@ export const en = {
       milliseconds: "Milliseconds (HH:MM:SS.mmm)",
       hint: "A source with a variable or unknown frame rate always shows milliseconds.",
     },
+    // The cache of the waveforms that the clip menu shows (ADR 056). {{size}} and {{limit}} are
+    // sizes such as "12.4 MB", {{count}} the number of cached waveforms. `clear` deletes them
+    // all; a later Show Waveform reads the file again.
+    waveformCache: {
+      label: "Waveform Cache",
+      usage_one: "{{count}} waveform, {{size}}",
+      usage_other: "{{count}} waveforms, {{size}}",
+      empty: "No waveforms are cached.",
+      unavailable: "The size of the cache is not available.",
+      clear: "Clear Cache",
+      clearFailed: "The cache could not be cleared.",
+      hint: "A waveform that was computed shows again at once. The cache holds at most {{limit}}, and a waveform that was not shown for 30 days is deleted.",
+    },
     ffmpeg: {
       section: "FFmpeg Location",
       pathLabel: "FFmpeg in Use",

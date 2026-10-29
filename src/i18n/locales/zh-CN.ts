@@ -392,6 +392,15 @@ export const zhCN: TranslationCatalog = {
       milliseconds: "毫秒（HH:MM:SS.mmm）",
       hint: "帧率可变或未知的源始终显示毫秒。",
     },
+    waveformCache: {
+      label: "波形缓存",
+      usage_other: "{{count}} 个波形，共 {{size}}",
+      empty: "暂无缓存的波形。",
+      unavailable: "无法读取缓存大小。",
+      clear: "清空缓存",
+      clearFailed: "无法清空缓存。",
+      hint: "已计算的波形再次显示时无需重新计算。缓存最多占用 {{limit}}，30 天未显示的波形会被删除。",
+    },
     ffmpeg: {
       section: "FFmpeg 位置",
       pathLabel: "当前使用的 FFmpeg",

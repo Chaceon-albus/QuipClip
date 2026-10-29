@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Select,
@@ -24,6 +24,13 @@ import {
   type LanguagePreference,
 } from "@/i18n";
 import { isThemePreference } from "@/lib/theme";
+import { Button } from "@/components/ui/button";
+import { clearWaveformCache, waveformCacheUsage } from "@/features/waveform/client";
+import {
+  WAVEFORM_CACHE_LIMIT_BYTES,
+  type WaveformCacheUsage,
+} from "@/features/waveform/types";
+import { formatCacheSize } from "./waveformCachePresenter";
 
 /**
  * The General tab of the Settings window. It holds the settings that belong to the
@@ -36,6 +43,7 @@ export function GeneralSection() {
       <LanguageField />
       <AppearanceField />
       <TimecodeField />
+      <WaveformCacheField />
     </section>
   );
 }
@@ -177,6 +185,91 @@ function TimecodeField() {
       </Select>
       <p id={hintId} className="text-xs text-muted-foreground">
         {t("settings.timecode.hint")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The cache of the audio envelopes (ADR 056): its size, and a button that clears it. The limits
+ * are constants of the backend, so this field changes nothing in the settings file. The field
+ * imports the client module itself, not the barrel, so this window starts no envelope
+ * controller.
+ */
+function WaveformCacheField() {
+  const { t, i18n } = useTranslation();
+  const labelId = useId();
+  const hintId = useId();
+  // Null while the size is read, "unavailable" when the read failed.
+  const [usage, setUsage] = useState<WaveformCacheUsage | "unavailable" | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [clearFailed, setClearFailed] = useState(false);
+
+  const refresh = useCallback(() => {
+    waveformCacheUsage().then(setUsage, () => setUsage("unavailable"));
+  }, []);
+
+  useEffect(refresh, [refresh]);
+
+  const handleClear = () => {
+    setClearing(true);
+    setClearFailed(false);
+    clearWaveformCache()
+      .catch(() => setClearFailed(true))
+      .finally(() => {
+        setClearing(false);
+        refresh();
+      });
+  };
+
+  const status =
+    usage === null
+      ? ""
+      : usage === "unavailable"
+        ? t("settings.waveformCache.unavailable")
+        : usage.entries === 0
+          ? t("settings.waveformCache.empty")
+          : t("settings.waveformCache.usage", {
+              count: usage.entries,
+              size: formatCacheSize(usage.bytes, i18n.language),
+            });
+  const limit =
+    usage !== null && usage !== "unavailable"
+      ? formatCacheSize(usage.limitBytes, i18n.language)
+      : formatCacheSize(WAVEFORM_CACHE_LIMIT_BYTES, i18n.language);
+
+  return (
+    <div
+      className="space-y-1"
+      role="group"
+      aria-labelledby={labelId}
+      aria-describedby={hintId}
+    >
+      <div id={labelId} className="text-xs font-medium text-muted-foreground">
+        {t("settings.waveformCache.label")}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm" aria-live="polite">
+          {status}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={
+            clearing || usage === null || usage === "unavailable" || usage.entries === 0
+          }
+          onClick={handleClear}
+        >
+          {t("settings.waveformCache.clear")}
+        </Button>
+      </div>
+      {clearFailed && (
+        <p role="alert" className="text-xs text-destructive">
+          {t("settings.waveformCache.clearFailed")}
+        </p>
+      )}
+      <p id={hintId} className="text-xs text-muted-foreground">
+        {t("settings.waveformCache.hint", { limit })}
       </p>
     </div>
   );
