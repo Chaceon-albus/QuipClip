@@ -94,6 +94,9 @@ pub fn run() {
         // The remux windows of the preview, one for each lane (ADR 046). The commands share it
         // with the threads of each window, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::preview::PreviewWindows::default()))
+        // The one slot of the audio envelope jobs (ADR 056). The job threads share it with the
+        // commands, so the managed value is the `Arc`.
+        .manage(Arc::new(ffmpeg::waveform::registry::WaveformJobs::default()))
         // The destination of the last published export. The show command reads the path from
         // here, so the web view names a run and never a path.
         .manage(commands::export_output::PublishedExports::default())
@@ -134,6 +137,14 @@ pub fn run() {
                 {
                     windows.cancel_all(floor);
                 }
+                // The envelope job of the old page stops too, and its late requests are refused
+                // (ADR 056).
+                if let Some(jobs) = webview
+                    .app_handle()
+                    .try_state::<Arc<ffmpeg::waveform::registry::WaveformJobs>>()
+                {
+                    jobs.cancel_all(floor);
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -144,8 +155,10 @@ pub fn run() {
             }
             if window.label() == MAIN_WINDOW_LABEL && matches!(event, tauri::WindowEvent::Destroyed)
             {
-                // The page that read the remux windows is gone with its window (ADR 046).
+                // The page that read the remux windows is gone with its window (ADR 046), and so
+                // is the page of the envelope job (ADR 056).
                 stop_preview_windows(window.app_handle());
+                stop_waveform_jobs(window.app_handle());
                 if let Some(settings) = window
                     .app_handle()
                     .get_webview_window(SETTINGS_WINDOW_LABEL)
@@ -202,6 +215,10 @@ pub fn run() {
             commands::preview::open_preview_window,
             commands::preview::ack_preview_window,
             commands::preview::close_preview_window,
+            commands::waveform::start_waveform,
+            commands::waveform::cancel_waveform,
+            commands::waveform::waveform_cache_usage,
+            commands::waveform::clear_waveform_cache,
             commands::build_info::build_info
         ])
         .build(tauri::generate_context!())
@@ -245,6 +262,7 @@ pub fn run() {
                 }
             }
             stop_preview_windows(handle);
+            stop_waveform_jobs(handle);
             stop_export_before_exit(handle);
         }
         // After an `ExitRequested` that was not prevented, the export was already asked to
@@ -253,7 +271,24 @@ pub fn run() {
         // `EXIT_CANCEL_BUDGET` in total.
         tauri::RunEvent::Exit => {
             stop_preview_windows(handle);
+            stop_waveform_jobs(handle);
             stop_export_before_exit(handle);
+        }
+        // The cleanup of the envelope cache runs once in each run of the application, off the
+        // main thread, also when the user never shows an envelope (ADR 056).
+        tauri::RunEvent::Ready => {
+            if let Ok(root) = handle.path().app_cache_dir() {
+                let spawned = std::thread::Builder::new()
+                    .name("waveform-cleanup".to_owned())
+                    .spawn(move || {
+                        if let Err(error) = ffmpeg::waveform::cache::sweep_once(&root) {
+                            eprintln!("waveform: the cache cleanup failed: {error}");
+                        }
+                    });
+                if let Err(error) = spawned {
+                    eprintln!("waveform: the cache cleanup did not start: {error}");
+                }
+            }
         }
         _ => {}
     });
@@ -264,6 +299,14 @@ pub fn run() {
 fn stop_preview_windows(handle: &tauri::AppHandle) {
     if let Some(windows) = handle.try_state::<Arc<ffmpeg::preview::PreviewWindows>>() {
         windows.close_for_exit();
+    }
+}
+
+/// Kill the process of the envelope job and refuse new jobs (ADR 056, ADR 017 amendment). The
+/// job writes its cache file only at its end, so the exit waits for nothing more.
+fn stop_waveform_jobs(handle: &tauri::AppHandle) {
+    if let Some(jobs) = handle.try_state::<Arc<ffmpeg::waveform::registry::WaveformJobs>>() {
+        jobs.close_for_exit();
     }
 }
 
@@ -726,6 +769,9 @@ mod tests {
         "open_preview_window",
         "ack_preview_window",
         "close_preview_window",
+        // The audio envelope of a source (`features/waveform/client.ts`, ADR 056).
+        "start_waveform",
+        "cancel_waveform",
     ];
 
     /// The commands that the page of the Settings window calls: the settings file, its
@@ -750,6 +796,9 @@ mod tests {
         "broadcast_preference",
         // The version and the source of the build (ADR 047).
         "build_info",
+        // The size of the envelope cache and its clear, on the General tab (ADR 056).
+        "waveform_cache_usage",
+        "clear_waveform_cache",
     ];
 
     /// Registered commands that no window may call: no frontend code calls them. Version 1

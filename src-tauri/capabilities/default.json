@@ -32,6 +32,8 @@
     "allow-open-settings-window",
     "allow-open-preview-window",
     "allow-ack-preview-window",
-    "allow-close-preview-window"
+    "allow-close-preview-window",
+    "allow-start-waveform",
+    "allow-cancel-waveform"
   ]
 }

@@ -36,6 +36,10 @@ export const BACKEND_COMMANDS = {
   OPEN_PREVIEW_WINDOW: "open_preview_window",
   ACK_PREVIEW_WINDOW: "ack_preview_window",
   CLOSE_PREVIEW_WINDOW: "close_preview_window",
+  START_WAVEFORM: "start_waveform",
+  CANCEL_WAVEFORM: "cancel_waveform",
+  WAVEFORM_CACHE_USAGE: "waveform_cache_usage",
+  CLEAR_WAVEFORM_CACHE: "clear_waveform_cache",
   BUILD_INFO: "build_info",
 } as const;
 

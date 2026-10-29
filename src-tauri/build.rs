@@ -38,6 +38,10 @@ const APP_COMMANDS: &[&str] = &[
     "open_preview_window",
     "ack_preview_window",
     "close_preview_window",
+    "start_waveform",
+    "cancel_waveform",
+    "waveform_cache_usage",
+    "clear_waveform_cache",
     "build_info",
 ];
 

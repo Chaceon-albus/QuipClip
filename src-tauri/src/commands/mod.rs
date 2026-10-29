@@ -16,6 +16,7 @@ pub mod project;
 pub mod quit;
 pub mod settings;
 pub mod settings_window;
+pub mod waveform;
 pub mod window_border;
 
 /// A per-process counter that, combined with the current time, makes each run id unique
