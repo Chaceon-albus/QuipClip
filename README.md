@@ -2,6 +2,8 @@
 
 <img src="src/assets/brand/app-icon.svg" alt="" width="96" align="right">
 
+English | [简体中文](README.zh-CN.md)
+
 Mark in and out points on a video, then export the marked segments joined in order.
 
 QuipClip is a small video editor for Windows and macOS. It does one job. You open a video,
