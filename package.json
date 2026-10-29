@@ -5,7 +5,7 @@
   "description": "Mark in and out points on a video, then export the segments joined in order.",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "packageManager": "pnpm@11.24.0",
   "scripts": {
@@ -44,7 +44,7 @@
     "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.6.5",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.1",

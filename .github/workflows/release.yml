@@ -51,7 +51,7 @@ jobs:
       # jobs in this file use no dependency cache.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          node-version: 26
           package-manager-cache: false
 
       - name: Check the version and the tag name
@@ -115,7 +115,7 @@ jobs:
       # that a different run wrote cannot change a published bundle.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 22
+          node-version: 26
           package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
@@ -160,7 +160,8 @@ jobs:
       SHA: ${{ needs.verify.outputs.sha }}
     # This job can write, so it runs no action that it does not need. It has no setup-node
     # step: the scripts use only the built-in modules of Node, and the Node of the runner
-    # image runs them.
+    # image runs them. The `engines` field of package.json applies to the build tools, not
+    # to these scripts (ADR 034).
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

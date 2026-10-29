@@ -144,7 +144,7 @@ is the macOS key. On Windows, use `Ctrl`.
 
 ## Build
 
-Requirements: Node 22 or later, pnpm, and Rust 1.85 or later. See the
+Requirements: Node 26 or later, pnpm, and Rust 1.85 or later. See the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for the platform
 libraries.
 
