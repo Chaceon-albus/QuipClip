@@ -369,8 +369,13 @@ export const en = {
     playhead: "Playhead",
     seekSlider: "Timeline seek",
     // The label and the menu of one clip of the sequence (ADR 052). {{name}} is its file name.
+    // The three waveform items show, cancel and hide the audio envelope of the source of the
+    // clip (ADR 056): Cancel stops the read of the file that computes it.
     clip: {
       menu: "Clip “{{name}}”",
+      showWaveform: "Show Waveform",
+      cancelWaveform: "Cancel Waveform",
+      hideWaveform: "Hide Waveform",
       moveLeft: "Move Clip Left",
       moveRight: "Move Clip Right",
       remove: "Remove Clip",

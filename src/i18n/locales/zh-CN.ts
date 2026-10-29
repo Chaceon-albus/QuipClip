@@ -249,6 +249,9 @@ export const zhCN: TranslationCatalog = {
     seekSlider: "时间轴定位",
     clip: {
       menu: "视频“{{name}}”",
+      showWaveform: "显示波形",
+      cancelWaveform: "取消波形计算",
+      hideWaveform: "隐藏波形",
       moveLeft: "左移该视频",
       moveRight: "右移该视频",
       remove: "移除该视频",

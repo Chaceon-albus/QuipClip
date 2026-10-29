@@ -6,7 +6,8 @@
  * at each junction shows where one clip ends and the next one starts.
  *
  * `ClipLabels` shows the file name of each clip at the top left of its bar, with a menu that
- * moves the clip, removes it, or clears the timeline. The labels are interactive, and interactive
+ * shows, cancels or hides the audio envelope of the source of the clip (ADR 056), moves the
+ * clip, removes it, or clears the timeline. The labels are interactive, and interactive
  * content cannot be inside the `role="slider"` element of the lane, so they are a sibling of the
  * slider, as the segment layer is.
  *
@@ -27,6 +28,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useMediaStore, type MediaStoreState } from "@/features/media";
+import { useShallow } from "zustand/react/shallow";
+import {
+  IDLE_WAVEFORM_SOURCE,
+  resolveWaveformAction,
+  useWaveformStore,
+  type WaveformMenuAction,
+  type WaveformPhase,
+  type WaveformStoreState,
+} from "@/features/waveform";
+import { waveformController } from "@/features/waveform/instance";
 import {
   timelineStore,
   useTimelineStore,
@@ -36,6 +47,36 @@ import { calculateClipBarLayouts } from "./clipBarLayout";
 
 const selectVirtual = (state: TimelineStoreState) => state.virtual;
 const selectSources = (state: MediaStoreState) => state.sources;
+// The phase of each source, and not its progress, so a running job does not render the labels
+// at each progress message.
+const selectWaveformPhases = (
+  state: WaveformStoreState,
+): Record<string, WaveformPhase> =>
+  Object.fromEntries(
+    Object.entries(state.sources).map(([id, source]) => [id, source.phase]),
+  );
+const selectRunningSourceId = (state: WaveformStoreState) => state.runningSourceId;
+
+/** The catalog key of each envelope item. */
+const WAVEFORM_ITEM_KEYS = {
+  show: "timeline.clip.showWaveform",
+  cancel: "timeline.clip.cancelWaveform",
+  hide: "timeline.clip.hideWaveform",
+} as const satisfies Record<WaveformMenuAction, string>;
+
+function runWaveformAction(action: WaveformMenuAction, sourceId: string): void {
+  switch (action) {
+    case "show":
+      waveformController.show(sourceId);
+      return;
+    case "cancel":
+      waveformController.cancel(sourceId);
+      return;
+    case "hide":
+      waveformController.hide(sourceId);
+      return;
+  }
+}
 
 /** The hatch of a bar: the part of a source that no segment keeps (see the source bar note). */
 const BAR_CLASS =
@@ -75,6 +116,14 @@ export function ClipLabels({
   const { t } = useTranslation();
   const virtual = useTimelineStore(selectVirtual);
   const sources = useMediaStore(selectSources);
+  const waveformPhases = useWaveformStore(useShallow(selectWaveformPhases));
+  const runningSourceId = useWaveformStore(selectRunningSourceId);
+  const waveformSources = Object.fromEntries(
+    Object.entries(waveformPhases).map(([id, phase]) => [
+      id,
+      { ...IDLE_WAVEFORM_SOURCE, phase },
+    ]),
+  );
   const layouts = calculateClipBarLayouts(virtual, totalDurationSeconds);
   if (layouts === null) {
     return null;
@@ -84,6 +133,14 @@ export function ClipLabels({
     <div className="pointer-events-none absolute inset-x-0 top-1 h-0">
       {layouts.map((layout) => {
         const name = sources[layout.sourceId]?.fileName ?? "";
+        const waveform = resolveWaveformAction(
+          layout.sourceId,
+          sources[layout.sourceId],
+          {
+            sources: waveformSources,
+            runningSourceId,
+          },
+        );
         return (
           <div
             key={layout.clipId}
@@ -108,6 +165,13 @@ export function ClipLabels({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
+                <DropdownMenuItem
+                  disabled={!waveform.enabled}
+                  onSelect={() => runWaveformAction(waveform.action, layout.sourceId)}
+                >
+                  {t(WAVEFORM_ITEM_KEYS[waveform.action])}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem
                   disabled={layout.index === 0}
                   onSelect={() =>
