@@ -5,6 +5,7 @@ pub mod export;
 pub mod locate;
 pub mod preview;
 pub mod probe;
+pub mod waveform;
 
 pub use capabilities::{
     license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_version,
