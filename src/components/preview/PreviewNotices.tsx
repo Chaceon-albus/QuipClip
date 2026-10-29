@@ -8,6 +8,8 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, X } from "lucide-react";
+import type { WaveformNotice } from "./waveformNoticeRules";
+import { ProgressBar } from "@/components/common/ProgressBar";
 import { DiagnosticDetails } from "@/components/common/DiagnosticDetails";
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
@@ -313,6 +315,50 @@ export function DecodeStallBanner({
       onDismiss={onDismiss}
       onReturnFocus={onReturnFocus}
     />
+  );
+}
+
+/**
+ * A notice of the audio envelope (ADR 056): a job reads a file, so the preview can stutter, or a
+ * job failed. The first stays while the job runs, and the second until the user dismisses it.
+ */
+export function WaveformNoticeBanner({
+  notice,
+  onDismiss,
+  onReturnFocus,
+}: {
+  notice: WaveformNotice;
+  onDismiss: () => void;
+  onReturnFocus: () => void;
+}) {
+  const { t } = useTranslation();
+  if (notice.kind === "waveform") {
+    // The alert says what happens once. The progress is a progress bar beside it, so a screen
+    // reader does not read the whole alert again at each percent.
+    return (
+      <NoticeBanner
+        kind="waveform"
+        message={t("preview.waveform.reading", { name: notice.name })}
+        onDismiss={onDismiss}
+        onReturnFocus={onReturnFocus}
+      >
+        <ProgressBar
+          value={notice.percent}
+          size="xs"
+          aria-label={t("preview.waveform.progress", { name: notice.name })}
+        />
+      </NoticeBanner>
+    );
+  }
+  return (
+    <NoticeBanner
+      kind="waveformError"
+      message={t(notice.messageKey, { name: notice.name })}
+      onDismiss={onDismiss}
+      onReturnFocus={onReturnFocus}
+    >
+      {notice.detail ? <ImportErrorDetails text={notice.detail} /> : undefined}
+    </NoticeBanner>
   );
 }
 

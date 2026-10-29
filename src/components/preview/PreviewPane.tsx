@@ -19,9 +19,13 @@ import {
   getGeneratedSourceId,
   getSourceRevisionKey,
   mediaStore,
+  useMediaStore,
   VIDEO_FILE_EXTENSIONS,
   type ImportMediaResult,
+  type MediaStoreState,
 } from "@/features/media";
+import { useWaveformStore, type WaveformStoreState } from "@/features/waveform";
+import { waveformController } from "@/features/waveform/instance";
 import {
   attachedMediaStore,
   useAttachedMediaStore,
@@ -118,7 +122,9 @@ import {
   ImportErrorEmptyState,
   MediaSourceNoticeBanner,
   PlaybackErrorBanner,
+  WaveformNoticeBanner,
 } from "./PreviewNotices";
+import { resolveWaveformNotices } from "./waveformNoticeRules";
 import { createSourceLifecycleGuard, formatPreviewTotalDuration } from "./previewFrame";
 import { PreviewTimecode } from "./PreviewTimecode";
 
@@ -367,8 +373,38 @@ function DecodeFailureReasonText({ reason }: { reason: DecodeFailureReason }) {
   }
 }
 
+const selectMediaSources = (state: MediaStoreState) => state.sources;
+const selectWaveformSources = (state: WaveformStoreState) => state.sources;
+const selectWaveformRunning = (state: WaveformStoreState) => state.runningSourceId;
+const selectHasWaveformNotice = (state: WaveformStoreState) =>
+  resolveWaveformNotices(state, () => "").length > 0;
+
+/**
+ * The notices of the audio envelope (ADR 056). They belong to a source of the sequence, not to
+ * the attached clip, so they show whatever clip the preview plays. The progress of a job
+ * renders this list and not the pane.
+ */
+function WaveformNotices({ onReturnFocus }: { onReturnFocus: () => void }) {
+  const mediaSources = useMediaStore(selectMediaSources);
+  const sources = useWaveformStore(selectWaveformSources);
+  const runningSourceId = useWaveformStore(selectWaveformRunning);
+  const notices = resolveWaveformNotices(
+    { sources, runningSourceId },
+    (sourceId) => mediaSources[sourceId]?.fileName ?? "",
+  );
+  return notices.map((notice) => (
+    <WaveformNoticeBanner
+      key={`${notice.kind}-${notice.sourceId}`}
+      notice={notice}
+      onDismiss={() => waveformController.dismissNotice(notice.sourceId)}
+      onReturnFocus={onReturnFocus}
+    />
+  ));
+}
+
 export function PreviewPane() {
   const { t } = useTranslation();
+  const hasWaveformNotice = useWaveformStore(selectHasWaveformNotice);
   // The media of the clip that the sequence attached (ADR 052). A switch of clip changes it, and
   // the element below mounts again for the new source: the cold switch.
   const status = useAttachedMediaStore((s) => s.status);
@@ -1076,7 +1112,8 @@ export function PreviewPane() {
     hasImportError ||
     showsPlaybackErrorBanner ||
     shownStall !== null ||
-    shownMediaSourceNotices.length > 0;
+    shownMediaSourceNotices.length > 0 ||
+    hasWaveformNotice;
 
   const totalTimeDisplay = sequenceMedia
     ? formatPreviewTotalDuration(
@@ -1408,6 +1445,7 @@ export function PreviewPane() {
                       onReturnFocus={returnFocusToPreview}
                     />
                   )}
+                  <WaveformNotices onReturnFocus={returnFocusToPreview} />
                   {shownMediaSourceNotices.map((messageKey) => (
                     <MediaSourceNoticeBanner
                       key={messageKey}

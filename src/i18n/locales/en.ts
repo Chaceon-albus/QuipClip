@@ -184,6 +184,26 @@ export const en = {
       noSound:
         "The preview cannot convert the audio of this video, so it plays without sound.",
     },
+    // The notices of the audio envelope of a source (ADR 056). `reading` shows while a job reads
+    // the whole file, which competes with the reads of the preview, and `progress` is the
+    // accessible name of its progress bar. {{name}} is the file name. `error.*` show when a job
+    // fails: `busy` when another envelope job runs, `other` for every other reason. The menu
+    // calls the envelope a waveform.
+    waveform: {
+      reading:
+        "Reading “{{name}}” for its waveform. The preview can stutter until this ends.",
+      progress: "Waveform of “{{name}}”",
+      error: {
+        ffmpegNotFound: "The waveform of “{{name}}” needs FFmpeg, which was not found.",
+        sourceChanged:
+          "“{{name}}” changed while its waveform was computed. Show the waveform again.",
+        readFailed:
+          "The waveform of “{{name}}” stopped, because the file could not be read.",
+        decodeFailed: "FFmpeg could not compute the waveform of “{{name}}”.",
+        busy: "Another waveform is being computed. Try again when it ends.",
+        other: "The waveform of “{{name}}” could not be computed.",
+      },
+    },
     // An import that failed. With no video open, the error takes the place of the empty
     // state: `title`, then the `mediaError` message, then `ffmpegHint` for an error that the
     // FFmpeg settings can correct, then the actions. `ffmpegHint` names the Settings window

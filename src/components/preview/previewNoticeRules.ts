@@ -75,19 +75,27 @@ export function importErrorHintKey(
  *   not read it (`decodeStall` of the playback store).
  * - `mediaSource`: a fact about a video that plays through FFmpeg, such as timestamps that go
  *   back (ADR 046).
+ * - `waveform`: a job reads a file for its audio envelope, so the preview can stutter
+ *   (ADR 056).
+ * - `waveformError`: a job of the audio envelope failed (ADR 056).
  */
-export type PreviewNoticeKind = "import" | "playback" | "decodeStall" | "mediaSource";
+export type PreviewNoticeKind =
+  "import" | "playback" | "decodeStall" | "mediaSource" | "waveform" | "waveformError";
 
 /**
  * The colour of a notice. A failed import, play or seek is an error. A decode stall is a
  * warning: the preview continues at the next seek, and the export does not depend on it. A
  * notice about a video that plays through FFmpeg (ADR 046) is a warning too: the video plays.
+ * The notice of an envelope job that reads a file is a warning: the preview works, and can
+ * stutter. A failed envelope job is an error (ADR 056).
  */
 export type PreviewNoticeTone = "destructive" | "warning";
 
 /** The colour of a notice of each kind. */
 export function previewNoticeTone(kind: PreviewNoticeKind): PreviewNoticeTone {
-  return kind === "decodeStall" || kind === "mediaSource" ? "warning" : "destructive";
+  return kind === "decodeStall" || kind === "mediaSource" || kind === "waveform"
+    ? "warning"
+    : "destructive";
 }
 
 /**
@@ -118,7 +126,8 @@ export type NoticeTimerStep = {
  * gets a timer. The notice of a decode stall stays while the stall holds, so it gets no timer
  * either: it says what to do, and the stall ends only when the user does it. A notice about a
  * video that plays through FFmpeg states a fact of the file, so it stays until the user
- * dismisses it. A playback error leaves after `PLAYBACK_NOTICE_DURATION_MS`. While the pointer
+ * dismisses it. The notice of an envelope job stays while the job runs, and the error of a job
+ * stays until the user dismisses it, because it can hold diagnostic text. A playback error leaves after `PLAYBACK_NOTICE_DURATION_MS`. While the pointer
  * is over it or the focus is in it, it is paused and gets no timer. When the pause ends, the
  * full duration starts again, so the user always has the whole time to read it.
  *

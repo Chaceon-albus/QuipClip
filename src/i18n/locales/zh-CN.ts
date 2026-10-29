@@ -127,6 +127,18 @@ export const zhCN: TranslationCatalog = {
       timestampsDecrease: "此视频的时间戳出现回退。预览可以播放，但无法精确标记。",
       noSound: "预览无法转换此视频的音频，因此播放时没有声音。",
     },
+    waveform: {
+      reading: "正在读取“{{name}}”以计算波形，期间预览可能卡顿。",
+      progress: "“{{name}}”的波形",
+      error: {
+        ffmpegNotFound: "计算“{{name}}”的波形需要 FFmpeg，但未找到 FFmpeg。",
+        sourceChanged: "计算波形期间“{{name}}”发生了变化。请重新显示波形。",
+        readFailed: "无法读取文件，“{{name}}”的波形计算已停止。",
+        decodeFailed: "FFmpeg 无法计算“{{name}}”的波形。",
+        busy: "另一个波形正在计算，请在其完成后重试。",
+        other: "无法计算“{{name}}”的波形。",
+      },
+    },
     importError: {
       title: "无法打开此视频",
       ffmpegHint:

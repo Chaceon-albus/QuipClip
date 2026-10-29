@@ -156,4 +156,9 @@ describe("previewNoticeTone", () => {
   it("shows a notice about a video that plays through FFmpeg as a warning", () => {
     expect(previewNoticeTone("mediaSource")).toBe("warning");
   });
+
+  it("shows a running envelope job as a warning and a failed one as an error", () => {
+    expect(previewNoticeTone("waveform")).toBe("warning");
+    expect(previewNoticeTone("waveformError")).toBe("destructive");
+  });
 });
