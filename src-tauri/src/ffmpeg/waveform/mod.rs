@@ -6,6 +6,7 @@
 //! time from `k / 100` to `(k + 1) / 100` seconds after the first video frame.
 
 pub mod arguments;
+pub mod cache;
 pub mod fold;
 
 pub use arguments::{file_arguments, flv_run_arguments, origin_samples};
