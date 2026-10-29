@@ -275,7 +275,7 @@ pub fn recording(options: &RecordingOptions) -> Recording {
             audio_index += 1;
         }
         let key = frame >= options.leading_frames
-            && (frame - options.leading_frames) % options.gop_frames == 0;
+            && (frame - options.leading_frames).is_multiple_of(options.gop_frames);
         // A closed GOP with two B-frames: the keyframe shows two frames late.
         let composition = if key {
             67

@@ -212,7 +212,7 @@ pub fn read(cache_root: &Path, key: &EnvelopeKey) -> Option<CachedEnvelope> {
 /// Writes the envelope of `key` with one atomic replace, then runs the cleanup. An error of the
 /// cleanup does not fail the write, because the entry is saved.
 pub fn write(cache_root: &Path, key: &EnvelopeKey, envelope: &CachedEnvelope) -> io::Result<()> {
-    if envelope.buckets.len() % BYTES_PER_BUCKET != 0 {
+    if !envelope.buckets.len().is_multiple_of(BYTES_PER_BUCKET) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "an envelope holds two codes for each bucket",

@@ -172,7 +172,9 @@ diagnostic.
 layer 2 can therefore be a stand-in.
 
 `Cargo.toml` declares `rust-version = "1.85"`. Layer 2 has no value below that version, and an
-older toolchain degrades it with no diagnostic instead of failing the build.
+older toolchain degrades it with no diagnostic instead of failing the build. (Changed on
+2026-10-28.) `Cargo.toml` now declares `rust-version = "1.90"`, because the Tauri 2.12 crates
+declare that version. Layer 2 still needs 1.85 or later.
 
 **This decision does not size the wait for the export publication.** 511 milliseconds is correct
 for a settings file and a cache file. A scanner holds a file of a few kilobytes for
@@ -242,7 +244,8 @@ been replaced.
   A failed reset leaves the damaged file in place and costs one more attempt.
 - `Cargo.toml` now declares `rust-version`, which also turns on `clippy::incompatible_msrv` for
   the whole crate. Under `-D warnings`, a later use of a standard-library item that became stable
-  after 1.85 therefore fails the build until someone raises the declared version.
+  after 1.85 therefore fails the build until someone raises the declared version. (Changed on
+  2026-10-28.) The declared version is now 1.90, so the bound is 1.90.
 - `PendingOutput::commit` requires its caller to test `ExportSlot::is_canceled` before the
   rename. No decision record holds that rule, and `ffmpeg/export/output.rs` holds it. The gap
   between that test and the publication grows from microseconds to as much as 511 milliseconds.

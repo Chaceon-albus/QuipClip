@@ -57,11 +57,11 @@ impl EnvelopeFolder {
             self.add(i16::from_le_bytes([low, high]), out);
             rest = tail;
         }
-        let mut pairs = rest.chunks_exact(2);
-        for pair in &mut pairs {
-            self.add(i16::from_le_bytes([pair[0], pair[1]]), out);
+        let (pairs, remainder) = rest.as_chunks::<2>();
+        for &pair in pairs {
+            self.add(i16::from_le_bytes(pair), out);
         }
-        self.odd_byte = pairs.remainder().first().copied();
+        self.odd_byte = remainder.first().copied();
     }
 
     /// Appends the codes of the last partial bucket, when the stream ended inside one. A last
@@ -158,7 +158,7 @@ mod tests {
             .collect();
         let out = fold_all(&sine);
         assert_eq!(out.len(), 20);
-        for bucket in out.chunks_exact(2) {
+        for bucket in out.as_chunks::<2>().0 {
             assert_eq!(bucket[0], 231);
             // −3.01 dB is 12 codes.
             assert_eq!(bucket[0] - bucket[1], 12);

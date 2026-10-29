@@ -468,7 +468,7 @@ const OWNER_WRITE_BIT: u32 = 0o200;
 /// **Which code reaches layer 2.** Only `ERROR_ACCESS_DENIED`, and only when `destination` is
 /// not read-only. A current `fs::rename` gates its whole POSIX-semantics path behind that one
 /// code: it calls `MoveFileExW(old, new, MOVEFILE_REPLACE_EXISTING)` first and takes the POSIX
-/// path only when that call reports code 5. Rust 1.85, the floor `Cargo.toml` declares, is
+/// path only when that call reports code 5. Rust 1.85, the first release with that path, is
 /// shaped the other way round: `FileRenameInfoEx` is its first attempt, and `FileRenameInfo` is
 /// the fallback on `ERROR_INVALID_PARAMETER`. Neither shape changes this rule. For
 /// `ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION` and `ERROR_USER_MAPPED_FILE` -- the

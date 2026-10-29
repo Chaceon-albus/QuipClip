@@ -957,7 +957,9 @@ mod tests {
             self.buckets
                 .lock()
                 .unwrap()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bucket| bucket[0])
                 .collect()
         }
