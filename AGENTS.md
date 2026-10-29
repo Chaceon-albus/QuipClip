@@ -75,7 +75,14 @@ section 5, and it is the only normative copy.
 ### Language
 
 - Write every code comment in English.
-- Write every document in English.
+- Write every document in English. The next two rules give the only exceptions.
+- `README.zh-CN.md` is the Simplified Chinese translation of `README.md`. Write it in
+  Chinese.
+- `README.md` can have one link to `README.zh-CN.md`. The text of that link is `简体中文`.
+- When you change `README.md`, make the matching change in `README.zh-CN.md` in the same
+  commit. An English-only fix, such as a typo, needs no matching change.
+- Run the Chinese text through the `controlled-technical-chinese` skill before you finish
+  it.
 - Run an English document through the `asd-ste100` skill before you finish it.
 
 ### Architecture decisions
