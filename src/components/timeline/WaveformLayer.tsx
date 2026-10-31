@@ -38,8 +38,12 @@ import { calculateClipBarLayouts } from "./clipBarLayout";
 
 /** The margin of the canvas on each side of the visible lane, in CSS pixels. */
 const OVERSCAN_PX = 512;
-/** The opacity of the peak and of the RMS over it. */
-const PEAK_ALPHA = 0.25;
+/**
+ * The opacity of the peak. The RMS shows the loudness that the user looks for, so the peak is
+ * faint: it shows only the part of each column above the RMS.
+ */
+const PEAK_ALPHA = 0.15;
+/** The opacity of the RMS, which the canvas draws over the peak. */
 const RMS_ALPHA = 0.5;
 /** The colour when the canvas cannot read the token of the palette. */
 const FALLBACK_RGB: readonly [number, number, number] = [32, 96, 104];
