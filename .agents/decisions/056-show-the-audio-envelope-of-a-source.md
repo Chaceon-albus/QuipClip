@@ -282,13 +282,24 @@ time in a source comes from the clip range and the virtual timeline only (ADR 05
 The envelope grows while the data comes. The growth comes from new data. It is not an animation,
 so the motion rule of ADR 007 does not apply to it.
 
-(Added with the implementation.) The canvas starts 44 px below the top of the track, below the
-clip label and the two lines of a segment label, so the envelope never covers their text. In a
-track less than 100 px high, the canvas covers the height of the segments, and the envelope can
-cover the labels. Below the labels, the envelope covers
-the outlines and the focus ring of a segment where the audio is loud. The segment layer is one
-stacking context, so no layer can go between its fill and its outlines. The user accepted this
-when the user chose a layer above the segments.
+(Changed on 2026-10-31.) The canvas has the top and the height of the clip bars. Its top is 8 px
+below the top of the track. Its bottom is 8 px above the bottom of the track. The envelope
+therefore has the same centre line as the clip bars and the segments. The envelope becomes
+taller when the user makes the timeline taller. The user proposed this rule.
+
+The first implementation put the top of the canvas 44 px below the top of the track. That
+position was below the clip label and the two lines of a segment label. A canvas is a replaced
+element, so its `top` and `bottom` did not set its height. The canvas stayed at its intrinsic
+height of 150 px. Its bottom was therefore 194 px below the top of the track. At the default
+timeline height, the track is at most 151 px high, so the scroll container clipped the bottom
+of the envelope. The centre line of the envelope was also below the centre line of the clip
+bars. The canvas now has an explicit height.
+
+The clip labels are above the canvas, so the envelope does not cover them. Where the audio is
+loud, the envelope covers the text, the outlines and the focus ring of a segment. The envelope
+is translucent, so the text stays visible with less contrast. The segment layer is one stacking
+context, so no layer can go between its fill and its text or outlines. The user chose a layer
+above the segments.
 
 ### The notice
 

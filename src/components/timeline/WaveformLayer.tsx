@@ -3,11 +3,11 @@
  *
  * One canvas covers the visible part of the lane and a margin on each side. It is above the
  * segments and below the clip labels, it takes no pointer events, and the accessibility tree
- * does not show it. It starts below the clip label and the two lines of a segment label, so the
- * envelope never covers their text. A track too short for that gets the envelope over its whole
- * height. The lane can be 100,000 px wide, so the canvas never spans it: it moves
- * with the scroll and draws again in the next animation frame. The margin hides the edge that a
- * scroll shows before that frame.
+ * does not show it. It has the top and the height of the clip bars, so the envelope has the same
+ * centre line as the bars and the segments. A taller track gives a taller envelope. Where the
+ * audio is loud, the envelope covers the text of a segment label. The lane can be 100,000 px
+ * wide, so the canvas never spans it: it moves with the scroll and draws again in the next
+ * animation frame. The margin hides the edge that a scroll shows before that frame.
  *
  * The envelope data lives outside React (`waveformData`), so a new piece of a job draws the
  * canvas again and renders nothing. With no source that shows an envelope, the layer renders
@@ -41,12 +41,6 @@ const OVERSCAN_PX = 512;
 /** The opacity of the peak and of the RMS over it. */
 const PEAK_ALPHA = 0.25;
 const RMS_ALPHA = 0.5;
-/** The top of the canvas in the track box: below the clip label and a segment label. */
-const BELOW_LABELS_PX = 44;
-/** The top of the canvas in a short track: the top of the segments. */
-const SHORT_TRACK_TOP_PX = 8;
-/** The lowest track box that keeps the labels clear and still shows a useful envelope. */
-const LABELS_CLEAR_MIN_HEIGHT_PX = 100;
 /** The colour when the canvas cannot read the token of the palette. */
 const FALLBACK_RGB: readonly [number, number, number] = [32, 96, 104];
 
@@ -152,10 +146,6 @@ function WaveformCanvas({
       overscanPx: OVERSCAN_PX,
       dpr,
     });
-    const boxHeight = canvas.parentElement?.clientHeight ?? 0;
-    const top =
-      boxHeight >= LABELS_CLEAR_MIN_HEIGHT_PX ? BELOW_LABELS_PX : SHORT_TRACK_TOP_PX;
-    canvas.style.top = `${top}px`;
     const heightPx = Math.max(0, Math.round(canvas.clientHeight * dpr));
     if (canvas.width !== plan.widthDevicePx) {
       canvas.width = plan.widthDevicePx;
@@ -234,11 +224,15 @@ function WaveformCanvas({
     };
   }, [scrollRef, schedule]);
 
+  // The canvas takes the top and the height of the clip bars (`inset-y-2` of the seek slider
+  // content). A canvas is a replaced element. With `top` and `bottom` and no height, it keeps its
+  // intrinsic height, 150 px at first, and not the height of the track. So the class sets the
+  // height.
   return (
     <canvas
       ref={canvasRef}
       aria-hidden
-      className="pointer-events-none absolute top-2 bottom-3 left-0 z-15"
+      className="pointer-events-none absolute top-2 left-0 z-15 h-[calc(100%-1rem)]"
     />
   );
 }
