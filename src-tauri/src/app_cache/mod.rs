@@ -14,6 +14,11 @@
 //! On Windows, the user data folder of WebView2, `EBWebView`, is in the same directory, and the
 //! page keeps its preferences there. So no code deletes the cache directory itself, or a name at
 //! its top that this list does not hold.
+//!
+//! [`cleanup`] runs after each start. It removes the files that are left in `work`, and the files
+//! that older builds left in their old places.
+
+pub mod cleanup;
 
 use std::path::{Path, PathBuf};
 

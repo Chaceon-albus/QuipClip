@@ -97,7 +97,7 @@ document summarizes them and shows how the parts fit together.
 |  Rust backend    v                                          |
 |                                                             |
 |  commands/   the IPC surface                                |
-|  app_cache/  the layout of the cache directory              |
+|  app_cache/  the cache layout, and its cleanup at start     |
 |  ffmpeg/     locate, probe, capabilities, export, preview   |
 |  flv/        FLV tags, keyframe locator, keyframe cache     |
 |  settings/   the settings file                              |

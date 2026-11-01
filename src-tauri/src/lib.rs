@@ -275,20 +275,19 @@ pub fn run() {
             stop_waveform_jobs(handle);
             stop_export_before_exit(handle);
         }
-        // The cleanup of the envelope cache runs once in each run of the application, off the
-        // main thread, also when the user never shows an envelope (ADR 056).
+        // The cleanup at start of the cache directory and of the old FLV cache runs once in each
+        // run of the application, off the main thread, also when the user never shows an
+        // envelope or exports (ADR 056, ADR 057).
         tauri::RunEvent::Ready => {
-            if let Ok(root) = handle.path().app_cache_dir() {
-                let spawned = std::thread::Builder::new()
-                    .name("waveform-cleanup".to_owned())
-                    .spawn(move || {
-                        if let Err(error) = ffmpeg::waveform::cache::sweep_once(&root) {
-                            eprintln!("waveform: the cache cleanup failed: {error}");
-                        }
-                    });
-                if let Err(error) = spawned {
-                    eprintln!("waveform: the cache cleanup did not start: {error}");
-                }
+            let app_data = handle.path().app_data_dir().ok();
+            let cache_root = handle.path().app_cache_dir().ok();
+            let spawned = std::thread::Builder::new()
+                .name("cache-cleanup".to_owned())
+                .spawn(move || {
+                    app_cache::cleanup::run_at_start(app_data.as_deref(), cache_root.as_deref());
+                });
+            if let Err(error) = spawned {
+                eprintln!("cache: the cleanup did not start: {error}");
             }
         }
         _ => {}
