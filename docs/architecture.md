@@ -77,6 +77,7 @@ document summarizes them and shows how the parts fit together.
 | [`054-give-each-preset-an-audio-gain.md`](../.agents/decisions/054-give-each-preset-an-audio-gain.md)                                       | A preset can change the level of the exported audio by a gain in dB                |
 | [`055-run-an-export-in-a-work-directory.md`](../.agents/decisions/055-run-an-export-in-a-work-directory.md)                                 | Each export runs in a work directory and reads its filter graph from a file        |
 | [`056-show-the-audio-envelope-of-a-source.md`](../.agents/decisions/056-show-the-audio-envelope-of-a-source.md)                             | The menu of a clip label shows a cached audio envelope of a source on the timeline |
+| [`057-keep-rebuildable-files-in-the-cache-directory.md`](../.agents/decisions/057-keep-rebuildable-files-in-the-cache-directory.md)         | Files that QuipClip can make again go in subdirectories of the cache directory     |
 
 ## Shape
 
@@ -191,7 +192,7 @@ the source at a time into fMP4 with `-c copy`. Rust sends the bytes to the page 
 channel. For FLV, Rust finds the keyframe itself and writes the window to the stdin of FFmpeg.
 FFmpeg cannot seek in an FLV without a keyframe index: it reads the file from its start. For
 MPEG-TS and MKV, FFmpeg seeks with `-ss`. The preview reads only the windows that it plays. It
-writes only a keyframe sidecar to the application data directory. AVI,
+writes only a keyframe sidecar to the application cache directory (ADR 057). AVI,
 ASF (WMV) and a video codec that the web view cannot decode keep the decode failure panel.
 
 The windows keep the absolute source timestamps, and the page sets `timestampOffset` so that

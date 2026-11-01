@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 016, ADR 038
-- Amended by: ADR 049, ADR 054
+- Amended by: ADR 049, ADR 054, ADR 057
 
 ## Context
 
@@ -35,7 +35,8 @@ input is a black `color` source of 256 by 256 at 25
 frames each second for 0.2 s, and an `anullsrc` source at the sample rate and channel layout of the
 preset, or 48000 Hz stereo for `source`. The command writes with the real muxer to a temporary
 file in the cache directory of the application, because some faults appear only at the header,
-and it deletes the file on every path. It runs at `-loglevel level+warning`.
+and it deletes the file on every path. (Changed on 2026-11-01: the file is in the subdirectory
+`work` of the cache directory, ADR 057.) It runs at `-loglevel level+warning`.
 
 - The test holds the lock of the smoke tests of ADR 006 while FFmpeg runs, so it never runs at the
   same time as a smoke test.
@@ -58,6 +59,9 @@ Before each test, the command deletes the temporary files of other processes tha
 60 s, which a quit during a test can leave behind. A test of the command compares the encoder,
 pixel format, option and muxer arguments with what the export renders for the same preset, for
 every seed.
+
+(Changed on 2026-11-01.) The cleanup at start of ADR 057 also deletes these temporary files, in
+`work` and at the top of the cache directory, with the same rules.
 
 ### The result
 

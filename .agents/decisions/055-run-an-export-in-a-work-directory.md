@@ -5,6 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 004, ADR 014, ADR 016, ADR 017, ADR 040, ADR 043, ADR 046, ADR 048, ADR 050,
   ADR 053, ADR 054
+- Amended by: ADR 057
 
 ## Context
 
@@ -111,6 +112,10 @@ until its processes start. 24 hours is far above the time limit of preparation (
 sweep does not remove the directory of an export of another QuipClip process that runs now. On
 Windows, an `ffmpeg` that outlives a crash keeps its current directory open. Then the sweep
 fails, and it tries again at the next export.
+
+(Changed on 2026-11-01.) The work directory is in the subdirectory `work` of the cache
+directory, not at its top (ADR 057). The cleanup at start of ADR 057 also runs the sweep, in
+`work` and at the top of the cache directory.
 
 ### The option probe
 
@@ -275,6 +280,7 @@ command can name only one head ends. Each FLV source gets the FLV input of ADR 0
 - A crash can leave a work directory in the cache. A later export removes it after 24 hours. It
   holds small files only: the graphs and the heads.
 - Old `head.flv` files stay in `flv-cache` until its eviction removes their directory.
+  (Changed on 2026-11-01: the cleanup at start of ADR 057 deletes all of `flv-cache`.)
 - (Added on 2026-10-28.) Each FLV source now runs the locate and the slice check of ADR 046. Its
   bounded reads can then take up to 150 s, and the option probe adds up to 20 s once for each
   export, against the limit of 180 s for each source (ADR 050). The locate has no time bound of

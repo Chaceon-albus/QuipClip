@@ -4,6 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 007, ADR 017, ADR 038, ADR 046, ADR 052
+- Amended by: ADR 057
 
 ## Context
 
@@ -254,7 +255,8 @@ agree, or whose data has the wrong length, is a miss, and Rust deletes it.
   than 1 hour.
 - The cleanup runs once on a background thread after each start of the application, after each
   write, and on a clear. So the cache gets its cleanup also when the user does not use the
-  feature.
+  feature. (Changed on 2026-11-01: the cleanup after a start is the first step of the cleanup at
+  start of ADR 057, on the thread of that cleanup.)
 - One lock holds every read, write, cleanup and clear of the cache.
 - At the end of a job, Rust reads the size and the modification time of the source again. When
   they changed, as when a recorder still writes the file, the job fails with `sourceChanged` and

@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048, ADR 055, ADR 056
+- Amended by: ADR 048, ADR 055, ADR 056, ADR 057
 
 ## Context
 
@@ -406,6 +406,11 @@ The keyframe table grows with each window and each locate. Rust saves it beside 
 time of the source. The sidecar records that revision, and Rust ignores a sidecar of another
 revision. The cache keeps 16 sources and never removes one that a window or an export uses. The
 preview writes nothing else.
+
+(Changed on 2026-11-01.) The sidecar is in `<app_cache>/flv/<key>/` (ADR 057). The cleanup at
+start of ADR 057 deletes the old `<app_data>/flv-cache/`. That cleanup does not check which
+sources an older build uses at the same time. When Tauri gives no path for the cache directory,
+the preview fails with `appDataUnavailable`.
 
 ### The window policy
 
