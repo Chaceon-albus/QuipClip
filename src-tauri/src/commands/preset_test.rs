@@ -19,6 +19,7 @@
 //! [`PresetTestErrorCode`] is a pinned contract, mirrored by `src/features/settings/presetTest.ts`,
 //! as `commands::settings` pins its own codes.
 
+use crate::app_cache;
 use crate::ffmpeg::capabilities::cache::{self, CacheKey};
 use crate::ffmpeg::capabilities::preset_test::{
     self, build_test_arguments, classify_test, EncoderTurn, PresetTestResult, OUTPUT_PLACEHOLDER,
@@ -153,9 +154,13 @@ pub async fn test_preset(
         .path()
         .app_data_dir()
         .map_err(|_| PresetTestError::new(PresetTestErrorCode::AppDataUnavailable))?;
-    let temporary_directory = app.path().app_cache_dir().map_err(|error| {
-        PresetTestError::with_detail(PresetTestErrorCode::TemporaryFileUnavailable, error)
-    })?;
+    let temporary_directory = app
+        .path()
+        .app_cache_dir()
+        .map(|cache_root| app_cache::work_directory(&cache_root))
+        .map_err(|error| {
+            PresetTestError::with_detail(PresetTestErrorCode::TemporaryFileUnavailable, error)
+        })?;
     let registry = Arc::clone(&registry);
 
     let run = tauri::async_runtime::spawn_blocking(move || {

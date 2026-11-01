@@ -108,7 +108,8 @@ pub struct FlvInputRequest<'a> {
     /// The seek position of each piece of this source, in concat order: the In point less the
     /// seek margin, in seconds on the timeline of the source.
     pub seek_positions: &'a [Rational],
-    pub app_data: &'a Path,
+    /// The application cache directory, which holds the keyframe cache of the reader (ADR 057).
+    pub cache_root: &'a Path,
     /// The work directory of the export, which receives the head.
     pub work_directory: &'a ExportWorkDirectory,
     /// The index of the source in the plan, which names its head ([`head_name`]).
@@ -151,7 +152,7 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
     let (source, cache) = request
         .windows
         .flv_source(
-            request.app_data,
+            request.cache_root,
             Revision {
                 path: media.path_text.clone(),
                 size: media.size,
@@ -288,7 +289,7 @@ mod tests {
         }
     }
 
-    /// Writes `bytes` as `name` in a new directory, which also holds the application data.
+    /// Writes `bytes` as `name` in a new directory, which also holds the application cache.
     fn write_source(name: &str, bytes: &[u8]) -> (TestDirectory, PathBuf) {
         let directory = TestDirectory::new();
         let path = directory.path.join(name);
@@ -298,17 +299,18 @@ mod tests {
 
     fn locate(
         path: &Path,
-        app_data: &Path,
+        cache_root: &Path,
         probe: &MediaProbe,
         positions: &[Rational],
     ) -> Result<FlvInput, FlvInputFallback> {
-        let work = ExportWorkDirectory::create(&app_data.join("cache")).unwrap();
-        locate_in(path, app_data, &work, 0, probe, positions)
+        let work =
+            ExportWorkDirectory::create(&crate::app_cache::work_directory(cache_root)).unwrap();
+        locate_in(path, cache_root, &work, 0, probe, positions)
     }
 
     fn locate_in(
         path: &Path,
-        app_data: &Path,
+        cache_root: &Path,
         work_directory: &ExportWorkDirectory,
         source_index: usize,
         probe: &MediaProbe,
@@ -318,7 +320,7 @@ mod tests {
             source: path,
             probe,
             seek_positions: positions,
-            app_data,
+            cache_root,
             work_directory,
             source_index,
             windows: &PreviewWindows::default(),
@@ -330,12 +332,13 @@ mod tests {
     fn each_slice_starts_at_the_keyframe_at_or_before_its_seek_position() {
         let recording = recording(&RecordingOptions::default());
         let (directory, path) = write_source("live.flv", &recording.bytes);
-        let app_data = directory.path.join("app");
-        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let cache_root = directory.path.join("cache");
+        let work =
+            ExportWorkDirectory::create(&crate::app_cache::work_directory(&cache_root)).unwrap();
         let probe = flv_probe(Some(1));
         let input = locate_in(
             &path,
-            &app_data,
+            &cache_root,
             &work,
             3,
             &probe,
@@ -360,7 +363,7 @@ mod tests {
         let head = fs::read(work.file_path("h3.flv")).unwrap();
         assert_eq!(&head[..3], b"FLV");
         // The cache of the reader keeps the keyframe table only (ADR 055).
-        let cached: Vec<PathBuf> = fs::read_dir(app_data.join(crate::flv::cache::CACHE_DIR_NAME))
+        let cached: Vec<PathBuf> = fs::read_dir(cache_root.join(crate::flv::cache::CACHE_DIR_NAME))
             .unwrap()
             .flatten()
             .flat_map(|entry| fs::read_dir(entry.path()).unwrap().flatten())
@@ -378,12 +381,14 @@ mod tests {
     fn a_head_that_cannot_be_written_keeps_the_input_seek() {
         let recording = recording(&RecordingOptions::default());
         let (directory, path) = write_source("live.flv", &recording.bytes);
-        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let cache_root = directory.path.join("cache");
+        let work =
+            ExportWorkDirectory::create(&crate::app_cache::work_directory(&cache_root)).unwrap();
         // Stands for a work directory that is gone, as after an abandoned preparation.
         fs::remove_dir_all(work.path()).unwrap();
         let result = locate_in(
             &path,
-            &directory.path.join("app"),
+            &cache_root,
             &work,
             0,
             &flv_probe(Some(1)),
@@ -551,12 +556,13 @@ mod tests {
         // the source, so it knows of the change, though its own locate reads no block with it.
         source.locate(10_000, None).unwrap();
         assert!(source.has_config_change());
-        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let work = ExportWorkDirectory::create(&crate::app_cache::work_directory(&directory.path))
+            .unwrap();
         let result = locate_flv_input(&FlvInputRequest {
             source: &path,
             probe: &flv_probe(None),
             seek_positions: &[seconds(1_000)],
-            app_data: &directory.path,
+            cache_root: &directory.path,
             work_directory: &work,
             source_index: 0,
             windows: &windows,

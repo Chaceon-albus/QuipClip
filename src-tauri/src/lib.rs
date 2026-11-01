@@ -1,3 +1,4 @@
+pub mod app_cache;
 pub mod build_info;
 pub mod commands;
 pub mod ffmpeg;

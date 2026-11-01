@@ -1,10 +1,10 @@
 //! The work directory of an export (ADR 055).
 //!
-//! Each export creates the directory `export-<pid>-<n>` in the cache directory of the
-//! application: `<pid>` is the process ID of QuipClip, and `<n>` a counter of the process. The
-//! `ffmpeg` processes of the export run in it, and their commands name its files by their names
-//! alone. It holds the graph files of [`super::graph_file`] and the head of each FLV source of the
-//! export, `h<k>.flv` (ADR 046).
+//! Each export creates the directory `export-<pid>-<n>` in the directory `work` of the cache
+//! directory of the application (ADR 057): `<pid>` is the process ID of QuipClip, and `<n>` a
+//! counter of the process. The `ffmpeg` processes of the export run in it, and their commands
+//! name its files by their names alone. It holds the graph files of [`super::graph_file`] and the
+//! head of each FLV source of the export, `h<k>.flv` (ADR 046).
 //!
 //! A write never creates the directory. So a write that an abandoned preparation (ADR 050) makes
 //! after the removal fails, and it leaves nothing.
@@ -443,6 +443,10 @@ mod tests {
             "export-1-2.tmp",
             "Export-1-2",
             "flv-cache",
+            "flv",
+            "waveform",
+            "work",
+            "EBWebView",
             "preset-test-1-2.tmp",
         ] {
             assert!(!is_work_directory_name(name), "{name}");
@@ -494,8 +498,18 @@ mod tests {
         assert_eq!(removed, 0);
         assert!(young.is_dir());
 
-        let others = ["flv-cache", "export-1", "export-a-1", "export-1-2.tmp"]
-            .map(|name| parent.path.join(name));
+        // The other names at the top of the cache directory (ADR 057), and names that only look
+        // like a work directory.
+        let others = [
+            "EBWebView",
+            "flv",
+            "waveform",
+            "work",
+            "export-1",
+            "export-a-1",
+            "export-1-2.tmp",
+        ]
+        .map(|name| parent.path.join(name));
         for path in &others {
             fs::create_dir(path).unwrap();
         }

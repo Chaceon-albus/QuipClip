@@ -1,9 +1,8 @@
 //! The file that the FLV reader keeps for a source: the keyframe sidecar.
 //!
 //! Each source revision (path, size and modification time) has one directory under
-//! `<app_data>/flv-cache/`. The export writes the head of a source into its own work directory
-//! (ADR 055), not here. A directory of an older build can still hold a `head.flv`, which the
-//! eviction removes with the directory. The sidecar lets a second session of the same file start
+//! `<app_cache>/flv/` (ADR 057). The export writes the head of a source into its own work
+//! directory (ADR 055), not here. The sidecar lets a second session of the same file start
 //! with the keyframes and configurations that the first session found. A sidecar of another
 //! revision is ignored, so a file changed in place starts again from nothing. The cache keeps
 //! [`KEEP_SOURCES`] directories and removes the oldest, but never one that a caller names as in
@@ -18,8 +17,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// The directory under the application data directory.
-pub const CACHE_DIR_NAME: &str = "flv-cache";
+/// The directory under the application cache directory.
+pub const CACHE_DIR_NAME: &str = "flv";
 /// The number of source directories that the cache keeps.
 pub const KEEP_SOURCES: usize = 16;
 const SIDECAR_FILE_NAME: &str = "keyframes.json";
@@ -90,8 +89,10 @@ struct SavedConfig {
 }
 
 impl SourceCache {
-    pub fn new(app_data: &Path, revision: Revision) -> Self {
-        let dir = app_data.join(CACHE_DIR_NAME).join(revision.key());
+    /// The directory of `revision` in the cache under `cache_root`, the application cache
+    /// directory.
+    pub fn new(cache_root: &Path, revision: Revision) -> Self {
+        let dir = cache_root.join(CACHE_DIR_NAME).join(revision.key());
         Self { dir, revision }
     }
 
@@ -202,11 +203,11 @@ impl SourceCache {
     }
 }
 
-/// Remove the oldest source directories beyond `keep`, by their latest write, and never a
-/// directory whose key is in `in_use`.
-pub fn evict(app_data: &Path, keep: usize, in_use: &[String]) -> io::Result<()> {
+/// Remove the oldest source directories of the cache under `cache_root` beyond `keep`, by their
+/// latest write, and never a directory whose key is in `in_use`.
+pub fn evict(cache_root: &Path, keep: usize, in_use: &[String]) -> io::Result<()> {
     let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let root = app_data.join(CACHE_DIR_NAME);
+    let root = cache_root.join(CACHE_DIR_NAME);
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),

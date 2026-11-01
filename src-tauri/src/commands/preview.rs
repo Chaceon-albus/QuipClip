@@ -210,12 +210,19 @@ pub async fn open_preview_window(
         .path()
         .app_data_dir()
         .map_err(|_| error(PreviewWindowErrorCode::AppDataUnavailable))?;
+    // Both directories come from the folders of the user profile, so the code of the data
+    // directory stands for this one too, and the error codes do not change (ADR 057).
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| error(PreviewWindowErrorCode::AppDataUnavailable))?;
     let windows = windows.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let allowed = |path: &Path| app.asset_protocol_scope().is_allowed(path);
         open_window(
             &windows,
             &app_data,
+            &cache_root,
             &request,
             &allowed,
             Arc::new(ChannelSink(channel)),
@@ -242,10 +249,12 @@ pub fn close_preview_window(windows: State<'_, Arc<PreviewWindows>>, window_id: 
     windows.close(window_id);
 }
 
-/// The body of [`open_preview_window`], with the asset scope check passed in.
+/// The body of [`open_preview_window`], with the asset scope check passed in. `app_data` holds the
+/// settings for the discovery of FFmpeg, and `cache_root` holds the keyframe cache of an FLV source.
 fn open_window(
     windows: &Arc<PreviewWindows>,
     app_data: &Path,
+    cache_root: &Path,
     request: &OpenPreviewWindowRequest,
     allowed: &dyn Fn(&Path) -> bool,
     sink: Arc<dyn WindowSink>,
@@ -295,7 +304,7 @@ fn open_window(
             };
             open_flv(
                 windows,
-                app_data,
+                cache_root,
                 request,
                 &media.path,
                 revision,
@@ -405,7 +414,7 @@ fn flv_start(
 #[allow(clippy::too_many_arguments)]
 fn open_flv(
     windows: &Arc<PreviewWindows>,
-    app_data: &Path,
+    cache_root: &Path,
     request: &OpenPreviewWindowRequest,
     path: &Path,
     revision: Revision,
@@ -421,7 +430,7 @@ fn open_flv(
         return Err(error(PreviewWindowErrorCode::NotFlv));
     }
     let (source, cache) = windows
-        .flv_source(app_data, revision, path, Some(ticket.cancel.clone()))
+        .flv_source(cache_root, revision, path, Some(ticket.cancel.clone()))
         .map_err(map_flv)?;
     let (offset, dts, first_keyframe_pts, method, non_monotonic) =
         flv_start(&source, request.start, &ticket).map_err(map_flv)?;

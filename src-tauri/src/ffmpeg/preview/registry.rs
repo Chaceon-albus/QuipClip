@@ -375,11 +375,12 @@ impl PreviewWindows {
         Some(found)
     }
 
-    /// The open FLV source of `revision`, with its cache directory. A source that is not open
-    /// yet opens, and takes what its sidecar holds.
+    /// The open FLV source of `revision`, with its cache directory under `cache_root`, the
+    /// application cache directory. A source that is not open yet opens, and takes what its
+    /// sidecar holds.
     pub fn flv_source(
         &self,
-        app_data: &Path,
+        cache_root: &Path,
         revision: Revision,
         path: &Path,
         cancel: Option<Arc<AtomicBool>>,
@@ -395,7 +396,7 @@ impl PreviewWindows {
             }
         }
         let source = Arc::new(FlvSource::open(path, cancel)?);
-        let cache = Arc::new(SourceCache::new(app_data, revision));
+        let cache = Arc::new(SourceCache::new(cache_root, revision));
         if let Some((table, non_monotonic)) = cache.load_table() {
             source.restore(&table, non_monotonic);
         }
@@ -416,7 +417,7 @@ impl PreviewWindows {
             }
             inner.sources.iter().map(|open| open.key.clone()).collect()
         };
-        if let Err(error) = evict(app_data, KEEP_SOURCES, &in_use) {
+        if let Err(error) = evict(cache_root, KEEP_SOURCES, &in_use) {
             eprintln!("preview: the FLV cache was not trimmed: {error}");
         }
         Ok((source, cache))

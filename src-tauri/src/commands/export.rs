@@ -69,6 +69,7 @@
 //! It needs its own `ffmpeg -version` spawn and a capability-cache read, and it is a separate
 //! unit; the error code stays reserved, as it is in `ffmpeg::export`.
 
+use crate::app_cache;
 use crate::ffmpeg::export::flv_input::{
     locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
 };
@@ -639,7 +640,8 @@ struct PrepareRequest<'a> {
     request: &'a ExportRequestWire,
     /// The directory of the settings file and of the discovery of the executables.
     app_data_directory: &'a Path,
-    /// The cache directory of the application, which holds the work directories (ADR 055).
+    /// The cache directory of the application, which holds the work directories (ADR 055) in its
+    /// directory `work`, and the keyframe cache of the FLV reader (ADR 057).
     cache_directory: &'a Path,
     /// The stop flag of preparation, read between the steps. In a run this is the flag of the
     /// helper thread of [`run_export_job_with`]. It starts as the cancel flag of the run, and the
@@ -741,8 +743,9 @@ where
         return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
     stage.enter(PreparationStage::WorkDirectory);
-    remove_stale_work_directories(cache_directory);
-    let work = ExportWorkDirectory::create(cache_directory).map_err(|error| {
+    let work_parent = app_cache::work_directory(cache_directory);
+    remove_stale_work_directories(&work_parent);
+    let work = ExportWorkDirectory::create(&work_parent).map_err(|error| {
         ExportCommandError::with_detail(
             ExportErrorCode::WorkDirectoryUnavailable,
             error.to_string(),
@@ -836,7 +839,7 @@ where
             },
             request.streams,
             FlvPlace {
-                app_data_directory,
+                cache_directory,
                 work_directory: &work,
                 source_index: index,
             },
@@ -1243,7 +1246,7 @@ fn flv_input_for(
             source,
             probe,
             seek_positions: &positions,
-            app_data: place.app_data_directory,
+            cache_root: place.cache_directory,
             work_directory: place.work_directory,
             source_index: place.source_index,
             windows: preview_windows,
@@ -1337,12 +1340,12 @@ fn input_ordinals(
 }
 
 /// Where the FLV input of a source keeps its files: the reader keeps its keyframe table in the
-/// application data directory (ADR 046), and the export writes the head into its work directory
-/// (ADR 055).
+/// application cache directory (ADR 046, ADR 057), and the export writes the head into its work
+/// directory (ADR 055).
 #[derive(Clone, Copy)]
 struct FlvPlace<'a> {
-    /// The application data directory, which holds the cache of the FLV reader.
-    app_data_directory: &'a Path,
+    /// The application cache directory, which holds the cache of the FLV reader.
+    cache_directory: &'a Path,
     /// The work directory of the export, which receives the head.
     work_directory: &'a ExportWorkDirectory,
     /// The index of the source in the plan, which names its head.
@@ -1606,7 +1609,8 @@ struct ExportJob {
     request: ExportRequestWire,
     /// The directory of the settings file and of the discovery of the executables.
     app_data_directory: PathBuf,
-    /// The cache directory of the application, which holds the work directories (ADR 055).
+    /// The cache directory of the application, which holds the work directories (ADR 055) in its
+    /// directory `work`, and the keyframe cache of the FLV reader (ADR 057).
     cache_directory: PathBuf,
     /// The open FLV sources, which the FLV input shares with the preview (ADR 046).
     preview_windows: Arc<PreviewWindows>,
@@ -3131,8 +3135,8 @@ mod tests {
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
         };
-        let app_data = directory.path.join("app");
-        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let cache_root = directory.path.join("cache");
+        let work = ExportWorkDirectory::create(&app_cache::work_directory(&cache_root)).unwrap();
         let windows = PreviewWindows::default();
         let pieces = resolve_request(&request).unwrap().pieces;
         let run = |probe: &MediaProbe, cancel: &AtomicBool| {
@@ -3146,7 +3150,7 @@ mod tests {
                 },
                 request.streams,
                 FlvPlace {
-                    app_data_directory: &app_data,
+                    cache_directory: &cache_root,
                     work_directory: &work,
                     source_index: 2,
                 },
@@ -7479,8 +7483,12 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
-        assert!(cache.is_dir(), "preparation created the cache directory");
-        assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+        let work = app_cache::work_directory(&cache);
+        assert!(
+            work.is_dir(),
+            "preparation created the directory of the work directories"
+        );
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
     }
 
     #[test]
@@ -7798,10 +7806,11 @@ mod tests {
                 .filter(|name| name.contains(".tmp-"))
                 .collect();
             assert!(left.is_empty(), "{left:?}");
-            let cache: Vec<_> = fs::read_dir(directory.path.join("cache"))
-                .unwrap()
-                .collect();
-            assert!(cache.is_empty());
+            let work: Vec<_> =
+                fs::read_dir(app_cache::work_directory(&directory.path.join("cache")))
+                    .unwrap()
+                    .collect();
+            assert!(work.is_empty());
         }
     }
 
