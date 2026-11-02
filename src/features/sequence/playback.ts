@@ -122,6 +122,13 @@ export interface SequencePlayback {
    * an index that is not a safe integer, or a clip that is not on the sequence does nothing.
    */
   readonly seekToClipFrame: (clipId: string, frameIndex: number) => void;
+  /**
+   * Drops a navigation that waits for the attach of its clip, so the clip on screen stays
+   * attached and keeps its frame. A trim that ends on the frame on screen calls it (ADR 030): the
+   * scrub of its drag can have started a cold switch that would otherwise move the playhead after
+   * the trim. Does nothing while no navigation waits.
+   */
+  readonly dropNavigation: () => void;
 }
 
 /**
@@ -868,7 +875,20 @@ export function createSequencePlayback(
     navigate({ kind: "frame", clipId, frameIndex });
   });
 
-  return { store, handleEnded, notePause, isSwitching, seekToClipFrame };
+  const dropNavigation = asNavigation((): void => {
+    if (pending !== null) {
+      userNavigates();
+    }
+  });
+
+  return {
+    store,
+    handleEnded,
+    notePause,
+    isSwitching,
+    seekToClipFrame,
+    dropNavigation,
+  };
 }
 
 /** The production sequence playback, over the production stores. */

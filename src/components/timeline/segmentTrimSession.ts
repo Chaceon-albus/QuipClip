@@ -96,6 +96,13 @@ export interface SegmentTrimSessionStores {
    * press on its edge is the click.
    */
   readonly seekToClipFrame?: (clipId: string, frameIndex: number) => void;
+  /**
+   * Drops a navigation of the sequence that waits for an attach
+   * (`SequencePlayback.dropNavigation`). A trim that ends with no seek, because its frame is on
+   * screen, calls it: a scrub into another clip can still wait for that clip, and it would move
+   * the playhead after the trim (ADR 030). Without it, nothing is dropped.
+   */
+  readonly dropNavigation?: () => void;
 }
 
 /** The facts of a press that the timeline panel passes to start a trim. */
@@ -437,6 +444,11 @@ export function createSegmentTrimSession(
       if (releasePlan.kind === "write") {
         if (releasePlan.seek !== null) {
           runSeek(releasePlan.seek, released);
+        } else {
+          // The written frame is on screen. A scrub of the drag that still waits for another clip
+          // must not move the playhead away from it. The drop also comes before the write, so the
+          // write names the clip on screen and not the clip that the scrub waits for.
+          stores.dropNavigation?.();
         }
         commit(released, releasePlan.pts);
         return;
@@ -470,9 +482,18 @@ export function createSegmentTrimSession(
       // The trim ends first, so the final sample of the gesture finds no trim and seeks nowhere.
       drop();
       dragCanceller?.();
-      const seek = planTrimCancel(cancelled, playback.getState());
+      const state = playback.getState();
+      const seek = planTrimCancel(cancelled, state);
       if (seek !== null) {
         runSeek(seek, cancelled);
+      } else if (
+        cancelled.startPlayheadPts !== null &&
+        isTrimCurrent(cancelled, state)
+      ) {
+        // The frame of the start is on screen. A scrub of the drag that still waits for another
+        // clip must not move the playhead away from it. With no start, or a trim that can no
+        // longer seek, nothing on screen is the start, so a waiting navigation runs.
+        stores.dropNavigation?.();
       }
     },
 
@@ -500,4 +521,5 @@ export const segmentTrimSession: SegmentTrimSession = createSegmentTrimSession({
   playback: sequencePlayback.store,
   timeline: timelineStore,
   seekToClipFrame: sequencePlayback.seekToClipFrame,
+  dropNavigation: sequencePlayback.dropNavigation,
 });

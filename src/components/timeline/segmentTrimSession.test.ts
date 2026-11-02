@@ -1047,6 +1047,7 @@ describe("segmentTrimSession: a trim across a cold switch (ADR 030 note of 2026-
       timeline,
       clock: timers.clock,
       seekToClipFrame: sequence.seekToClipFrame,
+      dropNavigation: sequence.dropNavigation,
     });
     const laneProbe: SegmentTrimProbe = {
       videoStartPts: pts("0"),
@@ -1063,6 +1064,7 @@ describe("segmentTrimSession: a trim across a cold switch (ADR 030 note of 2026-
       return first;
     };
     return {
+      a,
       B,
       playback,
       timeline,
@@ -1208,6 +1210,49 @@ describe("segmentTrimSession: a trim across a cold switch (ADR 030 note of 2026-
     h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
     expect(h.segment().outPts).toBe("270");
     expect(h.session.getNoticeCount()).toBe(0);
+  });
+
+  it("returns Escape to the start while the scrub into the next clip waits", () => {
+    const h = createSequenceHarness();
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    // The first scrub goes straight into b1, so a1 keeps the frame of the start on screen.
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    expect(h.timeline.getState().attachedClipId).toBe("b1");
+    h.session.cancel();
+    // The seek into b1 is dropped, so the playhead stays on the frame of the start in a1.
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+    expect(h.sequence.store.getState().switching).toBe(false);
+    expect(h.sequence.store.getState().presentedFrame?.inferredSourcePts).toBe("0");
+    expect(h.segment().outPts).toBe("240");
+  });
+
+  it("keeps the playhead on a release that writes the frame on screen", () => {
+    const h = createSequenceHarness();
+    // Frame 230 of a1 is on screen at the start, so the drag can snap back to it.
+    h.playback.getState().syncPresentedFrame(h.a.key, 230 / 25, 2, h.a.video);
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    // The release snaps to that frame, which writes at once, with no seek.
+    h.session.release({
+      pts: pts("230"),
+      snap: { pts: pts("230"), elapsedSeconds: 230 / 25, ratio: 230 / 500 },
+      writesAtOnce: true,
+    });
+    expect(h.segment().outPts).toBe("230");
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+    expect(h.sequence.store.getState().switching).toBe(false);
   });
 
   it("commits a release that comes before the next clip attaches", () => {
