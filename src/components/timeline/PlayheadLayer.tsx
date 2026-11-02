@@ -4,7 +4,7 @@ import { type PlaybackStoreState } from "@/features/playback";
 import { calculatePlayheadLayout, useTimelineStore } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
-import { calculatePlayheadFrameBand } from "./frameBand";
+import { calculatePlayheadFrameBandOnGrids, type FrameBandGrid } from "./frameBand";
 import { usePlayheadTimecode } from "./playheadTimecode";
 import { selectSelectedFillCanBeUnderPlayhead } from "./playheadRing";
 import { useDisplayedPlaybackPosition } from "./useDisplayedPlaybackPosition";
@@ -169,16 +169,18 @@ export function TrackPlayhead({
 
 export interface TrackFrameBandProps extends PositionLayerProps {
   /**
-   * The nominal frame rate of the exact frame grid while one frame is wide enough on screen
-   * (`resolveFrameBandRate`). The panel mounts the band only while this rate exists.
+   * The frame grids where one frame is wide enough on screen (`resolveFrameBandGrids`): one for
+   * the one source, or one for each clip of a sequence that has an exact grid (ADR 052). The
+   * panel mounts the band only while the list has a grid.
    */
-  rate: Rational;
+  grids: readonly FrameBandGrid[];
 }
 
 /**
  * The band of the frame on screen at the playhead, in the track: from the nominal start of the
  * frame that the timecode names to the nominal start of the next frame (`frameBand.ts`), as
- * Premiere Pro and DaVinci Resolve show it at a high zoom.
+ * Premiere Pro and DaVinci Resolve show it at a high zoom. On a sequence of several clips it is
+ * the frame of the grid of the clip on screen (ADR 052).
  *
  * The panel mounts the band only on the exact frame grid and only while one frame is at least
  * `FRAME_BAND_MIN_WIDTH_PX` wide, so the band renders per frame only then. It reads the three
@@ -210,17 +212,17 @@ export function TrackFrameBand({
   videoStartPts,
   videoTimeBase,
   totalDurationSeconds,
-  rate,
+  grids,
 }: TrackFrameBandProps) {
   const seekTargetSeconds = useSequencePlaybackStore(selectSeekTargetSeconds);
   const presentedFrame = useSequencePlaybackStore(selectPresentedFrame);
   const calibrationStatus = useSequencePlaybackStore(selectCalibrationStatus);
   const hasRing = useTimelineStore(selectSelectedFillCanBeUnderPlayhead);
-  const band = calculatePlayheadFrameBand(
+  const band = calculatePlayheadFrameBandOnGrids(
     { seekTargetSeconds, presentedFrame, calibrationStatus },
     videoStartPts,
     videoTimeBase,
-    rate,
+    grids,
     totalDurationSeconds,
   );
   if (band === null) {

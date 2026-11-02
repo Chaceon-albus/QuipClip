@@ -18,6 +18,17 @@
  *
  * A band is display only. No seek, snap, trim or edit reads it, and it takes no pointer event.
  * Its edges are frame starts, and never a width from seconds alone.
+ *
+ * On a sequence of several clips, each band uses the frame grid of the clip under it (ADR 052),
+ * which `FrameBandClipGrid` places on the axis of the lane. With one source, a band uses the grid
+ * of that source, which starts at the start of the lane and spans the whole extent. Two rules
+ * above then change:
+ *
+ * - The band shows a frame of the grid of its clip. The timecode of the sequence can show
+ *   milliseconds, or a frame count that differs from the frames of a clip by up to one tick.
+ * - The ready calibration is the calibration of the attached clip. The playhead band lies in that
+ *   clip. The Out band of another clip reads only the probe of its source and the stored Out,
+ *   which is all the Out band of one source reads too.
  */
 
 import type { PlaybackState } from "@/features/playback";
@@ -46,6 +57,42 @@ export type FrameBandPlayback = Pick<
   PlaybackState,
   "seekTargetSeconds" | "presentedFrame" | "calibrationStatus"
 >;
+
+/**
+ * The frame grid of one clip of a sequence, on the axis of the lane (ADR 052). Frame 0 of the
+ * grid is the first frame of the source of the clip, which can lie before the start of the clip.
+ */
+export interface FrameBandClipGrid {
+  /** The ticks of the lane time base from the start of the lane to frame 0 of the grid. */
+  readonly originTicks: bigint;
+  /** The video time base of the source of the clip. It sets the frame boundary margin. */
+  readonly videoTimeBase: Rational;
+  /** The start of the clip, in seconds from the start of the lane. */
+  readonly startSeconds: number;
+  /** The end of the clip, in seconds from the start of the lane, or null when it is not known. */
+  readonly endSeconds: number | null;
+}
+
+/**
+ * The grid of the frame bands over a part of the lane: the rate, and the clip of a sequence of
+ * several clips. `clip` is absent for the one source.
+ */
+export interface FrameBandGrid {
+  /** The nominal frame rate of the exact frame grid. */
+  readonly rate: Rational;
+  /** The clip of the grid on a sequence of several clips, or absent for the one source. */
+  readonly clip?: FrameBandClipGrid;
+}
+
+/** The seconds from the start of the lane to frame 0 of the grid. */
+function gridOriginSeconds(
+  clip: FrameBandClipGrid | undefined,
+  videoTimeBase: Rational,
+): number {
+  return clip === undefined
+    ? 0
+    : (Number(clip.originTicks) * videoTimeBase.n) / videoTimeBase.d;
+}
 
 function isValidRate(rate: Rational | null | undefined): rate is Rational {
   return (
@@ -114,17 +161,23 @@ function nominalFrameStartSeconds(frameIndex: bigint, rate: Rational): number {
 }
 
 /**
- * The layout of the span `[startSeconds, endSeconds)` on the lane, clamped to the source extent,
- * with the percent rule of `calculatePlayheadLayout`. Returns null when no part of the span lies
- * inside the extent.
+ * The layout of the span `[startSeconds, endSeconds)` on the lane, clamped to the source extent
+ * and to the extent of the clip of the grid, with the percent rule of `calculatePlayheadLayout`.
+ * Returns null when no part of the span lies inside them.
  */
 function layoutSpan(
   startSeconds: number,
   endSeconds: number,
   totalDurationSeconds: number,
+  clip?: FrameBandClipGrid,
 ): FrameBandLayout | null {
-  const start = Math.max(0, Math.min(totalDurationSeconds, startSeconds));
-  const end = Math.max(0, Math.min(totalDurationSeconds, endSeconds));
+  const low = clip === undefined ? 0 : Math.max(0, clip.startSeconds);
+  const high =
+    clip?.endSeconds == null
+      ? totalDurationSeconds
+      : Math.min(totalDurationSeconds, clip.endSeconds);
+  const start = Math.max(low, Math.min(high, startSeconds));
+  const end = Math.max(low, Math.min(high, endSeconds));
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
     return null;
   }
@@ -142,23 +195,25 @@ function layoutSpan(
 }
 
 /**
- * The frame index `J` of the frame timecode (ADR 028) for a tick delta from the first frame, or
- * null for a negative delta or invalid timing.
+ * The frame index `J` of the frame timecode (ADR 028) for a tick delta from the first frame of the
+ * grid, or null for a negative delta or invalid timing. A clip grid counts from its frame 0, with
+ * the frame boundary margin of the time base of its source.
  */
 function frameIndexOfPts(
   pts: Pts,
   videoStartPts: Pts,
   videoTimeBase: Rational,
   rate: Rational,
+  clip?: FrameBandClipGrid,
 ): bigint | null {
   if (!isPtsString(pts) || !isPtsString(videoStartPts)) {
     return null;
   }
   return frameIndexOfTicks(
-    BigInt(pts) - BigInt(videoStartPts),
+    BigInt(pts) - BigInt(videoStartPts) - (clip?.originTicks ?? 0n),
     videoTimeBase,
     rate,
-    videoTimeBase,
+    clip?.videoTimeBase ?? videoTimeBase,
   );
 }
 
@@ -171,19 +226,25 @@ function frameIndexOfPts(
  * 2. The presented frame: `frameIndexOfTicks` of its tick delta from the first frame, the rule of
  *    `formatSourceRelativeTime`.
  *
+ * With a clip grid, both count from frame 0 of that grid: the target loses the seconds of the
+ * grid origin, and the tick delta loses its ticks. The margin is the one of the time base of the
+ * source of the clip.
+ *
  * Returns null without a ready calibration, because the grid needs the calibrated first frame,
  * and for a position before the first frame or with invalid timing.
  *
  * @param playback The playback facts of the displayed position.
- * @param videoStartPts The start PTS of the source video stream.
- * @param videoTimeBase The video time base of the source.
+ * @param videoStartPts The start PTS of the source video stream: the start of the lane.
+ * @param videoTimeBase The video time base of the source: the time base of the lane.
  * @param rate The nominal frame rate of the exact frame grid.
+ * @param clip The grid of the clip under the position, on a sequence of several clips.
  */
 export function resolveDisplayedFrameIndex(
   playback: FrameBandPlayback,
   videoStartPts: Pts | null | undefined,
   videoTimeBase: Rational | null | undefined,
   rate: Rational,
+  clip?: FrameBandClipGrid,
 ): bigint | null {
   if (
     playback.calibrationStatus !== "ready" ||
@@ -195,7 +256,10 @@ export function resolveDisplayedFrameIndex(
   }
   const target = playback.seekTargetSeconds;
   if (typeof target === "number" && Number.isFinite(target) && target >= 0) {
-    const shifted = target + frameBoundaryMarginSeconds(rate, videoTimeBase);
+    const shifted =
+      target -
+      gridOriginSeconds(clip, videoTimeBase) +
+      frameBoundaryMarginSeconds(rate, clip?.videoTimeBase ?? videoTimeBase);
     const frame = Math.floor((shifted * rate.n) / rate.d);
     return Number.isSafeInteger(frame) && frame >= 0 ? BigInt(frame) : null;
   }
@@ -207,6 +271,7 @@ export function resolveDisplayedFrameIndex(
     videoStartPts,
     videoTimeBase,
     rate,
+    clip,
   );
 }
 
@@ -216,10 +281,12 @@ export function resolveDisplayedFrameIndex(
  * extent. Returns null when no frame index is known or the frame lies outside the extent.
  *
  * @param playback The playback facts of the displayed position.
- * @param videoStartPts The start PTS of the source video stream.
- * @param videoTimeBase The video time base of the source.
+ * @param videoStartPts The start PTS of the source video stream: the start of the lane.
+ * @param videoTimeBase The video time base of the source: the time base of the lane.
  * @param rate The nominal frame rate of the exact frame grid (`resolveFrameBandRate`).
  * @param totalDurationSeconds The source extent of the ruler (ADR 007).
+ * @param clip The grid of the clip under the position, on a sequence of several clips. The band
+ *   then also stays inside that clip.
  */
 export function calculatePlayheadFrameBand(
   playback: FrameBandPlayback,
@@ -227,8 +294,9 @@ export function calculatePlayheadFrameBand(
   videoTimeBase: Rational | null | undefined,
   rate: Rational,
   totalDurationSeconds: number | null,
+  clip?: FrameBandClipGrid,
 ): FrameBandLayout | null {
-  if (!isPositiveFinite(totalDurationSeconds)) {
+  if (!isPositiveFinite(totalDurationSeconds) || !isValidRate(videoTimeBase)) {
     return null;
   }
   const frame = resolveDisplayedFrameIndex(
@@ -236,14 +304,17 @@ export function calculatePlayheadFrameBand(
     videoStartPts,
     videoTimeBase,
     rate,
+    clip,
   );
   if (frame === null) {
     return null;
   }
+  const origin = gridOriginSeconds(clip, videoTimeBase);
   return layoutSpan(
-    nominalFrameStartSeconds(frame, rate),
-    nominalFrameStartSeconds(frame + 1n, rate),
+    origin + nominalFrameStartSeconds(frame, rate),
+    origin + nominalFrameStartSeconds(frame + 1n, rate),
     totalDurationSeconds,
+    clip,
   );
 }
 
@@ -260,10 +331,12 @@ export function calculatePlayheadFrameBand(
  * end of the extent, where no Out frame is on the lane.
  *
  * @param segment The PTS pair of the segment.
- * @param videoStartPts The start PTS of the source video stream.
- * @param videoTimeBase The video time base of the source.
+ * @param videoStartPts The start PTS of the source video stream: the start of the lane.
+ * @param videoTimeBase The video time base of the source: the time base of the lane.
  * @param rate The nominal frame rate of the exact frame grid (`resolveFrameBandRate`).
  * @param totalDurationSeconds The source extent of the ruler (ADR 007).
+ * @param clip The grid of the clip under the Out, on a sequence of several clips. The band then
+ *   also stays inside that clip.
  */
 export function calculateOutFrameBand(
   segment: Pick<Segment, "inPts" | "outPts">,
@@ -271,6 +344,7 @@ export function calculateOutFrameBand(
   videoTimeBase: Rational | null | undefined,
   rate: Rational,
   totalDurationSeconds: number | null,
+  clip?: FrameBandClipGrid,
 ): FrameBandLayout | null {
   if (
     !isPositiveFinite(totalDurationSeconds) ||
@@ -281,7 +355,13 @@ export function calculateOutFrameBand(
   ) {
     return null;
   }
-  const frame = frameIndexOfPts(segment.outPts, videoStartPts, videoTimeBase, rate);
+  const frame = frameIndexOfPts(
+    segment.outPts,
+    videoStartPts,
+    videoTimeBase,
+    rate,
+    clip,
+  );
   if (frame === null) {
     return null;
   }
@@ -292,7 +372,109 @@ export function calculateOutFrameBand(
   }
   return layoutSpan(
     outSeconds,
-    nominalFrameStartSeconds(frame + 1n, rate),
+    gridOriginSeconds(clip, videoTimeBase) + nominalFrameStartSeconds(frame + 1n, rate),
     totalDurationSeconds,
+    clip,
   );
+}
+
+/**
+ * The band of the frame on screen at the playhead, on the grid that holds the displayed position
+ * (`frameBandGridAt`): the seek target first, then the presented frame, as
+ * `resolveDisplayedFrameIndex` orders them. Returns null when no grid holds that position.
+ *
+ * @param grids The grids of the bands (`resolveFrameBandGrids`).
+ */
+export function calculatePlayheadFrameBandOnGrids(
+  playback: FrameBandPlayback,
+  videoStartPts: Pts | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+  grids: readonly FrameBandGrid[],
+  totalDurationSeconds: number | null,
+): FrameBandLayout | null {
+  if (!isValidRate(videoTimeBase) || !videoStartPts) {
+    return null;
+  }
+  const target = playback.seekTargetSeconds;
+  const seconds =
+    typeof target === "number" && Number.isFinite(target) && target >= 0
+      ? target
+      : playback.presentedFrame === null
+        ? null
+        : ptsElapsedSeconds(
+            playback.presentedFrame.inferredSourcePts,
+            videoStartPts,
+            videoTimeBase,
+          );
+  const grid = frameBandGridAt(grids, seconds);
+  return grid === null
+    ? null
+    : calculatePlayheadFrameBand(
+        playback,
+        videoStartPts,
+        videoTimeBase,
+        grid.rate,
+        totalDurationSeconds,
+        grid.clip,
+      );
+}
+
+/**
+ * The band of the Out frame of a segment, on the grid that holds the Out (`frameBandGridAt`).
+ * Returns null when no grid holds it.
+ *
+ * @param grids The grids of the bands (`resolveFrameBandGrids`).
+ */
+export function calculateOutFrameBandOnGrids(
+  segment: Pick<Segment, "inPts" | "outPts">,
+  videoStartPts: Pts | null | undefined,
+  videoTimeBase: Rational | null | undefined,
+  grids: readonly FrameBandGrid[],
+  totalDurationSeconds: number | null,
+): FrameBandLayout | null {
+  if (!isValidRate(videoTimeBase) || !videoStartPts) {
+    return null;
+  }
+  const grid = frameBandGridAt(
+    grids,
+    ptsElapsedSeconds(segment.outPts, videoStartPts, videoTimeBase),
+  );
+  return grid === null
+    ? null
+    : calculateOutFrameBand(
+        segment,
+        videoStartPts,
+        videoTimeBase,
+        grid.rate,
+        totalDurationSeconds,
+        grid.clip,
+      );
+}
+
+/**
+ * The grid of the frame bands at `seconds` from the start of the lane, or null when no grid
+ * applies there. The grid of the one source applies everywhere. A clip grid applies from the start
+ * of its clip, so a junction belongs to the later clip, as `clipAtVirtualPts` places it.
+ *
+ * @param grids The grids of the bands (`resolveFrameBandGrids`), the clips in sequence order.
+ */
+export function frameBandGridAt(
+  grids: readonly FrameBandGrid[],
+  seconds: number | null,
+): FrameBandGrid | null {
+  if (seconds === null || !Number.isFinite(seconds)) {
+    return null;
+  }
+  let found: FrameBandGrid | null = null;
+  for (const grid of grids) {
+    if (grid.clip === undefined) {
+      return grid;
+    }
+    if (grid.clip.startSeconds > seconds) {
+      break;
+    }
+    found =
+      grid.clip.endSeconds === null || seconds < grid.clip.endSeconds ? grid : null;
+  }
+  return found;
 }

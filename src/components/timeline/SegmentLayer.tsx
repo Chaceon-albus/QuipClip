@@ -21,7 +21,7 @@ import {
 import type { TimecodeDisplay } from "@/lib/timecode";
 import type { Pts, Rational } from "@/types/project";
 import { calculateVisibleLane } from "./edgeAutoScroll";
-import { calculateOutFrameBand } from "./frameBand";
+import { calculateOutFrameBandOnGrids, type FrameBandGrid } from "./frameBand";
 import { seekToSegmentEdge } from "./segmentEdgeClick";
 import {
   SEGMENT_EDGE_ATTRIBUTE,
@@ -123,11 +123,12 @@ export interface SegmentLayerProps {
    */
   canTrimEdges: boolean;
   /**
-   * The nominal frame rate of the exact frame grid while one frame is at least
-   * `FRAME_BAND_MIN_WIDTH_PX` wide (`resolveFrameBandRate`), or null. The Out frame of the
-   * current segment shows only while this rate exists.
+   * The frame grids where one frame is at least `FRAME_BAND_MIN_WIDTH_PX` wide
+   * (`resolveFrameBandGrids`): one for the one source, or one for each clip of a sequence that
+   * has an exact grid (ADR 052). The Out frame of the current segment shows only on a grid that
+   * holds the Out. The value must be memoized.
    */
-  outFrameRate: Rational | null;
+  outFrameGrids: readonly FrameBandGrid[];
 }
 
 /**
@@ -198,7 +199,7 @@ export const SegmentLayer = memo(function SegmentLayer({
   edgePointerHandlers,
   onSegmentContextMenu,
   canTrimEdges,
-  outFrameRate,
+  outFrameGrids,
 }: SegmentLayerProps) {
   const { t } = useTranslation();
   const segments = useTimelineStore(selectSegments);
@@ -348,17 +349,17 @@ export const SegmentLayer = memo(function SegmentLayer({
   // The Out frame of the current segment, at a high zoom on the exact frame grid. A trim of that
   // segment hides it, because the stored Out does not follow the drag.
   const currentLayout =
-    outFrameRate === null || currentSegmentId === trimmedSegmentId
+    outFrameGrids.length === 0 || currentSegmentId === trimmedSegmentId
       ? undefined
       : segmentLayouts.find(({ segment }) => segment.id === currentSegmentId);
   const outFrameBand =
-    currentLayout === undefined || outFrameRate === null
+    currentLayout === undefined
       ? null
-      : calculateOutFrameBand(
+      : calculateOutFrameBandOnGrids(
           currentLayout.segment,
           videoStartPts,
           videoTimeBase,
-          outFrameRate,
+          outFrameGrids,
           totalDurationSeconds,
         );
 
@@ -503,7 +504,7 @@ export const SegmentLayer = memo(function SegmentLayer({
    * Undo, a trim and a zoom never show a segment where the model has no segment. The
    * transitions therefore name the colour properties, and never `all`.
    *
-   * At a high zoom on the exact frame grid (`outFrameRate`), the Out frame of the current
+   * At a high zoom on the exact frame grid (`outFrameGrids`), the Out frame of the current
    * segment shows as a dashed box of one frame after its right edge (`frameBand.ts`). The
    * Out is the first frame after the segment (ADR 002), so the box shows the frame that the Out
    * names and that the export leaves out. It is a decoration: it takes no pointer event, so the

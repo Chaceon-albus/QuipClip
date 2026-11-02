@@ -10,7 +10,7 @@ import { useTranslation } from "react-i18next";
 import { isSourceActive } from "@/components/layout/actionConditions";
 import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
 import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
-import type { MediaStoreState } from "@/features/media";
+import { useMediaStore, type MediaStoreState } from "@/features/media";
 import {
   sequencePlayback,
   useSequenceMediaStore,
@@ -19,7 +19,6 @@ import {
 } from "@/features/sequence";
 import {
   getDisplayedElapsedSeconds,
-  getNominalFrameRate,
   resolveTimecodeDisplay,
   type PlaybackStoreState,
   type SeekOptions,
@@ -56,7 +55,7 @@ import {
   type EdgeAutoScroll,
   type EdgeAutoScrollGeometry,
 } from "./edgeAutoScroll";
-import { resolveFrameBandRate } from "./frameBand";
+import { resolveFrameBandGrids, resolveZoomCeilingRate } from "./clipFrameGrids";
 import { PendingInTrackMarks } from "./PendingInLayer";
 import { PlayheadFollow } from "./PlayheadFollow";
 import {
@@ -145,6 +144,11 @@ const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
 const selectSwitching = (state: SequencePlaybackState) => state.switching;
 
 const selectSequenceSourceId = (state: TimelineStoreState) => state.sourceId;
+// The axis of a sequence of several clips, or null. One clip reads its own probe, so the panel
+// does not render again for each edit that builds the axis again.
+const selectSequenceAxis = (state: TimelineStoreState) =>
+  state.clips.length > 1 ? state.virtual : null;
+const selectSources = (state: MediaStoreState) => state.sources;
 
 const selectTimecodeFormat = (state: TimecodePreferenceState) => state.format;
 
@@ -215,6 +219,11 @@ export function TimelinePanel({
   // sequence, so the view state below resets as it did for a new source. The imports add the
   // clips (`importClips`), so the panel only reads the sequence.
   const sourceId = useTimelineStore(selectSequenceSourceId);
+  // The axis of the clips and the probe of each source. The zoom ceiling and the frame bands
+  // read the rate and the grid of each clip (ADR 052), which the probe of a sequence does not
+  // hold while the clips do not share one frame grid.
+  const virtual = useTimelineStore(selectSequenceAxis);
+  const sources = useMediaStore(selectSources);
 
   const totalDurationSeconds = useMemo(() => {
     if (!media) return null;
@@ -381,13 +390,14 @@ export function TimelinePanel({
 
   // The ceiling depends on the nominal frame rate, so one frame can reach the width of the
   // frame bands at every common rate (`calculateMaxPixelsPerSecond`). The rate is the one of
-  // the timecode and the frame step: the average frame rate, else the real frame rate. The
-  // ceiling counts at most 240 fps (`MAX_ZOOM_CEILING_FRAME_RATE_FPS`), so a real frame rate
-  // that a probe reports far above the frames of the file cannot give a huge ceiling.
+  // the timecode and the frame step: the average frame rate, else the real frame rate. On a
+  // sequence of several clips it is the highest rate of the clips (ADR 052). The ceiling counts
+  // at most 240 fps (`MAX_ZOOM_CEILING_FRAME_RATE_FPS`), so a real frame rate that a probe
+  // reports far above the frames of the file cannot give a huge ceiling.
   const maxZoom = calculateMaxZoom(
     totalDurationSeconds,
     viewportWidthPx,
-    media ? getNominalFrameRate(media.probe) : null,
+    resolveZoomCeilingRate(virtual, sources, media?.probe ?? null),
   );
 
   // Reports the ceiling to the viewport store, which clamps the zoom to it, as a resize, a new
@@ -546,14 +556,29 @@ export function TimelinePanel({
     calculateContentWidthPx(zoom, viewportWidthPx) - TIMELINE_GUTTER_WIDTH_PX,
   );
 
-  // The rate of the frame bands (`frameBand.ts`): the band of the frame at the playhead and the
+  // The grids of the frame bands (`frameBand.ts`): the band of the frame at the playhead and the
   // band of the Out frame of the current segment. They show only on the exact frame grid, while
-  // one frame is at least FRAME_BAND_MIN_WIDTH_PX wide, and null hides both. The value changes
-  // with the zoom and the source, and not per presented frame.
-  const frameBandRate = resolveFrameBandRate(
-    exactGridRate,
-    totalDurationSeconds,
-    laneWidthPx,
+  // one frame is at least FRAME_BAND_MIN_WIDTH_PX wide, and an empty list hides both. On a
+  // sequence of several clips each clip has its own grid (ADR 052). The list changes with the
+  // zoom and the sequence, and not per presented frame. It is memoized for the segment layer.
+  const frameBandGrids = useMemo(
+    () =>
+      resolveFrameBandGrids({
+        virtual,
+        sources,
+        gridRate: exactGridRate,
+        canUsePreciseSeek,
+        totalDurationSeconds,
+        laneWidthPx,
+      }),
+    [
+      virtual,
+      sources,
+      exactGridRate,
+      canUsePreciseSeek,
+      totalDurationSeconds,
+      laneWidthPx,
+    ],
   );
 
   // The ruler labels follow the timecode format of the source, as the preview does
@@ -1573,7 +1598,7 @@ export function TimelinePanel({
                     edgePointerHandlers={segmentEdgeHandlers}
                     onSegmentContextMenu={segmentContextMenuHandler}
                     canTrimEdges={canTrimEdges}
-                    outFrameRate={frameBandRate}
+                    outFrameGrids={frameBandGrids}
                   />
 
                   {/*
@@ -1605,12 +1630,12 @@ export function TimelinePanel({
                    * TrackFrameBand). It mounts only at a high zoom on the exact frame grid, so
                    * at other times it adds no render per presented frame.
                    */}
-                  {frameBandRate !== null && (
+                  {frameBandGrids.length > 0 && (
                     <TrackFrameBand
                       videoStartPts={videoStartPts}
                       videoTimeBase={videoTimeBase}
                       totalDurationSeconds={totalDurationSeconds}
-                      rate={frameBandRate}
+                      grids={frameBandGrids}
                     />
                   )}
 
