@@ -92,7 +92,13 @@ export type SegmentTrimPlayback = Pick<
   | "attachedSourceRevisionKey"
   | "isReady"
   | "isPlaying"
->;
+> & {
+  /**
+   * True during a cold switch of the sequence: from a navigation to another clip until the source
+   * of that clip is calibrated (`SequencePlaybackState.switching`, ADR 052). Absent means false.
+   */
+  readonly switching?: boolean;
+};
 
 /**
  * The frame grid of the clip that holds the moving edge, on a sequence of several clips with no
@@ -923,15 +929,20 @@ export function canTrimEdgeOf(
  * True while the trim can still commit: the calibration is ready, the element is ready, and
  * the playback source is the one of the start. A lost calibration or a new source drops the
  * trim with no change (ADR 030).
+ *
+ * A cold switch of the sequence keeps the trim current (`switching`, ADR 030 note of
+ * 2026-10-28). The attach of the next clip resets its element and its calibration, and the trim
+ * stays current through the whole switch. A switch ends when the calibration settles, or at a
+ * playback error, so a calibration that becomes unavailable, or an error, still drops the trim.
  */
 export function isTrimCurrent(
   trim: SegmentTrim,
   playback: SegmentTrimPlayback,
 ): boolean {
   return (
-    playback.calibrationStatus === "ready" &&
-    playback.isReady &&
-    playback.attachedSourceRevisionKey === trim.sourceRevisionKey
+    playback.attachedSourceRevisionKey === trim.sourceRevisionKey &&
+    ((playback.calibrationStatus === "ready" && playback.isReady) ||
+      playback.switching === true)
   );
 }
 
@@ -1301,6 +1312,13 @@ export interface TrimAwait {
    * another one, and the trim is then dropped.
    */
   readonly awaitedTargetSeconds: number | null;
+  /**
+   * True when the release came during a cold switch of the sequence (ADR 052). The seek of the
+   * release can then set its display target only after the attach or the calibration, so until
+   * the switch ends a change of the target does not drop the trim (`rebaseTrimAwait`). Absent
+   * means false.
+   */
+  readonly duringSwitch?: boolean;
 }
 
 /**
@@ -1319,6 +1337,7 @@ export function beginTrimAwait(
     trim,
     frameIndex: plan.frameIndex,
     awaitedTargetSeconds: after.seekTargetSeconds,
+    ...(after.switching === true ? { duringSwitch: true } : {}),
   };
 }
 
@@ -1346,7 +1365,10 @@ export type TrimAwaitDecision =
  *   keyframe of the scrub, is not that frame.
  * - A display target that changed to another value means that a later request replaced the
  *   seek of the release, so the trim is dropped. A target that cleared keeps the wait: the store
- *   can clear it on the late callback of another frame.
+ *   can clear it on the late callback of another frame. After a release during a cold switch
+ *   (`TrimAwait.duringSwitch`), the rule waits for the end of the switch, because the seek of the
+ *   release can set its target only then (`rebaseTrimAwait`). A frame of index J is still frame
+ *   J, and the bound still holds.
  * - Any other state keeps the wait. The session bounds it at `TRIM_FRAME_WAIT_MS` of visible
  *   time from the release, and the timeline then says that the trim was not applied.
  */
@@ -1367,6 +1389,7 @@ export function resolveTrimAwait(
     return { kind: "write", pts: frame.inferredSourcePts };
   }
   if (
+    awaiting.duringSwitch !== true &&
     playback.seekTargetSeconds !== null &&
     playback.seekTargetSeconds !== awaiting.awaitedTargetSeconds
   ) {
@@ -1376,6 +1399,30 @@ export function resolveTrimAwait(
 }
 
 const WAIT: { readonly kind: "wait" } = Object.freeze({ kind: "wait" });
+
+/**
+ * The wait of a trim that the release began during a cold switch, after one more playback state.
+ * Once the switch has ended and the seek of the release has set its display target, that target
+ * becomes the awaited one, and the rule of a later request applies again (`resolveTrimAwait`).
+ * Every other wait stays as it is.
+ */
+export function rebaseTrimAwait(
+  awaiting: TrimAwait,
+  playback: SegmentTrimPlayback,
+): TrimAwait {
+  if (
+    awaiting.duringSwitch !== true ||
+    playback.switching === true ||
+    playback.seekTargetSeconds === null
+  ) {
+    return awaiting;
+  }
+  return {
+    trim: awaiting.trim,
+    frameIndex: awaiting.frameIndex,
+    awaitedTargetSeconds: playback.seekTargetSeconds,
+  };
+}
 
 /**
  * True when the stored segment still holds the boundaries of the start of the trim, so a write

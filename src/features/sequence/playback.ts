@@ -9,8 +9,8 @@
  * - a PTS of the attached clip becomes a virtual PTS;
  * - seconds of the attached clip get the start of that clip on the sequence;
  * - a seek to a virtual position finds its clip. A seek on the attached clip goes to the playback
- *   store. A seek on another clip attaches that clip first, and the seek runs after the attach: a
- *   cold switch (ADR 052);
+ *   store, once the element of that clip is ready. A seek on another clip attaches that clip first,
+ *   and the seek runs after the attach, once the new element is ready: a cold switch (ADR 052);
  * - at the end of a clip, playback goes on at the first frame of the next clip (`handleEnded`).
  *
  * With one clip, every value and every request passes through unchanged.
@@ -109,8 +109,9 @@ export interface SequencePlayback {
   readonly notePause: (ended: boolean) => void;
   /**
    * True during a cold switch: from a navigation to another clip until the source of that clip is
-   * calibrated, unless the playback store reports an error. The timeline reads it, so a scrub or a
-   * trim that crosses a junction is not cancelled while the new clip loads.
+   * calibrated, unless the playback store reports an error. A navigation that waits for an element
+   * with no metadata yet counts too. The timeline reads it, so a scrub or a trim that crosses a
+   * junction is not cancelled while the new clip loads.
    */
   readonly isSwitching: () => boolean;
   /**
@@ -417,11 +418,18 @@ export function createSequencePlayback(
   /** Runs a navigation on the playback store now, or after the attach of its clip. */
   const navigate = (navigation: Navigation, play = false): void => {
     const state = timeline.getState();
-    const realKey = playback.getState().attachedSourceRevisionKey;
+    const real = playback.getState();
+    const realKey = real.attachedSourceRevisionKey;
     state.setAttachedClip(navigation.clipId);
-    if (realKey !== null && revisionKeyOfClip(navigation.clipId) === realKey) {
-      // The playback store shows the source of this clip already: two clips of one source share
-      // an element, so the seek needs no attach.
+    if (
+      realKey !== null &&
+      revisionKeyOfClip(navigation.clipId) === realKey &&
+      real.isReady
+    ) {
+      // The playback store shows the source of this clip already, and its element is ready:
+      // two clips of one source share an element, so the seek needs no attach. An element that
+      // is not ready yet, as a new element of a cold switch before its metadata, keeps the
+      // navigation pending below, because a seek before it is ready fails (`flushPending`).
       mappedClipId = navigation.clipId;
       pending = null;
       run(navigation);
@@ -502,11 +510,36 @@ export function createSequencePlayback(
     }
   };
 
+  // The depth of the actions of the interface that run (`asNavigation`).
+  let actionDepth = 0;
+
+  /**
+   * Runs an action of the interface, and maps the state once, at the end of the outermost action.
+   * While it runs, `refresh` maps nothing: the writes of the action to the timeline store and to
+   * the playback store, and a drop of a pending navigation (`userNavigates`), all publish as one
+   * state. So no listener sees the state between the drop of one navigation and the navigation
+   * that replaces it: the trim session would take that state for the end of the switch. The map at
+   * the end also follows a drop that no store write follows, so `switching` cannot stay stale.
+   */
+  const asNavigation =
+    <A extends unknown[], R>(action: (...args: A) => R) =>
+    (...args: A): R => {
+      actionDepth += 1;
+      try {
+        return action(...args);
+      } finally {
+        actionDepth -= 1;
+        if (actionDepth === 0) {
+          refresh();
+        }
+      }
+    };
+
   const store = createStore<SequencePlaybackState>()(() => ({
     switching: false,
     ...mapState(stateOf(playback.getState()), timeline.getState()),
 
-    seekToPts: (pts: Pts, options?: SeekOptions) => {
+    seekToPts: asNavigation((pts: Pts, options?: SeekOptions) => {
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state) || state.virtual === null) {
@@ -520,9 +553,9 @@ export function createSequencePlayback(
         return;
       }
       navigate({ kind: "pts", clipId: clip.clipId, pts: sourcePts, options });
-    },
+    }),
 
-    seekApproximate: (seconds: number, options?: SeekOptions) => {
+    seekApproximate: asNavigation((seconds: number, options?: SeekOptions) => {
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state)) {
@@ -544,40 +577,76 @@ export function createSequencePlayback(
         seconds: location.elapsedSeconds,
         options,
       });
-    },
+    }),
 
-    seekNominal: (
-      deltaFrames: number,
-      options?: FrameStepOptions,
-    ): FrameStepOutcome => {
-      userNavigates();
-      const state = timeline.getState();
-      const mapping = mappingOf(state);
-      const frame = playback.getState().presentedFrame;
-      const range = mapping?.clip.rangeStart ?? null;
-      const interval = mapping === null ? null : intervalTicksOf(mapping.clipId);
-      const next =
-        mapping === null ? undefined : mapping.timeline.clips[mapping.clip.index + 1];
-      if (mapping !== null && frame !== null && range !== null && interval !== null) {
-        // A step past the last frame of a clip goes to the first frame of the next clip, and a
-        // step back from the first frame goes to the last frame of the clip before it (ADR 052).
-        const pts = ptsToBigInt(frame.inferredSourcePts);
-        const end = clipEndPts(mapping.clip);
-        const previous =
-          mapping.clip.index > 0
-            ? mapping.timeline.clips[mapping.clip.index - 1]
-            : undefined;
-        // The last frame starts one interval before the end. Half an interval of slack keeps a
-        // frame whose PTS is rounded, as in a millisecond time base, on the right side. Only an
-        // exact extent names that end. An estimate can lie before or after the last frame, so
-        // the step of such a clip goes to the playback store, and the clip ends where that store
-        // cannot step on (below).
+    seekNominal: asNavigation(
+      (deltaFrames: number, options?: FrameStepOptions): FrameStepOutcome => {
+        userNavigates();
+        const state = timeline.getState();
+        const mapping = mappingOf(state);
+        const frame = playback.getState().presentedFrame;
+        const range = mapping?.clip.rangeStart ?? null;
+        const interval = mapping === null ? null : intervalTicksOf(mapping.clipId);
+        const next =
+          mapping === null ? undefined : mapping.timeline.clips[mapping.clip.index + 1];
+        if (mapping !== null && frame !== null && range !== null && interval !== null) {
+          // A step past the last frame of a clip goes to the first frame of the next clip, and a
+          // step back from the first frame goes to the last frame of the clip before it (ADR 052).
+          const pts = ptsToBigInt(frame.inferredSourcePts);
+          const end = clipEndPts(mapping.clip);
+          const previous =
+            mapping.clip.index > 0
+              ? mapping.timeline.clips[mapping.clip.index - 1]
+              : undefined;
+          // The last frame starts one interval before the end. Half an interval of slack keeps a
+          // frame whose PTS is rounded, as in a millisecond time base, on the right side. Only an
+          // exact extent names that end. An estimate can lie before or after the last frame, so
+          // the step of such a clip goes to the playback store, and the clip ends where that store
+          // cannot step on (below).
+          if (
+            deltaFrames > 0 &&
+            mapping.clip.exactDuration &&
+            next?.rangeStart != null &&
+            end !== null &&
+            pts * 2n >= end * 2n - interval * 3n
+          ) {
+            navigate({
+              kind: "pts",
+              clipId: next.clipId,
+              pts: ptsFromBigInt(next.rangeStart),
+            });
+            return "stepped";
+          }
+          const previousEnd = previous === undefined ? null : clipEndPts(previous);
+          if (
+            // The first frame shown can lie after the start of the range (ADR 046), so a step
+            // back crosses from within half an interval of it.
+            deltaFrames < 0 &&
+            previous !== undefined &&
+            previousEnd !== null &&
+            pts * 2n <= range * 2n + interval
+          ) {
+            // One tick before the end lies in the last frame, and the seek shows that frame.
+            navigate({
+              kind: "pts",
+              clipId: previous.clipId,
+              pts: ptsFromBigInt(previousEnd - 1n),
+            });
+            return "stepped";
+          }
+        }
+        const outcome = playback.getState().seekNominal(deltaFrames, options);
+        // On a clip whose extent is an estimate, a forward step that the playback store cannot
+        // make ends the clip. The store stops at its own end of the source: the end of the element,
+        // or an earlier end that the probe gives. When another clip follows, the step goes on at
+        // the first frame of that clip. A clip with an exact extent keeps the rule above, because
+        // the store can stop before the last frame of the range, and a step there must not skip it.
         if (
+          outcome === "edge" &&
           deltaFrames > 0 &&
-          mapping.clip.exactDuration &&
-          next?.rangeStart != null &&
-          end !== null &&
-          pts * 2n >= end * 2n - interval * 3n
+          mapping !== null &&
+          !mapping.clip.exactDuration &&
+          next?.rangeStart != null
         ) {
           navigate({
             kind: "pts",
@@ -586,84 +655,49 @@ export function createSequencePlayback(
           });
           return "stepped";
         }
-        const previousEnd = previous === undefined ? null : clipEndPts(previous);
-        if (
-          // The first frame shown can lie after the start of the range (ADR 046), so a step
-          // back crosses from within half an interval of it.
-          deltaFrames < 0 &&
-          previous !== undefined &&
-          previousEnd !== null &&
-          pts * 2n <= range * 2n + interval
-        ) {
-          // One tick before the end lies in the last frame, and the seek shows that frame.
-          navigate({
-            kind: "pts",
-            clipId: previous.clipId,
-            pts: ptsFromBigInt(previousEnd - 1n),
-          });
-          return "stepped";
+        return outcome;
+      },
+    ),
+
+    seekToFrameIndex: asNavigation(
+      (frameIndex: number, options?: FrameIndexSeekOptions) => {
+        userNavigates();
+        const state = timeline.getState();
+        if (!isSequence(state) || state.virtual === null) {
+          playback.getState().seekToFrameIndex(frameIndex, options);
+          return;
         }
-      }
-      const outcome = playback.getState().seekNominal(deltaFrames, options);
-      // On a clip whose extent is an estimate, a forward step that the playback store cannot
-      // make ends the clip. The store stops at its own end of the source: the end of the element,
-      // or an earlier end that the probe gives. When another clip follows, the step goes on at
-      // the first frame of that clip. A clip with an exact extent keeps the rule above, because
-      // the store can stop before the last frame of the range, and a step there must not skip it.
-      if (
-        outcome === "edge" &&
-        deltaFrames > 0 &&
-        mapping !== null &&
-        !mapping.clip.exactDuration &&
-        next?.rangeStart != null
-      ) {
+        // A frame index of the sequence count exists only on one common rate, where every clip
+        // starts on a whole frame (`sequenceNominalRate`). The index then becomes a frame index of
+        // its clip.
+        const rate = sequenceNominalRate(state, dependencies.media());
+        if (rate === null || !Number.isSafeInteger(frameIndex) || frameIndex < 0) {
+          return;
+        }
+        // The middle of the frame, so a float error at a junction cannot give the clip before.
+        const seconds = ((frameIndex + 0.5) * rate.d) / rate.n;
+        const layout = layoutSequence(
+          state.clips,
+          new Map(Object.entries(state.sequenceSources)),
+          new Map(Object.entries(state.browserDurations)),
+        );
+        const location = layout === null ? null : locate(layout, seconds);
+        const start =
+          location === null ? null : clipStartSeconds(state.virtual, location.clipId);
+        if (location === null || start === null) {
+          return;
+        }
+        const clipFrames = Math.round((start * rate.n) / rate.d);
         navigate({
-          kind: "pts",
-          clipId: next.clipId,
-          pts: ptsFromBigInt(next.rangeStart),
+          kind: "frame",
+          clipId: location.clipId,
+          frameIndex: frameIndex - clipFrames,
+          options,
         });
-        return "stepped";
-      }
-      return outcome;
-    },
+      },
+    ),
 
-    seekToFrameIndex: (frameIndex: number, options?: FrameIndexSeekOptions) => {
-      userNavigates();
-      const state = timeline.getState();
-      if (!isSequence(state) || state.virtual === null) {
-        playback.getState().seekToFrameIndex(frameIndex, options);
-        return;
-      }
-      // A frame index of the sequence count exists only on one common rate, where every clip
-      // starts on a whole frame (`sequenceNominalRate`). The index then becomes a frame index of
-      // its clip.
-      const rate = sequenceNominalRate(state, dependencies.media());
-      if (rate === null || !Number.isSafeInteger(frameIndex) || frameIndex < 0) {
-        return;
-      }
-      // The middle of the frame, so a float error at a junction cannot give the clip before.
-      const seconds = ((frameIndex + 0.5) * rate.d) / rate.n;
-      const layout = layoutSequence(
-        state.clips,
-        new Map(Object.entries(state.sequenceSources)),
-        new Map(Object.entries(state.browserDurations)),
-      );
-      const location = layout === null ? null : locate(layout, seconds);
-      const start =
-        location === null ? null : clipStartSeconds(state.virtual, location.clipId);
-      if (location === null || start === null) {
-        return;
-      }
-      const clipFrames = Math.round((start * rate.n) / rate.d);
-      navigate({
-        kind: "frame",
-        clipId: location.clipId,
-        frameIndex: frameIndex - clipFrames,
-        options,
-      });
-    },
-
-    playSegment: (inPts: Pts, outPts: Pts) => {
+    playSegment: asNavigation((inPts: Pts, outPts: Pts) => {
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state) || state.virtual === null) {
@@ -691,7 +725,7 @@ export function createSequencePlayback(
       // junction until its Out (`handleEnded`).
       navigate({ kind: "pts", clipId: inClip.clipId, pts: sourceIn.pts }, true);
       playingTo = outPts;
-    },
+    }),
 
     // Every other action and every sync of the element goes to the playback store unchanged.
     attach: (...args) => playback.getState().attach(...args),
@@ -709,18 +743,18 @@ export function createSequencePlayback(
         playback.getState().reloadStalledPreview(key);
       }
     },
-    togglePlayback: () => {
+    togglePlayback: asNavigation(() => {
       userNavigates();
       playback.getState().togglePlayback();
-    },
-    play: () => {
+    }),
+    play: asNavigation(() => {
       userNavigates();
       playback.getState().play();
-    },
-    pause: () => {
+    }),
+    pause: asNavigation(() => {
       userNavigates();
       playback.getState().pause();
-    },
+    }),
     resumeAfterSeek: () => playback.getState().resumeAfterSeek(),
     syncPresentedFrame: (...args) => playback.getState().syncPresentedFrame(...args),
     syncPresentationUnavailable: (...args) =>
@@ -744,9 +778,13 @@ export function createSequencePlayback(
   /**
    * Maps the state again after a change of either store. Nothing notifies the interface when no
    * mapped field changed: a write of the timeline alone, such as an edit, must not look like a
-   * change of the playback to a listener of this store (the trim session waits on it).
+   * change of the playback to a listener of this store (the trim session waits on it). During an
+   * action of the interface it maps nothing, and the action maps once at its end (`asNavigation`).
    */
   const refresh = (): void => {
+    if (actionDepth > 0) {
+      return;
+    }
     const clips = timeline.getState().clips;
     if (
       pending !== null &&
@@ -818,7 +856,7 @@ export function createSequencePlayback(
     return true;
   };
 
-  const seekToClipFrame = (clipId: string, frameIndex: number): void => {
+  const seekToClipFrame = asNavigation((clipId: string, frameIndex: number): void => {
     if (
       !Number.isSafeInteger(frameIndex) ||
       frameIndex < 0 ||
@@ -828,7 +866,7 @@ export function createSequencePlayback(
     }
     userNavigates();
     navigate({ kind: "frame", clipId, frameIndex });
-  };
+  });
 
   return { store, handleEnded, notePause, isSwitching, seekToClipFrame };
 }

@@ -10,11 +10,16 @@ import {
   type PlaybackSource,
   type PlaybackStore,
 } from "@/features/playback";
+import type { ImportMediaResult } from "@/features/media/types";
+import { createSequencePlayback } from "@/features/sequence";
 import type { TimelineStore } from "@/features/timeline";
-import type { Pts, Rational, TickCount } from "@/types/project";
+import type { SequenceSource } from "@/features/timeline/sequence";
+import { createTimelineStore } from "@/features/timeline/store";
+import type { Clip, Pts, Rational, TickCount } from "@/types/project";
 import type { SnapBoundary } from "./scrubSnap";
 import {
   clampTrimPts,
+  isTrimCurrent,
   TRIM_FRAME_WAIT_MS,
   type SegmentTrimProbe,
   type TrimSequence,
@@ -952,5 +957,280 @@ describe("segmentTrimSession: a trim on the grid of a clip (ADR 052)", () => {
     };
     expect(createHarness().session.canBegin(input)).toBe(false);
     expect(h.session.canBegin(input)).toBe(true);
+  });
+});
+
+describe("segmentTrimSession: a trim across a cold switch (ADR 030 note of 2026-10-28)", () => {
+  /** A 25 fps source of 10 s whose PTS counts frames, so the two clips share one frame grid. */
+  function sequenceSource(path: string) {
+    const probe = {
+      videoTimeBase: { n: 1, d: 25 },
+      videoStartPts: pts("0"),
+      videoEndPts: pts("250"),
+      videoDurationTicks: "250" as TickCount,
+      approximateDurationSeconds: 10,
+      avgFrameRate: fps25,
+      rFrameRate: fps25,
+      reportedFrameCount: null,
+    };
+    const media = {
+      path,
+      fileName: path.slice(1),
+      size: 1024,
+      mtime: 1_724_976_000,
+      probe: {
+        ...probe,
+        width: 1920,
+        height: 1080,
+        sampleAspectRatio: null,
+        rotation: 0,
+        audio: null,
+      },
+    } as unknown as ImportMediaResult;
+    const playback: PlaybackSource = {
+      path,
+      size: 1024,
+      mtime: 1_724_976_000,
+      ...probe,
+    };
+    const facts: SequenceSource = { id: path, ...probe };
+    return { media, playback, facts };
+  }
+
+  /**
+   * Clips a1 and b1 on the real sequence playback, with a1 attached and calibrated, and a segment
+   * from frame 200 to frame 240 of a1. Clip b1 starts at 250 on the axis.
+   */
+  function createSequenceHarness() {
+    const A = sequenceSource("/a.mp4");
+    const B = sequenceSource("/b.mp4");
+    const a1: Clip = { id: "a1", sourceId: "/a.mp4" };
+    const b1: Clip = { id: "b1", sourceId: "/b.mp4" };
+    const playback = createPlaybackStore();
+    const timeline = createTimelineStore();
+    timeline.getState().insertClips(0, [a1, b1], [A.facts, B.facts]);
+    timeline.getState().setAttachedClip("a1");
+    const sequence = createSequencePlayback({
+      playback,
+      timeline,
+      media: () => ({ "/a.mp4": A.media, "/b.mp4": B.media }),
+    });
+    const load = (which: typeof A) => {
+      const video = createFakeVideo();
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, video);
+      playback.getState().syncReady(key, video);
+      return { video, key };
+    };
+    /**
+     * Attaches a new element before its metadata, as the preview does for each source: it is not
+     * ready until `ready` runs, which reports its `loadedmetadata`.
+     */
+    const loadUnready = (which: typeof A) => {
+      const video = createFakeVideo();
+      (video as { readyState: number }).readyState = 0;
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, video);
+      const ready = () => {
+        (video as { readyState: number }).readyState = 4;
+        playback.getState().syncReady(key, video);
+      };
+      return { video, key, ready };
+    };
+    const a = load(A);
+    playback.getState().syncPresentedFrame(a.key, 0, 1, a.video);
+    timeline.getState().markIn(pts("200"));
+    timeline.getState().markOut(pts("240"));
+    const timers = createManualClock();
+    const session = createSegmentTrimSession({
+      playback: sequence.store,
+      timeline,
+      clock: timers.clock,
+      seekToClipFrame: sequence.seekToClipFrame,
+    });
+    const laneProbe: SegmentTrimProbe = {
+      videoStartPts: pts("0"),
+      videoTimeBase: { n: 1, d: 25 },
+      videoDurationTicks: "500" as TickCount,
+      avgFrameRate: fps25,
+      rFrameRate: fps25,
+    };
+    const segment = () => {
+      const [first] = timeline.getState().segments;
+      if (first === undefined) {
+        throw new Error("no segment");
+      }
+      return first;
+    };
+    return {
+      B,
+      playback,
+      timeline,
+      sequence,
+      session,
+      laneProbe,
+      load,
+      loadUnready,
+      segment,
+    };
+  }
+
+  it("keeps the trim while the next clip loads, and commits a frame of that clip", () => {
+    const h = createSequenceHarness();
+    expect(
+      h.session.begin({
+        segmentId: h.segment().id,
+        edge: "out",
+        hasActiveSource: true,
+        totalDurationSeconds: 20,
+        probe: h.laneProbe,
+      }),
+    ).toBe(true);
+    const trim = h.session.getDraggingTrim();
+    if (trim === null) {
+      throw new Error("no trim");
+    }
+    // The drag crosses the junction to frame 10 of b1, and the preview starts to load b1.
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    expect(h.timeline.getState().attachedClipId).toBe("b1");
+    const b = h.load(h.B);
+    // The attach resets the calibration. The cold switch keeps the trim current.
+    expect(h.sequence.store.getState().calibrationStatus).toBe("calibrating");
+    expect(h.sequence.store.getState().switching).toBe(true);
+    expect(isTrimCurrent(trim, h.sequence.store.getState())).toBe(true);
+    // The release on frame 20 of b1 comes before b1 is calibrated, and waits for that frame.
+    h.session.release({ pts: pts("270"), snap: null, writesAtOnce: false });
+    expect(h.session.getView()?.phase).toBe("committing");
+    // b1 calibrates, its seek to frame 20 runs, and frame 20 arrives.
+    h.playback.getState().syncPresentedFrame(b.key, 0, 1, b.video);
+    b.video.seeking = false;
+    h.playback.getState().syncSeeked(b.key, b.video);
+    h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
+    expect(h.segment().outPts).toBe("270");
+    expect(h.session.getNoticeCount()).toBe(0);
+    expect(h.session.getView()).toBeNull();
+  });
+
+  it("keeps the drag and the release while the new element has no metadata yet", () => {
+    const h = createSequenceHarness();
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    const trim = h.session.getDraggingTrim();
+    if (trim === null) {
+      throw new Error("no trim");
+    }
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    // The preview attaches the element of b1 before its metadata.
+    const b = h.loadUnready(h.B);
+    expect(h.playback.getState().isReady).toBe(false);
+    // A drag sample and the release in that gap wait for the element. They do not fail.
+    h.session.scrub({ pts: pts("265"), snap: null, writesAtOnce: false });
+    expect(h.playback.getState().error).toBeNull();
+    expect(h.sequence.store.getState().switching).toBe(true);
+    expect(isTrimCurrent(trim, h.sequence.store.getState())).toBe(true);
+    h.session.release({ pts: pts("270"), snap: null, writesAtOnce: false });
+    expect(h.session.getView()?.phase).toBe("committing");
+    // The metadata arrives, b1 calibrates, the seek of the release runs, and frame 20 arrives.
+    b.ready();
+    h.playback.getState().syncPresentedFrame(b.key, 0, 1, b.video);
+    b.video.seeking = false;
+    h.playback.getState().syncSeeked(b.key, b.video);
+    h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
+    expect(h.playback.getState().error).toBeNull();
+    expect(h.segment().outPts).toBe("270");
+    expect(h.session.getNoticeCount()).toBe(0);
+  });
+
+  it("keeps the wait through a seek in the gap before the metadata", () => {
+    const h = createSequenceHarness();
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    const b = h.loadUnready(h.B);
+    h.session.release({ pts: pts("270"), snap: null, writesAtOnce: false });
+    // A seek of the user in the gap replaces the seek of the release. No listener sees the
+    // switch end between the drop of one navigation and the next one.
+    const switching: boolean[] = [];
+    const stop = h.sequence.store.subscribe((state) => {
+      switching.push(state.switching);
+    });
+    h.sequence.store.getState().seekToPts(pts("270"));
+    stop();
+    expect(switching).not.toContain(false);
+    expect(h.session.getView()?.phase).toBe("committing");
+    // That seek shows frame 20 of b1, which commits the trim.
+    b.ready();
+    h.playback.getState().syncPresentedFrame(b.key, 0, 1, b.video);
+    b.video.seeking = false;
+    h.playback.getState().syncSeeked(b.key, b.video);
+    h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
+    expect(h.segment().outPts).toBe("270");
+    expect(h.session.getNoticeCount()).toBe(0);
+  });
+
+  it("keeps the wait through a seek before the next clip attaches", () => {
+    const h = createSequenceHarness();
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    // The drag scrubs in a1 first, so a1 has a display target, and then crosses into b1.
+    h.session.scrub({ pts: pts("245"), snap: null, writesAtOnce: false });
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    h.session.release({ pts: pts("270"), snap: null, writesAtOnce: false });
+    // A seek of the user to frame 20 of b1, while a1 is still attached. No listener sees the
+    // switch end between the drop of one navigation and the next one.
+    const switching: boolean[] = [];
+    const stop = h.sequence.store.subscribe((state) => {
+      switching.push(state.switching);
+    });
+    h.sequence.store.getState().seekToPts(pts("270"));
+    stop();
+    expect(switching).not.toContain(false);
+    const b = h.loadUnready(h.B);
+    b.ready();
+    h.playback.getState().syncPresentedFrame(b.key, 0, 1, b.video);
+    b.video.seeking = false;
+    h.playback.getState().syncSeeked(b.key, b.video);
+    h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
+    expect(h.segment().outPts).toBe("270");
+    expect(h.session.getNoticeCount()).toBe(0);
+  });
+
+  it("commits a release that comes before the next clip attaches", () => {
+    const h = createSequenceHarness();
+    h.session.begin({
+      segmentId: h.segment().id,
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+    });
+    h.session.scrub({ pts: pts("260"), snap: null, writesAtOnce: false });
+    // The release on frame 20 of b1 comes while the seek to b1 still waits for its attach.
+    h.session.release({ pts: pts("270"), snap: null, writesAtOnce: false });
+    expect(h.sequence.store.getState().switching).toBe(true);
+    // The seek of the release runs after the attach, and its display target is new. The trim
+    // keeps waiting for frame 20 of b1, and that frame commits it.
+    const b = h.load(h.B);
+    h.playback.getState().syncPresentedFrame(b.key, 0, 1, b.video);
+    b.video.seeking = false;
+    h.playback.getState().syncSeeked(b.key, b.video);
+    h.playback.getState().syncPresentedFrame(b.key, 20 / 25, 2, b.video);
+    expect(h.segment().outPts).toBe("270");
+    expect(h.session.getNoticeCount()).toBe(0);
   });
 });

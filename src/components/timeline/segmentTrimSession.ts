@@ -39,6 +39,7 @@ import {
   planSegmentTrimStart,
   planTrimCancel,
   planTrimRelease,
+  rebaseTrimAwait,
   resolveTrimAwait,
   trimScrubPts,
   TRIM_FRAME_WAIT_MS,
@@ -66,9 +67,21 @@ export interface SegmentTrimClock {
   readonly clearTimeout: (handle: unknown) => void;
 }
 
+/**
+ * The playback state that a session reads: the state of the playback store, and on a sequence
+ * the cold switch of the sequence playback (`SequencePlaybackState.switching`). Absent means no
+ * switch.
+ */
+export type SegmentTrimSessionPlaybackState = PlaybackStoreState & {
+  readonly switching?: boolean;
+};
+
 /** The stores that a session reads and writes. The production stores satisfy it. */
 export interface SegmentTrimSessionStores {
-  readonly playback: Pick<StoreApi<PlaybackStoreState>, "getState" | "subscribe">;
+  readonly playback: Pick<
+    StoreApi<SegmentTrimSessionPlaybackState>,
+    "getState" | "subscribe"
+  >;
   readonly timeline: Pick<StoreApi<TimelineStoreState>, "getState">;
   /** The timers of the bound of the wait. The global timers by default. */
   readonly clock?: SegmentTrimClock;
@@ -335,22 +348,30 @@ export function createSegmentTrimSession(
    * reads the state just after the seek of the release, and each later playback state decides
    * again, so every frame callback checks the frame on screen once more. The bound starts at the
    * release (`TRIM_FRAME_WAIT_MS` of visible time), so a seek that never completes, or a frame
-   * that never arrives, ends in the notice and not in a trim that waits for ever.
+   * that never arrives, ends in the notice and not in a trim that waits for ever. The bound also
+   * counts the attach and the calibration of a cold switch that the release waits for.
+   *
+   * A wait that began during a cold switch takes the display target of the release seek as its
+   * own once the switch ends (`rebaseTrimAwait`). A later request then drops it as usual.
    */
   const awaitFrame = (awaiting: TrimAwait): void => {
-    const decide = (decision: TrimAwaitDecision): void => {
+    let current = awaiting;
+    const decide = (state: SegmentTrimSessionPlaybackState): void => {
+      const decision: TrimAwaitDecision = resolveTrimAwait(current, state);
       if (decision.kind === "write") {
-        commit(awaiting.trim, decision.pts);
+        commit(current.trim, decision.pts);
       } else if (decision.kind === "drop") {
         fail();
+      } else {
+        current = rebaseTrimAwait(current, state);
       }
     };
     stopAwait = playback.subscribe((state) => {
-      decide(resolveTrimAwait(awaiting, state));
+      decide(state);
     });
     stepBound({ type: "arm", visible: isVisible() });
     if (stopAwait !== null) {
-      decide(resolveTrimAwait(awaiting, playback.getState()));
+      decide(playback.getState());
     }
   };
 

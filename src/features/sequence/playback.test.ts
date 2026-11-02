@@ -195,6 +195,26 @@ describe("sequence playback", () => {
     expect(h.sequence.store.getState().switching).toBe(false);
   });
 
+  it("keeps a seek pending while the new element of its clip has no metadata", () => {
+    const h = harness([a1, b1]);
+    attach(h.playback, A);
+    h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+    // The preview attaches the element of b1 before its metadata.
+    const element = createFakeElement();
+    element.readyState = 0;
+    const key = getSourceRevisionKey(B.media);
+    h.playback.getState().attach(B.playback, element);
+    // A second seek in that gap waits too, and does not fail on the element.
+    h.sequence.store.getState().seekToPts(h.virtual("b1", "50"));
+    expect(h.playback.getState().error).toBeNull();
+    expect(h.sequence.store.getState().switching).toBe(true);
+    element.readyState = 1;
+    h.playback.getState().syncReady(key, element);
+    h.playback.getState().syncPresentedFrame(key, 0, 1, element);
+    expect(h.playback.getState().error).toBeNull();
+    expect(h.playback.getState().seekTargetSeconds).toBe(2);
+  });
+
   it("drops the navigation of a clip that leaves the sequence", () => {
     const h = harness([a1, b1]);
     attach(h.playback, A);

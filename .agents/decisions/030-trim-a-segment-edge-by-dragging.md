@@ -102,6 +102,10 @@ release commits the frame that the browser presents at the end of the drag.
   limit. If the frame on screen is `J`, its PTS is written at once. Otherwise the release
   calls `seekToFrameIndex(J)`, and the first frame on screen that is `J` is written. A frame
   with any other index is never written. A later request for another target drops the trim.
+  (Changed on 2026-11-02: after a release during a cold switch of a sequence, a request during
+  the switch does not drop the trim, because the seek of the release can set its target only
+  at the end of the switch. The trim then waits for frame `J` until the bound. After the switch,
+  the rule applies again to the target that the switch left.)
 - **The end of the source.** An Out edge dragged to the end stops on the last frame of the
   extent, the same result as Mark Out on the last frame. (Changed on 2026-09-24.) When the
   probe gives the video duration in ticks, the last frame is the frame that End goes to
@@ -127,7 +131,11 @@ release commits the frame that the browser presents at the end of the drag.
 - **Escape** returns through `seekToFrameIndex` to the frame of the start playhead.
 - (Added on 2026-09-24.) **A secondary press** on an edge, and a Control press on macOS,
   opens the context menu of the segment (ADR 007) and never starts a trim.
-- **A trim that cannot finish.** If no frame `J` arrives within 3 seconds of visible time
+- **A trim that cannot finish.** (Changed on 2026-11-02: on a sequence, the 3 seconds also
+  count the attach and the calibration of a cold switch that the release waits for. A slow file
+  can then end in the notice, and the next trim works because the clip is loaded. A cold switch
+  does not drop the trim, as the note of 2026-10-28 says. A playback error ends the switch and
+  drops it.) If no frame `J` arrives within 3 seconds of visible time
   after the release, counted as the anchor wait of ADR 003 counts it, or if the calibration,
   the source or the segment changes before it arrives, the trim is dropped, and a short
   notice says "The trim was not applied." Escape and a cancel by the browser drop the trim

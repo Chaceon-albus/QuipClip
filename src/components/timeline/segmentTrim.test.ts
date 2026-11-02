@@ -18,6 +18,7 @@ import {
   planSegmentTrimStart,
   planTrimCancel,
   planTrimRelease,
+  rebaseTrimAwait,
   resolveTrimAwait,
   resolveTrimEdgeSpan,
   resolveTrimGridRate,
@@ -898,6 +899,35 @@ describe("beginTrimAwait", () => {
       beginTrimAwait(trim, plan, { ...after, calibrationStatus: "unavailable" }),
     ).toBeNull();
     expect(beginTrimAwait(trim, plan, { ...after, isPlaying: true })).toBeNull();
+  });
+
+  it("waits through a cold switch, and takes the target of the release once it ends", () => {
+    // The release came while the next clip loads: its seek has no target yet.
+    const switching = {
+      ...after,
+      calibrationStatus: "calibrating" as const,
+      isReady: false,
+      seekTargetSeconds: null,
+      switching: true,
+    };
+    const awaiting = beginTrimAwait(trim, plan, switching);
+    expect(awaiting?.duringSwitch).toBe(true);
+    if (awaiting === null) {
+      throw new Error("no wait");
+    }
+    // A new target during the switch does not drop the trim.
+    const seeking = { ...switching, seekTargetSeconds: 3.04 };
+    expect(resolveTrimAwait(awaiting, seeking)).toEqual({ kind: "wait" });
+    expect(rebaseTrimAwait(awaiting, seeking)).toBe(awaiting);
+    // The switch ends with the target of the release seek. It becomes the awaited target, and a
+    // later request drops the trim again.
+    const settled = { ...after, seekTargetSeconds: 3.04, switching: false };
+    const rebased = rebaseTrimAwait(awaiting, settled);
+    expect(rebased).toEqual({ trim, frameIndex: 76n, awaitedTargetSeconds: 3.04 });
+    expect(resolveTrimAwait(rebased, settled)).toEqual({ kind: "wait" });
+    expect(resolveTrimAwait(rebased, { ...settled, seekTargetSeconds: 5 })).toEqual({
+      kind: "drop",
+    });
   });
 });
 
