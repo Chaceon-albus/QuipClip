@@ -69,6 +69,7 @@ import {
   useSequenceMediaStore,
   useSequencePlaybackStore,
 } from "@/features/sequence";
+import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 
 const selectMedia = (s: MediaStoreState) => s.media;
 
@@ -133,6 +134,9 @@ export function TransportBar() {
   const { t } = useTranslation();
   const shortcutOf = useShortcutLabels();
   const media = useSequenceMediaStore(selectMedia);
+  // A frame step moves on the grid of the clip on screen, so it needs the rate of that clip
+  // (ADR 052). The sequence has a rate only while every clip starts on one frame grid.
+  const attachedProbe = useAttachedMediaStore((s) => s.media?.probe);
 
   const canUndo = useTimelineStore(selectCanUndo);
   const canRedo = useTimelineStore(selectCanRedo);
@@ -163,7 +167,7 @@ export function TransportBar() {
   const isReadStall = useSequencePlaybackStore((s) => s.decodeStall?.cause === "read");
   const togglePlayback = sequencePlayback.store.getState().togglePlayback;
 
-  const hasNominalRate = hasNominalFrameRate(media?.probe);
+  const hasNominalRate = hasNominalFrameRate(attachedProbe);
 
   // Every segment action names this target instead of guessing from the playhead.
   const currentSegment = useMemo(

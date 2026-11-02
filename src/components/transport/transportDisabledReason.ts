@@ -116,10 +116,11 @@ export interface EditReasonContext {
  * enabled or no source is active.
  *
  * The condition of a step is an active source, a valid nominal frame rate (ADR 021), and no
- * decode stall (`canStepFrames`). The frame rate comes from the probe, so its reason holds for
- * the whole session, and it comes first. A decode stall ends at the next seek, and its reason
- * says so. The notice of the preview says the same, but the user can close it. `isReadStall`
- * marks a stall where the preview could not read the file (ADR 046), which has its own reason.
+ * decode stall (`canStepFrames`). The frame rate comes from the probe of the clip on screen
+ * (ADR 052), so its reason holds while that clip shows, and it comes first. A decode stall ends
+ * at the next seek, and its reason says so. The notice of the preview says the same, but the
+ * user can close it. `isReadStall` marks a stall where the preview could not read the file
+ * (ADR 046), which has its own reason.
  */
 export function presentStepDisabledReason(
   hasActiveSource: boolean,

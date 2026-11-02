@@ -98,6 +98,13 @@ export type ShortcutProbe = Pick<
 export interface ShortcutSnapshot {
   /** The probe of the open media, or null while no media is open. */
   readonly probe: ShortcutProbe | null;
+  /**
+   * The rates of the clip that the preview shows (ADR 052). The frame steps read them, because
+   * a step moves on the grid of that clip. On a sequence of several clips, `probe` has a rate
+   * only while every clip starts on one frame grid (`sequenceNominalRate`), which the frame
+   * timecode needs and a step does not. Absent means `probe`, the probe of the one clip.
+   */
+  readonly attachedProbe?: Pick<MediaProbe, "avgFrameRate" | "rFrameRate"> | null;
   readonly playback: Pick<
     PlaybackState,
     | "isAttached"
@@ -766,6 +773,10 @@ export function planShortcutCommand(
     playback.isAttached,
     playback.isReady,
   );
+  // The frame steps need the rate of the attached clip, not one rate of the whole sequence.
+  const hasStepRate = hasNominalFrameRate(
+    snapshot.attachedProbe === undefined ? probe : snapshot.attachedProbe,
+  );
 
   if (snapshot.isTrimDragging === true && TRIM_LOCKED_ACTIONS.has(action)) {
     return null;
@@ -784,13 +795,7 @@ export function planShortcutCommand(
     case "stepForwardOneFrame":
     case "stepBackTenFrames":
     case "stepForwardTenFrames": {
-      if (
-        !canStepFrames(
-          hasActiveSource,
-          hasNominalFrameRate(probe),
-          isDecodeStalled(playback),
-        )
-      ) {
+      if (!canStepFrames(hasActiveSource, hasStepRate, isDecodeStalled(playback))) {
         return null;
       }
       const size =
@@ -809,17 +814,13 @@ export function planShortcutCommand(
     case "stepOrJumpForward": {
       // The arrow with no modifier. While the video plays it jumps, as in a media player, and a
       // frame step there would only stop the playback. While the video is paused it steps one
-      // frame, the same step as `,` and `.`. When no frame step can run (no nominal frame rate,
-      // or a decode stall), it jumps, so the key still moves the playhead, and the seek of the
-      // jump also loads a stalled preview again.
+      // frame, the same step as `,` and `.`. When no frame step can run (no nominal frame rate
+      // of the attached clip, or a decode stall), it jumps, so the key still moves the playhead,
+      // and the seek of the jump also loads a stalled preview again.
       const sign = action === "stepOrJumpBack" ? -1 : 1;
       if (
         !playback.isPlaying &&
-        canStepFrames(
-          hasActiveSource,
-          hasNominalFrameRate(probe),
-          isDecodeStalled(playback),
-        )
+        canStepFrames(hasActiveSource, hasStepRate, isDecodeStalled(playback))
       ) {
         return { kind: "seekNominal", frames: sign, held: press?.repeat === true };
       }

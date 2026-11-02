@@ -22,6 +22,7 @@ import {
   type ShortcutSnapshot,
 } from "./shortcutCommands";
 import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
+import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 
 /**
  * One read of each store, so the condition that a plan tests and the call that runs after it
@@ -31,6 +32,8 @@ import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
 export function readShortcutSnapshot(): ShortcutSnapshot {
   return {
     probe: sequenceMediaStore.getState().media?.probe ?? null,
+    // The frame steps read the rate of the clip on screen (ADR 052).
+    attachedProbe: attachedMediaStore.getState().media?.probe ?? null,
     playback: sequencePlayback.store.getState(),
     timeline: timelineStore.getState(),
     viewport: timelineViewportStore.getState(),

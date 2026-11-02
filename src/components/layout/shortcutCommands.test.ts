@@ -681,6 +681,36 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("stepOrJumpBack", stalled)).not.toBeNull();
     });
 
+    it("steps with the rate of the attached clip on a sequence with no one rate", () => {
+      // Several clips that do not start on one frame grid: the probe of the sequence has no
+      // rate, for the timecode only, and the clip on screen has one (ADR 052).
+      const sequence = createSnapshot({
+        probe: createProbe({ avgFrameRate: null, rFrameRate: null }),
+      });
+      const attached: ShortcutSnapshot = { ...sequence, attachedProbe: createProbe() };
+      expect(planShortcutCommand("stepOrJumpForward", attached)).toEqual({
+        kind: "seekNominal",
+        frames: 1,
+        held: false,
+      });
+      expect(planShortcutCommand("stepBackOneFrame", attached)).toEqual({
+        kind: "seekNominal",
+        frames: -1,
+        held: false,
+      });
+      // The rate of the clip on screen decides, also over a probe that has one: with no rate
+      // there, the arrow jumps, and the step does nothing.
+      const noClipRate: ShortcutSnapshot = {
+        ...createSnapshot(),
+        attachedProbe: createProbe({ avgFrameRate: null, rFrameRate: null }),
+      };
+      expect(planShortcutCommand("stepBackOneFrame", noClipRate)).toBeNull();
+      expect(planShortcutCommand("stepOrJumpForward", noClipRate)?.kind).not.toBe(
+        "seekNominal",
+      );
+      expect(planShortcutCommand("stepOrJumpForward", noClipRate)).not.toBeNull();
+    });
+
     it("plans the same jump for a key repeat, a press and a menu", () => {
       for (const action of Object.keys(TIME_JUMP_SECONDS) as TimeJumpAction[]) {
         const once = planShortcutCommand(action, createSnapshot());
