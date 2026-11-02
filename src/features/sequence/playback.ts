@@ -28,6 +28,7 @@ import type { PlaybackStore } from "@/features/playback/store";
 import type {
   FrameIndexSeekOptions,
   FrameStepOptions,
+  FrameStepOutcome,
   PlaybackState,
   PlaybackStop,
   PlaybackStoreState,
@@ -537,27 +538,35 @@ export function createSequencePlayback(
       });
     },
 
-    seekNominal: (deltaFrames: number, options?: FrameStepOptions) => {
+    seekNominal: (
+      deltaFrames: number,
+      options?: FrameStepOptions,
+    ): FrameStepOutcome => {
       userNavigates();
       const state = timeline.getState();
       const mapping = mappingOf(state);
       const frame = playback.getState().presentedFrame;
       const range = mapping?.clip.rangeStart ?? null;
       const interval = mapping === null ? null : intervalTicksOf(mapping.clipId);
+      const next =
+        mapping === null ? undefined : mapping.timeline.clips[mapping.clip.index + 1];
       if (mapping !== null && frame !== null && range !== null && interval !== null) {
         // A step past the last frame of a clip goes to the first frame of the next clip, and a
         // step back from the first frame goes to the last frame of the clip before it (ADR 052).
         const pts = ptsToBigInt(frame.inferredSourcePts);
         const end = clipEndPts(mapping.clip);
-        const next = mapping.timeline.clips[mapping.clip.index + 1];
         const previous =
           mapping.clip.index > 0
             ? mapping.timeline.clips[mapping.clip.index - 1]
             : undefined;
         // The last frame starts one interval before the end. Half an interval of slack keeps a
-        // frame whose PTS is rounded, as in a millisecond time base, on the right side.
+        // frame whose PTS is rounded, as in a millisecond time base, on the right side. Only an
+        // exact extent names that end. An estimate can lie before or after the last frame, so
+        // the step of such a clip goes to the playback store, and the clip ends where that store
+        // cannot step on (below).
         if (
           deltaFrames > 0 &&
+          mapping.clip.exactDuration &&
           next?.rangeStart != null &&
           end !== null &&
           pts * 2n >= end * 2n - interval * 3n
@@ -567,7 +576,7 @@ export function createSequencePlayback(
             clipId: next.clipId,
             pts: ptsFromBigInt(next.rangeStart),
           });
-          return;
+          return "stepped";
         }
         const previousEnd = previous === undefined ? null : clipEndPts(previous);
         if (
@@ -584,10 +593,30 @@ export function createSequencePlayback(
             clipId: previous.clipId,
             pts: ptsFromBigInt(previousEnd - 1n),
           });
-          return;
+          return "stepped";
         }
       }
-      playback.getState().seekNominal(deltaFrames, options);
+      const outcome = playback.getState().seekNominal(deltaFrames, options);
+      // On a clip whose extent is an estimate, a forward step that the playback store cannot
+      // make ends the clip. The store stops at its own end of the source: the end of the element,
+      // or an earlier end that the probe gives. When another clip follows, the step goes on at
+      // the first frame of that clip. A clip with an exact extent keeps the rule above, because
+      // the store can stop before the last frame of the range, and a step there must not skip it.
+      if (
+        outcome === "edge" &&
+        deltaFrames > 0 &&
+        mapping !== null &&
+        !mapping.clip.exactDuration &&
+        next?.rangeStart != null
+      ) {
+        navigate({
+          kind: "pts",
+          clipId: next.clipId,
+          pts: ptsFromBigInt(next.rangeStart),
+        });
+        return "stepped";
+      }
+      return outcome;
     },
 
     seekToFrameIndex: (frameIndex: number, options?: FrameIndexSeekOptions) => {

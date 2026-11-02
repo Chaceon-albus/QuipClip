@@ -32,6 +32,7 @@ import type {
   CalibrationStatus,
   FrameIndexSeekOptions,
   FrameStepOptions,
+  FrameStepOutcome,
   PlaybackErrorCode,
   PlaybackMediaElement,
   PlaybackSource,
@@ -1523,7 +1524,7 @@ export function createPlaybackStore(
       source: PlaybackSource,
       element: PlaybackMediaElement,
       fps: Rational,
-    ): void => {
+    ): FrameStepOutcome => {
       const pending =
         queuedSeek ?? (lastAcceptedSeek?.scrub === true ? lastAcceptedSeek : null);
       const currentBrowserTime = pending?.mediaTime ?? repairedPosition(element);
@@ -1531,7 +1532,7 @@ export function createPlaybackStore(
         typeof currentBrowserTime !== "number" ||
         !Number.isFinite(currentBrowserTime)
       ) {
-        return;
+        return "none";
       }
 
       // The calibrated first frame, while the calibration holds. It is the frame videoStartPts
@@ -1632,7 +1633,7 @@ export function createPlaybackStore(
       } else if (gridOrigin === null) {
         // An absolute target needs the grid (seekToFrameIndex checks it first).
         if (request.kind === "absolute") {
-          return;
+          return "none";
         }
         unclampedTarget = stepStart + (request.deltaFrames * fps.d) / fps.n;
         direction = Math.sign(request.deltaFrames);
@@ -1687,13 +1688,13 @@ export function createPlaybackStore(
             : startFrame + request.deltaFrames;
         direction = Math.sign(targetFrame - startFrame);
         if (!Number.isSafeInteger(startFrame) || !Number.isSafeInteger(targetFrame)) {
-          return;
+          return "none";
         }
         unclampedTarget = gridOrigin + nominalFrameMiddleSeconds(targetFrame, fps);
         grid = { startFrame, targetFrame, frameIndexAt };
       }
       if (!Number.isFinite(unclampedTarget)) {
-        return;
+        return "none";
       }
       // The clamp can pull the target to a bound: the calibrated first frame or the start of
       // the timeline, or the end position.
@@ -1789,20 +1790,20 @@ export function createPlaybackStore(
         // frame can still sound. A jump that keeps playing moves nothing here, so the playback
         // goes on: the element is still inside the frame that the jump names.
         if (keepsPlaying) {
-          return;
+          return "edge";
         }
         if (state.isPlaying) {
           get().pause();
         } else if (silencesCue) {
           scrubCue.stop();
         }
-        return;
+        return "edge";
       }
 
       // The step stays exact: it assigns currentTime through the helper with scrub false
       // (ADR 019, ADR 022).
       if (!dispatchSeek(element, targetTime, false, keepsPlaying)) {
-        return;
+        return "none";
       }
 
       // A relative step is a frame step, and it requests the cue (ADR 019), except a held
@@ -1866,6 +1867,7 @@ export function createPlaybackStore(
         presentedFrame: null,
         seekTargetSeconds,
       });
+      return "stepped";
     };
 
     /**
@@ -3221,7 +3223,10 @@ export function createPlaybackStore(
         });
       },
 
-      seekNominal: (deltaFrames: number, options?: FrameStepOptions) => {
+      seekNominal: (
+        deltaFrames: number,
+        options?: FrameStepOptions,
+      ): FrameStepOutcome => {
         // A frame step ends a segment playback (ADR 026), also a step at an edge.
         dropPlaybackStop();
         if (
@@ -3229,7 +3234,7 @@ export function createPlaybackStore(
           !Number.isSafeInteger(deltaFrames) ||
           deltaFrames === 0
         ) {
-          return;
+          return "none";
         }
 
         const state = get();
@@ -3241,13 +3246,13 @@ export function createPlaybackStore(
           !state.isReady ||
           state.decodeStall !== null
         ) {
-          return;
+          return "none";
         }
 
         const fps = getNominalFrameRate(attachedSource);
         if (!fps) {
           // Disabled when neither frame rate exists
-          return;
+          return "none";
         }
 
         if (state.calibrationStatus === "calibrating") {
@@ -3258,29 +3263,29 @@ export function createPlaybackStore(
           const entry = deferredNavigation ?? { seek: null, frames: 0 };
           const geometry = deferredStepGeometry(entry.seek);
           if (geometry === null) {
-            return;
+            return "none";
           }
           const frames = Math.min(
             Math.max(entry.frames + deltaFrames, -geometry.startFrame),
             geometry.lastFrame - geometry.startFrame,
           );
           if (!Number.isSafeInteger(frames)) {
-            return;
+            return "none";
           }
           if (frames === entry.frames) {
             if (state.isPlaying) {
               get().pause();
             }
-            return;
+            return "edge";
           }
           deferNavigation({ seek: entry.seek, frames });
-          return;
+          return "stepped";
         }
 
         // A held backward step requests no cue (FrameStepOptions). A deferred step above requests
         // no cue when the store accepts it, held or not. It runs at the anchor as one step that
         // is not held, and that step requests its one cue (ADR 019, ADR 022).
-        stepToFrame(
+        return stepToFrame(
           { kind: "relative", deltaFrames, held: options?.held === true },
           state,
           attachedSource,

@@ -11,8 +11,18 @@ import { createSequencePlayback } from "./playback";
 const pts = (value: string) => value as Pts;
 const ticks = (value: string) => value as TickCount;
 
-/** A 25 fps source of 10 s whose PTS counts frames, at a path of its own. */
-function source(path: string): {
+/**
+ * A 25 fps source of 10 s whose PTS counts frames, at a path of its own. `extent` replaces the
+ * facts of its extent, such as a probe that could not read the last packets.
+ */
+function source(
+  path: string,
+  extent: {
+    readonly videoEndPts?: Pts | null;
+    readonly videoDurationTicks?: TickCount | null;
+    readonly approximateDurationSeconds?: number;
+  } = {},
+): {
   media: ImportMediaResult;
   playback: PlaybackSource;
   facts: SequenceSource;
@@ -26,6 +36,7 @@ function source(path: string): {
     avgFrameRate: { n: 25, d: 1 },
     rFrameRate: { n: 25, d: 1 },
     reportedFrameCount: null,
+    ...extent,
   };
   const media = {
     path,
@@ -88,19 +99,20 @@ function attach(playback: ReturnType<typeof createPlaybackStore>, which: typeof 
   return { element, key };
 }
 
-function harness(clips: readonly Clip[]) {
+/** The sequence of `clips` over the sources `a` (for `/a.mp4`) and `B`. */
+function harness(clips: readonly Clip[], a: typeof A = A) {
   const playback = createPlaybackStore();
   const timeline = createTimelineStore();
   timeline.getState().insertClips(
     0,
     clips,
-    clips.map((clip) => (clip.sourceId === "/a.mp4" ? A.facts : B.facts)),
+    clips.map((clip) => (clip.sourceId === "/a.mp4" ? a.facts : B.facts)),
   );
   timeline.getState().setAttachedClip(clips[0]?.id ?? null);
   const sequence = createSequencePlayback({
     playback,
     timeline,
-    media: () => ({ "/a.mp4": A.media, "/b.mp4": B.media }),
+    media: () => ({ "/a.mp4": a.media, "/b.mp4": B.media }),
   });
   const virtual = (clipId: string, value: string): Pts => {
     const axis = timeline.getState().virtual;
@@ -240,6 +252,56 @@ describe("sequence playback", () => {
     h.playback.getState().syncPresentedFrame(key, 249 / 25, 2, element);
     h.sequence.store.getState().seekNominal(1);
     expect(h.timeline.getState().attachedClipId).toBe("b1");
+  });
+
+  it("steps past the last frame of a clip whose extent is too long", () => {
+    // The probe read no end, and the stream duration says 260 frames, 10.4 s. The element ends
+    // after frame 249, at 10 s.
+    const long = source("/a.mp4", {
+      videoEndPts: null,
+      videoDurationTicks: ticks("260"),
+      approximateDurationSeconds: 10.4,
+    });
+    const h = harness([a1, b1], long);
+    const { element, key } = attach(h.playback, long);
+    h.playback.getState().syncBrowserDuration(key, element);
+    h.playback.getState().syncPresentedFrame(key, 249 / 25, 2, element);
+    // The first step seeks to the end of the element, which shows frame 249 again, as the step
+    // of one source does. The store cannot step on from there, so the next step goes to b1.
+    expect(h.sequence.store.getState().seekNominal(1)).toBe("stepped");
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+    expect(h.sequence.store.getState().seekNominal(1)).toBe("stepped");
+    expect(h.timeline.getState().attachedClipId).toBe("b1");
+  });
+
+  it("keeps the last frame of an exact clip that the store cannot reach", () => {
+    // The range of a1 ends at frame 250, but the stream duration of the probe says 249 frames.
+    // The store stops at frame 248. The step must not cross and skip frame 249 of the range.
+    const exact = source("/a.mp4", {
+      videoDurationTicks: ticks("249"),
+      approximateDurationSeconds: 9.96,
+    });
+    const h = harness([a1, b1], exact);
+    const { element, key } = attach(h.playback, exact);
+    h.playback.getState().syncBrowserDuration(key, element);
+    h.playback.getState().syncPresentedFrame(key, 248 / 25, 2, element);
+    expect(h.sequence.store.getState().seekNominal(1)).toBe("edge");
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+  });
+
+  it("passes the edge of the one clip through, with nothing to cross to", () => {
+    const h = harness([a1]);
+    const { element, key } = attach(h.playback, A);
+    h.playback.getState().syncBrowserDuration(key, element);
+    h.playback.getState().syncPresentedFrame(key, 249 / 25, 2, element);
+    expect(h.sequence.store.getState().seekNominal(1)).toBe("edge");
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+  });
+
+  it("reports a step that cannot run", () => {
+    const h = harness([a1, b1]);
+    expect(h.sequence.store.getState().seekNominal(1)).toBe("none");
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
   });
 
   it("steps from the first frame of a clip back to the last frame of the one before", () => {

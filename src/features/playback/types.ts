@@ -198,6 +198,21 @@ export interface FrameStepOptions {
 }
 
 /**
+ * What a frame step did (`seekNominal`).
+ *
+ * - `stepped`: the step seeks, or the store keeps it as a deferred step until the calibration
+ *   settles.
+ * - `edge`: the step starts at the first or the last frame that the store can reach, so it does
+ *   not move. The store reaches no further than its bounds of the source: the end of the element,
+ *   or an earlier end that the probe gives. The sequence playback reads this for a forward step
+ *   on a clip whose extent is an estimate: when another clip follows, the step goes on at the
+ *   first frame of that clip (ADR 052).
+ * - `none`: the step cannot run. Examples are no attached source, no nominal rate, a decode
+ *   stall, and a delta that is not a whole number of frames.
+ */
+export type FrameStepOutcome = "stepped" | "edge" | "none";
+
+/**
  * Status of the first-presented-frame PTS calibration.
  *
  * - "calibrating": Awaiting first RVFC callback to associate with videoStartPts.
@@ -505,8 +520,9 @@ export interface PlaybackActions {
    * step does not move (see FrameStepOptions).
    * Does nothing during a decode stall, because no frame is on screen to step from
    * (`decodeStall`).
+   * Returns what the step did (`FrameStepOutcome`).
    */
-  seekNominal: (deltaFrames: number, options?: FrameStepOptions) => void;
+  seekNominal: (deltaFrames: number, options?: FrameStepOptions) => FrameStepOutcome;
 
   /**
    * Goes to nominal frame `frameIndex` of the frame grid, counted from the calibrated first frame
