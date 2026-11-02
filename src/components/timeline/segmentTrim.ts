@@ -812,6 +812,114 @@ function planClipTrimStart(input: ClipTrimStartInput): SegmentTrim | null {
 }
 
 /**
+ * Where a drag on a segment edge can trim (ADR 030, ADR 052): on every edge, on the edges inside
+ * one clip, or on none. The resize cursor of the edges reads it, so an edge shows that cursor only
+ * when a drag on it can start a trim.
+ */
+export type TrimEdgeSpan =
+  | { readonly kind: "all" }
+  | { readonly kind: "none" }
+  | {
+      readonly kind: "clip";
+      /** The PTS where the clip starts, on the axis of the lane. */
+      readonly startPts: Pts;
+      /** The PTS where the clip ends, or null when its extent is not known. */
+      readonly endPts: Pts | null;
+    };
+
+const EVERY_EDGE: TrimEdgeSpan = Object.freeze({ kind: "all" });
+const NO_EDGE: TrimEdgeSpan = Object.freeze({ kind: "none" });
+
+/** The inputs of `resolveTrimEdgeSpan`. */
+export interface TrimEdgeSpanInput {
+  /**
+   * True on the exact frame grid of the one source, or of a sequence whose clips share one grid,
+   * while a precise seek is possible (`resolveTrimGridRate` of the probe of the lane).
+   */
+  readonly hasLaneGrid: boolean;
+  /** True while a precise seek is possible. */
+  readonly canUsePreciseSeek: boolean;
+  readonly isDecodeStalled: boolean;
+  /** The sequence while it has several clips (`TrimSequence`), or null. */
+  readonly sequence: TrimSequence | null;
+}
+
+/**
+ * Resolves where a drag can trim (`TrimEdgeSpan`):
+ *
+ * - Nowhere during a decode stall, as the trim does not start then.
+ * - On every edge on the exact grid of the lane.
+ * - On a sequence whose clips share no grid, on the edges inside the clip on screen, while that
+ *   clip has an exact frame grid (`planClipTrimStart`). An edge is inside it by the rule of the
+ *   trim: the In, and the last frame of the segment for the Out (`canTrimEdgeOf`).
+ * - Nowhere else.
+ */
+export function resolveTrimEdgeSpan(input: TrimEdgeSpanInput): TrimEdgeSpan {
+  if (input.isDecodeStalled) {
+    return NO_EDGE;
+  }
+  if (input.hasLaneGrid) {
+    return EVERY_EDGE;
+  }
+  const sequence = input.sequence;
+  if (
+    !input.canUsePreciseSeek ||
+    sequence === null ||
+    sequence.attachedClipId === null
+  ) {
+    return NO_EDGE;
+  }
+  const clip = sequence.virtual.clips.find(
+    (entry) => entry.clipId === sequence.attachedClipId,
+  );
+  const probe = clip === undefined ? undefined : sequence.sources[clip.sourceId]?.probe;
+  // The fixed facts that `planClipTrimStart` needs, so the cursor promises no trim it refuses.
+  if (
+    clip === undefined ||
+    probe === undefined ||
+    clip.rangeStart === null ||
+    !probe.videoStartPts ||
+    !isPtsString(probe.videoStartPts) ||
+    resolveTrimGridRate(probe) === null
+  ) {
+    return NO_EDGE;
+  }
+  const start = ptsToBigInt(sequence.virtual.originPts) + clip.startTicks;
+  const startPts = ptsOrNull(start);
+  const endPts =
+    clip.durationTicks === null ? null : ptsOrNull(start + clip.durationTicks);
+  if (startPts === null || (clip.durationTicks !== null && endPts === null)) {
+    return NO_EDGE;
+  }
+  return { kind: "clip", startPts, endPts };
+}
+
+/**
+ * True when a drag on edge `edge` of `segment` can start a trim, by `span`. Inside a clip span, the
+ * In edge counts by the In, and the Out edge by the last frame of the segment, one tick before the
+ * Out, as `edgeClipOf` finds the clip of a trim. So an Out on the junction at the end of the clip
+ * counts, and an Out on the junction at its start does not.
+ */
+export function canTrimEdgeOf(
+  span: TrimEdgeSpan,
+  segment: Pick<Segment, "inPts" | "outPts">,
+  edge: SegmentEdge,
+): boolean {
+  if (span.kind !== "clip") {
+    return span.kind === "all";
+  }
+  const boundary = edge === "in" ? segment.inPts : segment.outPts;
+  if (!isPtsString(boundary)) {
+    return false;
+  }
+  const value = ptsToBigInt(boundary) - (edge === "in" ? 0n : 1n);
+  return (
+    value >= ptsToBigInt(span.startPts) &&
+    (span.endPts === null || value < ptsToBigInt(span.endPts))
+  );
+}
+
+/**
  * True while the trim can still commit: the calibration is ready, the element is ready, and
  * the playback source is the one of the start. A lost calibration or a new source drops the
  * trim with no change (ADR 030).

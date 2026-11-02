@@ -9,6 +9,7 @@ import {
   calculateTrimLimitPts,
   calculateTrimPreviewLayout,
   canCommitTrim,
+  canTrimEdgeOf,
   clampTrimPts,
   collectTrimSnapBoundaries,
   createTrimSnapBoundaryCache,
@@ -18,6 +19,7 @@ import {
   planTrimCancel,
   planTrimRelease,
   resolveTrimAwait,
+  resolveTrimEdgeSpan,
   resolveTrimGridRate,
   resolveTrimStartPlayhead,
   resolveTrimTarget,
@@ -1185,6 +1187,10 @@ describe("a trim on the grid of a clip (ADR 052)", () => {
     segment("y", "720000", b(15)),
     // Its Out is on the junction: frame 240 of a1 to the end of a1.
     segment("z", "864000", String(JUNCTION)),
+    // Its In is on the junction, so the In belongs to b1.
+    segment("j", String(JUNCTION), b(10)),
+    // Its Out lies past the end of b1, in no clip.
+    segment("p", b(290), b(301)),
   ];
 
   function sequenceTrim(
@@ -1390,6 +1396,80 @@ describe("a trim on the grid of a clip (ADR 052)", () => {
     expect(trimScrubPts(trim, target)).toBe(String(JUNCTION - 1));
     const inside: TrimTarget = { pts: pts("880000"), snap: null, writesAtOnce: false };
     expect(trimScrubPts(trim, inside)).toBe("880000");
+  });
+
+  it("shows the resize cursor on every edge of the lane grid, and on none during a stall", () => {
+    const base = { canUsePreciseSeek: true, isDecodeStalled: false, sequence: null };
+    const all = resolveTrimEdgeSpan({ ...base, hasLaneGrid: true });
+    expect(all).toEqual({ kind: "all" });
+    const [x] = sequenceSegments;
+    expect(canTrimEdgeOf(all, x, "in")).toBe(true);
+    const stalled = resolveTrimEdgeSpan({
+      ...base,
+      hasLaneGrid: true,
+      isDecodeStalled: true,
+    });
+    expect(stalled).toEqual({ kind: "none" });
+    expect(canTrimEdgeOf(stalled, x, "out")).toBe(false);
+  });
+
+  it("shows the resize cursor only on the edges of the clip on screen", () => {
+    const span = (attached: string | null, sequence = sequenceOf({}, attached)) =>
+      resolveTrimEdgeSpan({
+        hasLaneGrid: false,
+        canUsePreciseSeek: true,
+        isDecodeStalled: false,
+        sequence,
+      });
+    expect(span("b1")).toEqual({
+      kind: "clip",
+      startPts: String(JUNCTION),
+      endPts: String(JUNCTION + 900_000),
+    });
+    expect(span(null)).toEqual({ kind: "none" });
+    const vfrB: TrimSequence = {
+      ...sequenceOf({}, "b1"),
+      sources: { A: { probe: gridProbe }, B: { probe: vfrProbe } },
+    };
+    expect(span("b1", vfrB)).toEqual({ kind: "none" });
+    expect(
+      resolveTrimEdgeSpan({
+        hasLaneGrid: false,
+        canUsePreciseSeek: false,
+        isDecodeStalled: false,
+        sequence: sequenceOf({}, "b1"),
+      }),
+    ).toEqual({ kind: "none" });
+
+    // The cursor agrees with the trim start on every edge: an Out on the junction counts for
+    // the clip before it.
+    for (const attached of ["a1", "b1"]) {
+      for (const seg of sequenceSegments) {
+        for (const edge of ["in", "out"] as const) {
+          const starts =
+            planSegmentTrimStart(
+              startInput({
+                segmentId: seg.id,
+                edge,
+                segments: sequenceSegments,
+                probe: SEQUENCE_PROBE,
+                totalDurationSeconds: (JUNCTION + 900_000) / 90_000,
+                sequence: sequenceOf({}, attached),
+              }),
+            ) !== null;
+          expect([
+            attached,
+            seg.id,
+            edge,
+            canTrimEdgeOf(span(attached), seg, edge),
+          ]).toEqual([attached, seg.id, edge, starts]);
+        }
+      }
+    }
+    // Segment z ends on the junction: its Out belongs to a1.
+    const [, , z] = sequenceSegments;
+    expect(canTrimEdgeOf(span("a1"), z, "out")).toBe(true);
+    expect(canTrimEdgeOf(span("b1"), z, "out")).toBe(false);
   });
 
   it("stops the In at the last frame of its clip when the Out lies in a later clip", () => {

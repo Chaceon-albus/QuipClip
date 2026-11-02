@@ -51,6 +51,7 @@ import { advanceSegmentMotion, createSegmentMotionState } from "./segmentMotion"
 import { isSelectionTogglePress } from "./segmentSelectionPress";
 import { SegmentTooltip, type SegmentTooltipEntry } from "./SegmentTooltip";
 import { createSegmentTooltipController } from "./segmentTooltipController";
+import { canTrimEdgeOf, type TrimEdgeSpan } from "./segmentTrim";
 import { segmentTrimSession } from "./segmentTrimSession";
 
 const selectSegments = (state: TimelineStoreState) => state.segments;
@@ -117,11 +118,13 @@ export interface SegmentLayerProps {
   /** Opens the context menu of a segment. The value must be stable. */
   onSegmentContextMenu: SegmentContextMenuHandler;
   /**
-   * True while a drag on an edge can trim it: the condition of Mark In and Mark Out, a usable
-   * time axis and an exact frame grid (ADR 030). The edges show the resize cursor only then. On
-   * any other source the edge press is the click of ADR 007.
+   * Where a drag on an edge can trim it (`resolveTrimEdgeSpan`): the condition of Mark In and
+   * Mark Out, a usable time axis and an exact frame grid (ADR 030), on every edge or on the edges
+   * of the clip on screen (ADR 052). An edge shows the resize cursor only there
+   * (`canTrimEdgeOf`). On any other edge the press is the click of ADR 007. The value must be
+   * memoized.
    */
-  canTrimEdges: boolean;
+  trimEdges: TrimEdgeSpan;
   /**
    * The frame grids where one frame is at least `FRAME_BAND_MIN_WIDTH_PX` wide
    * (`resolveFrameBandGrids`): one for the one source, or one for each clip of a sequence that
@@ -198,7 +201,7 @@ export const SegmentLayer = memo(function SegmentLayer({
   viewportRef,
   edgePointerHandlers,
   onSegmentContextMenu,
-  canTrimEdges,
+  trimEdges,
   outFrameGrids,
 }: SegmentLayerProps) {
   const { t } = useTranslation();
@@ -441,10 +444,11 @@ export const SegmentLayer = memo(function SegmentLayer({
    * Shift+I and Shift+O (ADR 026).
    *
    * - The pointer over an edge shows a handle and a bubble with the time of that boundary (see
-   *   SegmentTooltip). While a drag can trim the edge (`canTrimEdges`: a ready calibration, a
-   *   usable time axis and an exact frame grid), it also shows the resize cursor (ADR 030).
-   *   Without that condition the drag does nothing, and the cursor stays the default one, so it
-   *   promises no drag.
+   *   SegmentTooltip). While a drag can trim the edge (`canTrimEdgeOf`: a ready calibration, a
+   *   usable time axis and an exact frame grid), it also shows the resize cursor (ADR 030). On a
+   *   sequence whose clips share no grid, only the edges of the clip on screen can trim, and none
+   *   during a cold switch (ADR 052). Without that condition the drag does nothing, and the cursor
+   *   stays the default one, so it promises no drag.
    * - The handle is a short bar, so it does not read as the playhead: half the height of the
    *   segment, and at most 24px, so a tall timeline does not stretch it. It is centred on the
    *   height of the segment. It lies on the body side
@@ -665,7 +669,7 @@ export const SegmentLayer = memo(function SegmentLayer({
                       onPointerDown={(event) =>
                         edgePointerHandlers.onEdgePointerDown(seg.id, edge, event)
                       }
-                      className={`group/edge absolute inset-y-0 flex items-center ${canTrimEdges ? "cursor-ew-resize touch-none" : ""} ${edge === "in" ? "left-0 justify-end" : "right-0 justify-start"}`}
+                      className={`group/edge absolute inset-y-0 flex items-center ${canTrimEdgeOf(trimEdges, seg, edge) ? "cursor-ew-resize touch-none" : ""} ${edge === "in" ? "left-0 justify-end" : "right-0 justify-start"}`}
                       style={{ width: SEGMENT_EDGE_HIT_WIDTH_PX }}
                     >
                       <span

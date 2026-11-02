@@ -82,6 +82,7 @@ import { SegmentSummary } from "./SegmentSummary";
 import {
   createTrimSnapBoundaryCache,
   isTrimCurrent,
+  resolveTrimEdgeSpan,
   resolveTrimGridRate,
   resolveTrimTarget,
   type TrimSequence,
@@ -145,6 +146,7 @@ const selectSeekToPts = (state: PlaybackStoreState) => state.seekToPts;
 const selectSwitching = (state: SequencePlaybackState) => state.switching;
 
 const selectSequenceSourceId = (state: TimelineStoreState) => state.sourceId;
+const selectAttachedClipId = (state: TimelineStoreState) => state.attachedClipId;
 // The axis of a sequence of several clips, or null. One clip reads its own probe, so the panel
 // does not render again for each edit that builds the axis again.
 const selectSequenceAxis = (state: TimelineStoreState) =>
@@ -257,17 +259,15 @@ export function TimelinePanel({
     canUsePreciseSeek && media !== null ? resolveTrimGridRate(media.probe) : null;
   // A drag on a segment edge trims it only on the exact frame grid (ADR 030), where the frame of
   // the release target can be recognized when it arrives. On any other source the edge press is
-  // the click of ADR 007. The press, the resize cursor of the edges and the trim start all read
-  // this one condition. During a decode stall the edge press is the click too: the first sample
+  // the click of ADR 007. During a decode stall the edge press is the click too: the first sample
   // of a trim would reload the preview, and the trim could then not commit, while the click
   // seeks to the boundary and reloads the preview there.
   //
   // On a sequence of several clips whose probe has no shared grid, a trim uses the grid of the
-  // clip of the edge (ADR 052), so the edges can trim while some clip has an exact grid. A press on
-  // an edge in a clip with no exact grid is then the click (`planSegmentTrimStart`).
-  // Such a trim starts only on an edge of the clip on screen, and not during a cold switch. A press
-  // reads both from the stores (`readTrimSequence`), because a navigation can change them after
-  // the last render.
+  // clip of the edge (ADR 052). It starts only on an edge of the clip on screen while that clip
+  // has an exact grid, and not during a cold switch. A press on any other edge is the click
+  // (`planSegmentTrimStart`). The trim start reads the clip on screen and the cold switch from
+  // the stores (`readTrimSequence`), because a navigation can change them after the last render.
   const readTrimSequence = (): TrimSequence | null =>
     virtual === null
       ? null
@@ -278,13 +278,33 @@ export function TimelinePanel({
             ? null
             : timelineStore.getState().attachedClipId,
         };
-  const hasClipTrimGrid =
-    canUsePreciseSeek &&
-    virtual !== null &&
-    virtual.clips.some(
-      (clip) => resolveTrimGridRate(sources[clip.sourceId]?.probe ?? null) !== null,
-    );
-  const canTrimEdges = (exactGridRate !== null || hasClipTrimGrid) && !isDecodeStalled;
+  // Where a drag on an edge can trim (`resolveTrimEdgeSpan`), from the facts of this render: every
+  // edge on the grid of the lane, else the edges of the clip on screen. The resize cursor of each
+  // edge reads it (`canTrimEdgeOf`), and so does the press gate. The trim start then checks the
+  // press again.
+  const attachedClipId = useTimelineStore(selectAttachedClipId);
+  const trimEdges = useMemo(
+    () =>
+      resolveTrimEdgeSpan({
+        hasLaneGrid: exactGridRate !== null,
+        canUsePreciseSeek,
+        isDecodeStalled,
+        sequence:
+          virtual === null
+            ? null
+            : { virtual, sources, attachedClipId: switching ? null : attachedClipId },
+      }),
+    [
+      exactGridRate,
+      canUsePreciseSeek,
+      isDecodeStalled,
+      virtual,
+      sources,
+      switching,
+      attachedClipId,
+    ],
+  );
+  const canTrimEdges = trimEdges.kind !== "none";
 
   const zoom = useTimelineViewportStore(selectZoom);
   // The zoom factor of the last commit. The layout effect that applies an anchor reads it as
@@ -1623,7 +1643,7 @@ export function TimelinePanel({
                     viewportRef={scrollRef}
                     edgePointerHandlers={segmentEdgeHandlers}
                     onSegmentContextMenu={segmentContextMenuHandler}
-                    canTrimEdges={canTrimEdges}
+                    trimEdges={trimEdges}
                     outFrameGrids={frameBandGrids}
                   />
 
