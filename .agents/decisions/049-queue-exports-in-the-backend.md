@@ -92,6 +92,9 @@ start the next run during the exit. A request after the close fails with `export
 - The Export action, while a run is live, runs wait, or a submission has no answer yet, opens
   the setup step for a new export.
   Its button reads "Add to Queue…". The run footer offers the same action as "New Export…".
+  (Changed on 2026-11-01: the run footer does not offer "New Export…". The tooltip of the
+  Export action does not say that a click adds an export to the queue. It shows the same text
+  as when no export runs or waits.)
 - That setup step keeps its own state. Its checks and a refused submission report there, and
   never into the export store, so a setup never hides or resets the running export.
 - Cancel and Close leave the setup and show the run again, or close the dialog when the export

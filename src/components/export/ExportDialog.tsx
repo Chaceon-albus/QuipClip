@@ -21,7 +21,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   confirmExportFlow,
-  openExportFlow,
   runExportFlow,
 } from "@/components/layout/exportFlowController";
 import {
@@ -69,7 +68,6 @@ import {
   resolveExportCloseLabelKey,
   resolveSetupConfirmLabelKey,
   selectExportDialogTargetState,
-  showsNewExportAction,
   type ExportComposeExitTrigger,
 } from "./exportDialogCompose";
 import { resolveExportDismissal } from "./exportCancelState";
@@ -263,11 +261,6 @@ export function ExportDialog({
   // Counts the clicks on Back. The Back button leaves the document with the failed panel, so
   // the effect below gives the focus to the first control of the setup step once per click.
   const [backClicks, setBackClicks] = useState(0);
-  // True while the open step that "New Export…" runs has not answered. The source check can
-  // take up to 3 seconds, so the button shows that it is busy, and a second click does
-  // nothing. The ref answers the second click of a double click before React renders.
-  const [newExportPending, setNewExportPending] = useState(false);
-  const newExportPendingRef = useRef(false);
   const setupFirstControlRef = useRef<HTMLButtonElement>(null);
   // The default button of the setup step, and Cancel of the confirmation. Each takes the
   // focus when its footer shows (`resolveExportDialogFocusOrder`).
@@ -916,31 +909,6 @@ export function ExportDialog({
     }
   };
 
-  // Sets up the next export of the queue from the run view. The title bar is behind the
-  // modal, so the run footer offers the Export action of the title bar (`openExportFlow`).
-  // While the export store holds a live run, the flow enters the compose state.
-  //
-  // A confirmation of the setup step before can still wait for its answer, because the run
-  // view shows as soon as the export store starts the run. `clearSetupStep` makes that
-  // confirmation stale, so its updates after the await cannot change the new setup step.
-  const handleNewExport = () => {
-    if (newExportPendingRef.current) {
-      return;
-    }
-    clearSetupStep();
-    setStopArmedAt(null);
-    newExportPendingRef.current = true;
-    setNewExportPending(true);
-    void openExportFlow({
-      setModalOpen: onOpenChange,
-      filterName: t("dialog.videoFilter"),
-      audioFilterName: t("dialog.audioFilter"),
-    }).finally(() => {
-      newExportPendingRef.current = false;
-      setNewExportPending(false);
-    });
-  };
-
   // The first click on a long export only arms the button, and the second half of a
   // double-click is ignored. See `decideStopClick`. The rule reads the clock, and the label
   // reads `stopArmedAt`, which the timer and the refresh above clear. A timer that fires late
@@ -1313,28 +1281,6 @@ export function ExportDialog({
                       aria-describedby={stopView.noteKey ? stopNoteId : undefined}
                     >
                       {t(stopView.labelKey)}
-                    </Button>
-                  ),
-                },
-                {
-                  // Sets up an export that joins the queue (ADR 049). It is not the
-                  // default button, so Enter does not reach it by accident. The busy
-                  // button stays enabled, with `aria-busy`, so it keeps the focus.
-                  key: "newExport",
-                  role: "alternative",
-                  node: showsNewExportAction(stopView.noteKey) && (
-                    <Button
-                      variant="outline"
-                      aria-busy={newExportPending || undefined}
-                      onClick={handleNewExport}
-                    >
-                      {newExportPending && (
-                        <Loader2
-                          aria-hidden="true"
-                          className="animate-spin motion-reduce:animate-none"
-                        />
-                      )}
-                      {t("export.action.newExport")}
                     </Button>
                   ),
                 },

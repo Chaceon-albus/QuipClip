@@ -20,12 +20,7 @@ import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipConte
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { ExportDialog } from "@/components/export/ExportDialog";
-import {
-  hasPendingExportWork,
-  useExportPanelStore,
-  useExportQueueStore,
-  useExportStore,
-} from "@/features/export";
+import { useExportPanelStore, useExportStore } from "@/features/export";
 import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 import { useSequenceMediaStore } from "@/features/sequence/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
@@ -121,8 +116,6 @@ export function TitleBar() {
   const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
   const exportStatus = useExportStore((state) => state.status);
   const exportTracking = useExportStore((state) => state.tracking);
-  // Waiting runs and open submissions. The Export action then adds an export to the queue.
-  const pendingExportWork = useExportQueueStore(hasPendingExportWork);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   const quitPromptOpen = useStore(quitGuard.store, (state) => state.prompt !== null);
@@ -161,7 +154,6 @@ export function TitleBar() {
     hasMedia: media !== null,
     exportStatus,
     exportTracking,
-    pendingExportWork,
     segmentCount,
     segmentTotal,
     display: timecodeDisplay,
@@ -365,7 +357,7 @@ export function TitleBar() {
                 aria-describedby={exportDescription ? exportDescriptionId : undefined}
                 aria-keyshortcuts={exportShortcut?.aria}
               >
-                {/* While a run is active, a click shows that run, and the icon says so. */}
+                {/* While a run is active, the icon is a spinner. */}
                 {exportAction.busy ? (
                   <Loader2 className="animate-spin motion-reduce:animate-none" />
                 ) : (

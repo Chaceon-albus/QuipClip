@@ -193,7 +193,8 @@ phase and clear the error. No orphan is possible, so the statement above holds.
    final store only when the run is not live. (Changed on 2026-10-27: while a run is live or
    exports wait, they open a new setup step for an export that waits in the queue, ADR 049.
    The run footer offers the same action as "New Export…". The setup step of an export that
-   joins the queue never resets the export store.)
+   joins the queue never resets the export store. Changed on 2026-11-01: the run footer does
+   not offer "New Export…".)
 3. **The quit guard (ADR 027)** counts a live run as an export that a quit stops. A close or
    a quit therefore asks for confirmation, and a confirmed quit lets ADR 017 cancel the run
    that holds the export slot.

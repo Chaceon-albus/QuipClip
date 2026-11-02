@@ -72,7 +72,6 @@ describe("presentSegmentSummary", () => {
           hasMedia: true,
           exportStatus: "idle",
           exportTracking: false,
-          pendingExportWork: false,
           segmentCount: 2,
           segmentTotal,
           display,

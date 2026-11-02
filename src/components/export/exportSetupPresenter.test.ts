@@ -288,7 +288,6 @@ describe("exportSetupPresenter", () => {
           hasMedia: true,
           exportStatus: "idle",
           exportTracking: false,
-          pendingExportWork: false,
           segmentCount: input.segmentCount,
           segmentTotal: input.segmentTotal,
           display: input.display,

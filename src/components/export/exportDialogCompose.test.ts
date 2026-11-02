@@ -15,7 +15,6 @@ import {
   resolveExportCloseLabelKey,
   resolveSetupConfirmLabelKey,
   selectExportDialogTargetState,
-  showsNewExportAction,
   type ExportDialogTargetState,
 } from "./exportDialogCompose";
 import {
@@ -226,18 +225,10 @@ describe("resolveExportCloseLabelKey", () => {
   });
 });
 
-describe("showsNewExportAction", () => {
-  it("shows New Export only while the run footer shows no note of Stop Export", () => {
-    expect(showsNewExportAction(null)).toBe(true);
-    expect(showsNewExportAction("export.status.stopUnavailable")).toBe(false);
-  });
-});
-
 describe("the compose keys", () => {
   it("name a message in both catalogs", () => {
     for (const key of [
       "export.action.addToQueue",
-      "export.action.newExport",
       "export.setup.queueNote",
       "export.action.chooseDestination",
       "export.action.hide",

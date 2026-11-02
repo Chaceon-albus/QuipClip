@@ -25,14 +25,12 @@ export const en = {
     },
     // The tooltip of the Export button. openVideoFirst and markSegmentFirst are a second,
     // muted line under "Export". {{duration}} is the total duration of the segments, as a
-    // timecode such as "00:01:23:04" or "00:01:23.160". addToQueue shows while an export
-    // runs, because a click then sets up an export that waits in the queue (ADR 049).
+    // timecode such as "00:01:23:04" or "00:01:23.160".
     exportTooltip: {
       openVideoFirst: "Open a video first",
       markSegmentFirst: "Mark at least one segment first",
       exportSegments_one: "Export {{count}} segment ({{duration}})",
       exportSegments_other: "Export {{count}} segments ({{duration}})",
-      addToQueue: "Add an export to the queue",
     },
     source: {
       segmentCount_one: "{{count}} segment",
@@ -1051,8 +1049,6 @@ export const en = {
       // The label of chooseDestination while another export runs or waits. The new export
       // then joins the queue (ADR 049).
       addToQueue: "Add to Queue…",
-      // The button of the run footer that sets up the next export of the queue.
-      newExport: "New Export…",
       exportAnyway: "Export Anyway",
       reimport: "Re-import…",
       runInBackground: "Run in Background",

@@ -1372,9 +1372,6 @@ describe("application shell localization and status bar formatting", () => {
         duration: "00:01:23:04",
       }),
     ).toBe("Export 3 segments (00:01:23:04)");
-    expect(instance.t("titleBar.exportTooltip.addToQueue")).toBe(
-      "Add an export to the queue",
-    );
     expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 segment");
     expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 segments");
     expect(instance.t("window.minimize")).toBe("Minimize");
@@ -1577,7 +1574,6 @@ describe("application shell localization and status bar formatting", () => {
         duration: "00:01:23:04",
       }),
     ).toBe("导出 3 个片段（00:01:23:04）");
-    expect(instance.t("titleBar.exportTooltip.addToQueue")).toBe("将导出加入队列");
     expect(instance.t("titleBar.source.segmentCount", { count: 1 })).toBe("1 个片段");
     expect(instance.t("titleBar.source.segmentCount", { count: 3 })).toBe("3 个片段");
     expect(instance.t("window.minimize")).toBe("最小化");

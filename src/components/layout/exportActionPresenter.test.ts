@@ -25,7 +25,6 @@ function input(overrides: Partial<ExportActionInput> = {}): ExportActionInput {
     hasMedia: true,
     exportStatus: "idle",
     exportTracking: false,
-    pendingExportWork: false,
     segmentCount: 2,
     // 251 frames at 25 fps.
     segmentTotal: 251n,
@@ -76,12 +75,16 @@ describe("presentExportAction", () => {
     }
   });
 
-  it("offers to add an export to the queue while a run is active", () => {
+  it("keeps the segment summary while a run is active, with a spinner", () => {
     for (const exportStatus of ACTIVE_STATUSES) {
       expect(presentExportAction(input({ exportStatus }))).toEqual({
         disabled: false,
         busy: true,
-        label: { key: "titleBar.exportTooltip.addToQueue" },
+        label: {
+          key: "titleBar.exportTooltip.exportSegments",
+          count: 2,
+          duration: "00:00:10:01",
+        },
         reason: null,
       });
     }
@@ -93,28 +96,9 @@ describe("presentExportAction", () => {
       expect(presentExportAction(input({ exportStatus, segmentCount: 0 }))).toEqual({
         disabled: false,
         busy: true,
-        label: { key: "titleBar.exportTooltip.addToQueue" },
+        label: { key: "titleBar.action.export" },
         reason: "titleBar.exportTooltip.markSegmentFirst",
       });
-    }
-  });
-
-  it("offers to add an export to the queue while work is pending, with no spinner", () => {
-    // Runs wait, or a submission has no answer, and the export store holds no live run. The
-    // export flow composes in this state too (`openExportFlow`).
-    for (const exportStatus of IDLE_STATUSES) {
-      for (const segmentCount of [0, 2]) {
-        expect(
-          presentExportAction(
-            input({ exportStatus, segmentCount, pendingExportWork: true }),
-          ),
-        ).toEqual({
-          disabled: false,
-          busy: false,
-          label: { key: "titleBar.exportTooltip.addToQueue" },
-          reason: segmentCount === 0 ? "titleBar.exportTooltip.markSegmentFirst" : null,
-        });
-      }
     }
   });
 
@@ -124,15 +108,19 @@ describe("presentExportAction", () => {
     }
   });
 
-  it("offers to add an export to the queue for a failure that the store still tracks", () => {
-    // A Stop request failed, and the backend still encodes. The run is live, so a click sets
-    // up an export that waits in the queue (`openExportFlow`), and the tooltip says that.
+  it("keeps the segment summary for a failure that the store still tracks", () => {
+    // A Stop request failed, and the backend still encodes. The run is live, so the icon is
+    // a spinner, and the tooltip does not change.
     expect(
       presentExportAction(input({ exportStatus: "failed", exportTracking: true })),
     ).toEqual({
       disabled: false,
       busy: true,
-      label: { key: "titleBar.exportTooltip.addToQueue" },
+      label: {
+        key: "titleBar.exportTooltip.exportSegments",
+        count: 2,
+        duration: "00:00:10:01",
+      },
       reason: null,
     });
   });
@@ -243,7 +231,6 @@ describe("the export action keys", () => {
     "titleBar.action.export",
     "titleBar.exportTooltip.openVideoFirst",
     "titleBar.exportTooltip.markSegmentFirst",
-    "titleBar.exportTooltip.addToQueue",
   ];
 
   it("name a message in both catalogs", () => {

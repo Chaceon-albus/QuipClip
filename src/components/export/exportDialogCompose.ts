@@ -132,13 +132,3 @@ export function resolveExportCloseLabelKey(
 ): ExportCloseLabelKey {
   return exportRunLive ? "export.action.hide" : "common.close";
 }
-
-/**
- * Answers whether the run footer shows "New Export…". The footer shows no note of Stop Export
- * beside it: the note, the three buttons, and the row do not fit together, and the note then
- * breaks word by word. The note shows only while the run publishes (`presentStopButton`), and
- * the run ends soon after that.
- */
-export function showsNewExportAction(stopNoteKey: string | null): boolean {
-  return stopNoteKey === null;
-}
