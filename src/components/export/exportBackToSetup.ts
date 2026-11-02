@@ -52,7 +52,7 @@ export interface OpenStepEffects {
  * Hands out one generation for each open step that Back starts.
  *
  * `begin` returns a check that stays true until the next `begin` or `invalidate`. The dialog
- * calls `invalidate` when it closes.
+ * calls `invalidate` when it closes or hides.
  */
 export interface OpenStepGeneration {
   begin: () => () => boolean;

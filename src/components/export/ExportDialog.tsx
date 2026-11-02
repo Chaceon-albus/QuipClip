@@ -254,8 +254,8 @@ export function ExportDialog({
   // True while the open step that Back runs again has not answered. The setup step shows
   // meanwhile, and Export stays disabled, so no export starts before the checks end.
   const [backCheckPending, setBackCheckPending] = useState(false);
-  // One generation for each open step that the dialog runs again after Back. A close
-  // invalidates it, so a step that answers after the close changes nothing
+  // One generation for each open step that the dialog runs again after Back. A close or a
+  // hide invalidates it, so a step that answers after the close or the hide changes nothing
   // (`exportBackToSetup.ts`).
   const [backStep] = useState(createOpenStepGeneration);
   // Counts the clicks on Back. The Back button leaves the document with the failed panel, so
@@ -603,12 +603,6 @@ export function ExportDialog({
     });
   };
 
-  const hideDialog = () => {
-    holdFrame();
-    setStopArmedAt(null);
-    onOpenChange(false);
-  };
-
   // Clears the transient state of the setup step, and makes a Back step or a confirmation
   // that has not answered stale, so it changes nothing when it answers. The choice of the
   // preset goes too, so the next setup step shows the active preset (ADR 024).
@@ -618,6 +612,18 @@ export function ExportDialog({
     setSourceChangeAccepted(false);
     setChoosingDestination(false);
     setBackCheckPending(false);
+  };
+
+  // Hides the run view while the run continues (ADR 025). The run view shows as soon as the
+  // export store starts the run, so the confirmation of the setup step before can still wait
+  // for its answer here. `clearSetupStep` makes it stale: the next setup step, such as the
+  // setup of an export that joins the queue (ADR 049), starts clean, and the confirmation
+  // cannot change that step when it answers.
+  const hideDialog = () => {
+    holdFrame();
+    clearSetupStep();
+    setStopArmedAt(null);
+    onOpenChange(false);
   };
 
   // Leaves the compose state (ADR 049). The export store keeps its state: a live run
@@ -867,9 +873,9 @@ export function ExportDialog({
   // (ADR 049). When the export joins the queue, or starts because the batch ended meanwhile,
   // the dialog leaves the compose state and shows the run view with the new run.
   //
-  // The step begins a generation of `backStep`. When the user leaves the compose state or
-  // closes the dialog during the await, that generation is stale, and the updates after the
-  // await change nothing: they would act on a newer setup step.
+  // The step begins a generation of `backStep`. When the user leaves the compose state, or
+  // closes or hides the dialog during the await, that generation is stale, and the updates
+  // after the await change nothing: they would act on a newer setup step.
   const handleConfirmExport = async () => {
     if (!effectivePresetId || exportDisabled) {
       return;
@@ -893,8 +899,9 @@ export function ExportDialog({
       if (started && isCurrent()) {
         // Clear the user's manual selection once the export has started so that a subsequent
         // export setup step defaults to the project's active preset (ADR 024) even if this
-        // run completes while the dialog is hidden (ADR 025). The started request already
-        // carries the whole preset.
+        // run completes while the dialog is hidden (ADR 025). A hide before this answer made
+        // the step stale, and `hideDialog` cleared the selection then. The started request
+        // already carries the whole preset.
         setRequestedPresetId(null);
         setSourceChangeAccepted(false);
         if (composes) {
