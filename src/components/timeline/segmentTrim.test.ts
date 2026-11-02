@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PresentedFrame } from "@/features/playback";
+import type { VirtualClip } from "@/features/timeline/virtualTime";
 import type { Pts, Rational, Segment, TickCount } from "@/types/project";
 import type { SnapBoundary } from "./scrubSnap";
 import {
@@ -22,12 +23,14 @@ import {
   resolveTrimTarget,
   trimFrameIndexOf,
   trimNearestFrameIndexOf,
+  trimScrubPts,
   type SegmentTrim,
   type SegmentTrimPlayback,
   type SegmentTrimProbe,
   type SegmentTrimStartInput,
   type TrimAwait,
   type TrimReleasePlan,
+  type TrimSequence,
   type TrimSnapSet,
   type TrimTarget,
 } from "./segmentTrim";
@@ -1113,5 +1116,287 @@ describe("the trim state machine", () => {
     expect(
       resolveTrimAwait(awaiting, { ...after, presentedFrame: frame(2.36, "212401") }),
     ).toEqual({ kind: "write", pts: "212401" });
+  });
+});
+
+describe("a trim on the grid of a clip (ADR 052)", () => {
+  // Two clips on one virtual axis of 1/90000. Clip a1 is 25 fps and 10.0011 s long, so it is
+  // not a whole number of frames, and the sequence has no shared frame grid. Clip b1 is 30 fps
+  // (3000 ticks a frame) and 10 s long, from 900100.
+  const JUNCTION = 900_100;
+  const B_FRAME = 3000;
+  const fps30: Rational = { n: 30, d: 1 };
+  const b = (frameIndex: number) => String(JUNCTION + frameIndex * B_FRAME);
+
+  const SEQUENCE_PROBE: SegmentTrimProbe = {
+    videoStartPts: pts("0"),
+    videoTimeBase: tb90k,
+    avgFrameRate: null,
+    rFrameRate: null,
+  };
+
+  /** The sequence, with clip b1 on screen unless `attachedClipId` says otherwise. */
+  function sequenceOf(
+    clipB: Partial<VirtualClip> = {},
+    attachedClipId: string | null = "b1",
+  ): TrimSequence {
+    return {
+      attachedClipId,
+      virtual: {
+        timeBase: tb90k,
+        originPts: pts("0"),
+        clips: [
+          {
+            clipId: "a1",
+            sourceId: "A",
+            index: 0,
+            startTicks: 0n,
+            durationTicks: BigInt(JUNCTION),
+            scale: 1n,
+            rangeStart: 0n,
+            exactDuration: true,
+          },
+          {
+            clipId: "b1",
+            sourceId: "B",
+            index: 1,
+            startTicks: BigInt(JUNCTION),
+            durationTicks: 900_000n,
+            scale: 1n,
+            rangeStart: 0n,
+            exactDuration: true,
+            ...clipB,
+          },
+        ],
+        totalTicks: BigInt(JUNCTION) + 900_000n,
+        exact: true,
+      },
+      sources: {
+        A: { probe: gridProbe },
+        B: { probe: { ...gridProbe, avgFrameRate: fps30, rFrameRate: fps30 } },
+      },
+    };
+  }
+
+  const sequenceSegments: readonly Segment[] = [
+    // Inside b1: frames 30 to 59 of b1.
+    segment("x", b(30), b(60)),
+    // Across the junction: frame 200 of a1 to frame 15 of b1.
+    segment("y", "720000", b(15)),
+    // Its Out is on the junction: frame 240 of a1 to the end of a1.
+    segment("z", "864000", String(JUNCTION)),
+  ];
+
+  function sequenceTrim(
+    segmentId: string,
+    edge: "in" | "out",
+    overrides: Partial<SegmentTrimStartInput> = {},
+  ): SegmentTrim {
+    return startTrim({
+      segmentId,
+      edge,
+      segments: sequenceSegments,
+      probe: SEQUENCE_PROBE,
+      totalDurationSeconds: (JUNCTION + 900_000) / 90_000,
+      sequence: sequenceOf(),
+      ...overrides,
+    });
+  }
+
+  it("uses the grid of the clip of the edge, and keeps the edge inside that clip", () => {
+    const trim = sequenceTrim("x", "out");
+    expect(trim.clip?.clipId).toBe("b1");
+    expect(trim.gridRate).toEqual(fps30);
+    // One frame of b1 after the In, the start of b1, and the start of its last frame, 299.
+    expect(trim.limitPts).toBe(b(31));
+    expect(trim.minPts).toBe(String(JUNCTION));
+    expect(trim.lastFrameIndex).toBe(299n);
+    expect(trim.maxPts).toBe(b(299));
+    expect(trimFrameIndexOf(trim, pts(b(60)))).toBe(60n);
+    expect(trimNearestFrameIndexOf(trim, pts(b(60)))).toBe(60n);
+  });
+
+  it("stops the In edge at the start of its clip", () => {
+    const trim = sequenceTrim("x", "in");
+    expect(trim.clip?.clipId).toBe("b1");
+    expect(isWithinTrimLimit(trim, pts(String(JUNCTION - 1)))).toBe(false);
+    expect(clampTrimPts(trim, pts("800000"))).toBe(String(JUNCTION));
+    // The In stops one frame of b1 before the Out.
+    expect(clampTrimPts(trim, pts(b(80)))).toBe(b(59));
+  });
+
+  it("takes the clip of the last frame for an Out, so an Out on a junction stays in its clip", () => {
+    const onA = { sequence: sequenceOf({}, "a1") };
+    expect(sequenceTrim("y", "out").clip?.clipId).toBe("b1");
+    expect(sequenceTrim("z", "out", onA).clip?.clipId).toBe("a1");
+    expect(sequenceTrim("y", "in", onA).clip?.clipId).toBe("a1");
+  });
+
+  it("lets the Out of a segment across the junction go back to the start of its clip", () => {
+    const trim = sequenceTrim("y", "out");
+    // The limit lies one frame of b1 after the In, in a1, so the start of b1 bounds the Out.
+    expect(clampTrimPts(trim, pts("850000"))).toBe(String(JUNCTION));
+    // The In lies before frame 0 of b1, so it sets no frame bound there: frame 0 of b1 is the
+    // release frame, the Out on the junction.
+    const target: TrimTarget = {
+      pts: pts(String(JUNCTION)),
+      snap: null,
+      writesAtOnce: false,
+    };
+    expect(planTrimRelease(trim, target, playback())).toEqual({
+      kind: "wait",
+      frameIndex: 0n,
+    });
+  });
+
+  it("names the release frame on the grid of the clip", () => {
+    const trim = sequenceTrim("x", "out");
+    const target: TrimTarget = { pts: pts(b(70)), snap: null, writesAtOnce: false };
+    expect(planTrimRelease(trim, target, playback())).toEqual({
+      kind: "wait",
+      frameIndex: 70n,
+    });
+  });
+
+  it("rounds the limit in the ticks of the source of the clip", () => {
+    // Clip b1 has a millisecond time base at 29.97 fps, so one of its ticks is 90 ticks of the
+    // axis. One frame is 33.37 ms: 33 ms down for the In, and 34 ms up for the Out.
+    const fine: TrimSequence = {
+      ...sequenceOf({ scale: 90n }),
+      sources: {
+        A: { probe: gridProbe },
+        B: {
+          probe: {
+            videoStartPts: pts("0"),
+            videoTimeBase: { n: 1, d: 1000 },
+            avgFrameRate: { n: 30000, d: 1001 },
+            rFrameRate: { n: 30000, d: 1001 },
+          },
+        },
+      },
+    };
+    const w = segment("w", String(JUNCTION + 1000 * 90), String(JUNCTION + 2000 * 90));
+    const input = { segments: [w], sequence: fine };
+    expect(sequenceTrim("w", "out", input).limitPts).toBe(String(JUNCTION + 1034 * 90));
+    expect(sequenceTrim("w", "in", input).limitPts).toBe(String(JUNCTION + 1967 * 90));
+  });
+
+  it("returns to a playhead in another clip by its PTS", () => {
+    // The playhead was on frame 10 of a1 at the start.
+    const trim = sequenceTrim("x", "out", {
+      playback: playback({ presentedFrame: frame(0.4, "36000") }),
+    });
+    expect(
+      planTrimCancel(trim, playback({ presentedFrame: frame(10.5, b(12)) })),
+    ).toEqual({ kind: "pts", pts: "36000" });
+  });
+
+  it("keeps the trim of a sequence with one shared grid on that grid", () => {
+    const trim = sequenceTrim("x", "out", { probe: gridProbe });
+    expect(trim.clip).toBeUndefined();
+    expect(trim.minPts).toBeUndefined();
+  });
+
+  it("starts no trim in a clip with no exact grid, or with no sequence", () => {
+    const vfrB: TrimSequence = {
+      ...sequenceOf(),
+      sources: { A: { probe: gridProbe }, B: { probe: vfrProbe } },
+    };
+    expect(
+      planSegmentTrimStart(
+        startInput({
+          segmentId: "x",
+          edge: "out",
+          segments: sequenceSegments,
+          probe: SEQUENCE_PROBE,
+          sequence: vfrB,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      planSegmentTrimStart(
+        startInput({
+          segmentId: "x",
+          edge: "out",
+          segments: sequenceSegments,
+          probe: SEQUENCE_PROBE,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("starts no trim on an edge of a clip that is not on screen, or during a cold switch", () => {
+    for (const attached of ["a1", null]) {
+      expect(
+        planSegmentTrimStart(
+          startInput({
+            segmentId: "x",
+            edge: "out",
+            segments: sequenceSegments,
+            probe: SEQUENCE_PROBE,
+            sequence: sequenceOf({}, attached),
+          }),
+        ),
+      ).toBeNull();
+    }
+  });
+
+  it("never takes a frame of the next clip for the last frame of the grid", () => {
+    // Frame 250, the last frame of a1, starts at 900000 and is 100 ticks long. The first frame of
+    // b1 starts at 900100 and rounds to frame 250 of a1 too, but it is no frame of a1.
+    const trim = sequenceTrim("z", "out", { sequence: sequenceOf({}, "a1") });
+    expect(trim.lastFrameIndex).toBe(250n);
+    const target: TrimTarget = { pts: pts("900000"), snap: null, writesAtOnce: false };
+    const onB = playback({ presentedFrame: frame(10.0012, String(JUNCTION)) });
+    expect(planTrimRelease(trim, target, onB)).toEqual({
+      kind: "wait",
+      frameIndex: 250n,
+    });
+    const awaiting: TrimAwait = { trim, frameIndex: 250n, awaitedTargetSeconds: null };
+    expect(resolveTrimAwait(awaiting, onB)).toEqual({ kind: "wait" });
+    expect(
+      resolveTrimAwait(awaiting, playback({ presentedFrame: frame(10, "900000") })),
+    ).toEqual({ kind: "write", pts: "900000" });
+  });
+
+  it("writes the junction at the end of the clip at once, and keeps a stored Out there", () => {
+    const trim = sequenceTrim("z", "out", { sequence: sequenceOf({}, "a1") });
+    // The stored Out is the junction, so the cap is the junction, and a drag does not pull it
+    // back to the last frame.
+    expect(trim.maxPts).toBe(String(JUNCTION));
+    const snaps: TrimSnapSet = { boundaries: [], exactPts: new Set() };
+    const target = resolveTrimTarget(
+      trim,
+      { kind: "pts", pts: pts("950000") },
+      null,
+      snaps,
+    );
+    expect(target).toEqual({ pts: String(JUNCTION), snap: null, writesAtOnce: true });
+    if (target === null) {
+      throw new Error("no target");
+    }
+    // No frame of a1 names the junction. The release writes it, and its exact seek goes to the
+    // last tick of a1, because a seek to the junction would attach b1.
+    expect(planTrimRelease(trim, target, playback())).toEqual({
+      kind: "write",
+      pts: String(JUNCTION),
+      seek: { kind: "pts", pts: String(JUNCTION - 1) },
+    });
+    // With the last frame of a1 on screen and no seek pending, no seek is needed.
+    expect(
+      planTrimRelease(trim, target, playback({ presentedFrame: frame(10, "900000") })),
+    ).toEqual({ kind: "write", pts: String(JUNCTION), seek: null });
+    // The scrub to the junction seeks to the last tick of a1 instead.
+    expect(trimScrubPts(trim, target)).toBe(String(JUNCTION - 1));
+    const inside: TrimTarget = { pts: pts("880000"), snap: null, writesAtOnce: false };
+    expect(trimScrubPts(trim, inside)).toBe("880000");
+  });
+
+  it("stops the In at the last frame of its clip when the Out lies in a later clip", () => {
+    const trim = sequenceTrim("y", "in", { sequence: sequenceOf({}, "a1") });
+    // The limit lies in b1, one frame before the Out. The In stops on frame 250 of a1.
+    expect(trim.limitPts).toBe(String(JUNCTION + 15 * B_FRAME - FRAME));
+    expect(trim.maxPts).toBe("900000");
+    expect(clampTrimPts(trim, pts("940000"))).toBe("900000");
   });
 });

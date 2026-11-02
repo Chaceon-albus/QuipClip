@@ -13,7 +13,12 @@ import {
 import type { TimelineStore } from "@/features/timeline";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { SnapBoundary } from "./scrubSnap";
-import { clampTrimPts, TRIM_FRAME_WAIT_MS, type SegmentTrimProbe } from "./segmentTrim";
+import {
+  clampTrimPts,
+  TRIM_FRAME_WAIT_MS,
+  type SegmentTrimProbe,
+  type TrimSequence,
+} from "./segmentTrim";
 import {
   createSegmentTrimSession,
   type SegmentTrimClock,
@@ -791,5 +796,161 @@ describe("segmentTrimSession: Escape and a cancelled drag", () => {
     h.present(3.04);
     expect(listener).toHaveBeenCalledTimes(3);
     unsubscribe();
+  });
+});
+
+describe("segmentTrimSession: a trim on the grid of a clip (ADR 052)", () => {
+  /**
+   * The harness source is clip a1 of a sequence with no shared grid: the probe of the lane has no
+   * rate. Clip b1 follows it. The frame seeks of the trim go to `seekToClipFrame`, which runs them
+   * on the playback store as the sequence playback does for an attached clip.
+   */
+  function createClipHarness(segmentA?: readonly [string, string]) {
+    const h = createHarness({ segmentA });
+    const clipSeeks: [string, number][] = [];
+    const session = createSegmentTrimSession({
+      playback: h.playback,
+      timeline: h.timeline,
+      clock: h.timers.clock,
+      seekToClipFrame: (clipId, frameIndex) => {
+        clipSeeks.push([clipId, frameIndex]);
+        h.playback.getState().seekToFrameIndex(frameIndex);
+      },
+    });
+    const probeOf = (source: PlaybackSource): SegmentTrimProbe => ({
+      videoStartPts: source.videoStartPts,
+      videoTimeBase: source.videoTimeBase,
+      avgFrameRate: source.avgFrameRate,
+      rFrameRate: source.rFrameRate,
+    });
+    const sequence: TrimSequence = {
+      virtual: {
+        timeBase: tb90k,
+        originPts: pts("0"),
+        clips: [
+          {
+            clipId: "a1",
+            sourceId: "A",
+            index: 0,
+            startTicks: 0n,
+            durationTicks: 900_000n,
+            scale: 1n,
+            rangeStart: 0n,
+            exactDuration: true,
+          },
+          {
+            clipId: "b1",
+            sourceId: "B",
+            index: 1,
+            startTicks: 900_000n,
+            durationTicks: 900_000n,
+            scale: 1n,
+            rangeStart: 0n,
+            exactDuration: true,
+          },
+        ],
+        totalTicks: 1_800_000n,
+        exact: true,
+      },
+      sources: { A: { probe: probeOf(gridSource) }, B: { probe: probeOf(vfrSource) } },
+      attachedClipId: "a1",
+    };
+    const laneProbe: SegmentTrimProbe = {
+      videoStartPts: pts("0"),
+      videoTimeBase: tb90k,
+      avgFrameRate: null,
+      rFrameRate: null,
+    };
+    return { ...h, session, clipSeeks, sequence, laneProbe };
+  }
+
+  it("seeks to the release frame of the clip and writes the frame that arrives", () => {
+    const h = createClipHarness();
+    expect(
+      h.session.begin({
+        segmentId: "a",
+        edge: "out",
+        hasActiveSource: true,
+        totalDurationSeconds: 20,
+        probe: h.laneProbe,
+        sequence: h.sequence,
+      }),
+    ).toBe(true);
+    h.session.release({ pts: pts("270000"), snap: null, writesAtOnce: false });
+    // Frame 75 of a1, at 3 s.
+    expect(h.clipSeeks).toEqual([["a1", 75]]);
+    h.present(3);
+    expect(h.segmentA()).toEqual({ inPts: "90000", outPts: "270000" });
+  });
+
+  it("starts no trim without the sequence, as the probe of the lane has no grid", () => {
+    const h = createClipHarness();
+    expect(
+      h.session.begin({
+        segmentId: "a",
+        edge: "out",
+        hasActiveSource: true,
+        totalDurationSeconds: 20,
+        probe: h.laneProbe,
+      }),
+    ).toBe(false);
+  });
+
+  it("never seeks onto the junction at the end of the clip during the drag", () => {
+    // Segment a ends on the junction of a1 and b1, at 10 s. A seek there would attach b1.
+    const h = createClipHarness(["90000", "900000"]);
+    expect(
+      h.session.begin({
+        segmentId: "a",
+        edge: "out",
+        hasActiveSource: true,
+        totalDurationSeconds: 20,
+        probe: h.laneProbe,
+        sequence: h.sequence,
+      }),
+    ).toBe(true);
+    const junction = { pts: pts("900000"), snap: null, writesAtOnce: true };
+    h.session.scrub(junction);
+    // The scrub goes to the last tick of a1.
+    expect(h.playback.getState().seekTargetSeconds).toBeCloseTo(899_999 / 90_000, 9);
+    h.session.release(junction);
+    // The release keeps the Out on the junction, with no notice. Its exact seek goes to the last
+    // tick of a1 and not to b1, and the last frame of a1 then clears the display target.
+    expect(h.clipSeeks).toEqual([]);
+    expect(h.segmentA()).toEqual({ inPts: "90000", outPts: "900000" });
+    expect(h.session.getNoticeCount()).toBe(0);
+    expect(h.session.getView()).toBeNull();
+    expect(lastSeek(h)).toBeCloseTo(899_999 / 90_000, 9);
+    h.present(9.96);
+    expect(h.playback.getState().seekTargetSeconds).toBeNull();
+  });
+
+  it("returns a cancelled drag at the junction to the last tick of the clip", () => {
+    const h = createClipHarness(["90000", "900000"]);
+    h.session.begin({
+      segmentId: "a",
+      edge: "out",
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+      sequence: h.sequence,
+    });
+    h.session.abandon({ pts: pts("900000"), snap: null, writesAtOnce: true });
+    expect(lastSeek(h)).toBeCloseTo(899_999 / 90_000, 9);
+  });
+
+  it("starts no trim on the grid of a clip without a seek to the frames of a clip", () => {
+    const h = createClipHarness();
+    // The session of the harness has no `seekToClipFrame`.
+    const input = {
+      segmentId: "a",
+      edge: "out" as const,
+      hasActiveSource: true,
+      totalDurationSeconds: 20,
+      probe: h.laneProbe,
+      sequence: h.sequence,
+    };
+    expect(createHarness().session.canBegin(input)).toBe(false);
+    expect(h.session.canBegin(input)).toBe(true);
   });
 });

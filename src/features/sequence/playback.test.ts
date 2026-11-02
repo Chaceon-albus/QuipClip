@@ -298,6 +298,27 @@ describe("sequence playback", () => {
     expect(h.timeline.getState().attachedClipId).toBe("a1");
   });
 
+  it("seeks to a frame of the grid of a clip after the attach of that clip", () => {
+    const h = harness([a1, b1]);
+    attach(h.playback, A);
+    h.sequence.seekToClipFrame("b1", 25);
+    expect(h.timeline.getState().attachedClipId).toBe("b1");
+    attach(h.playback, B);
+    // Frame 25 of b1 starts 1 s into b1: the display target names its nominal start.
+    expect(h.playback.getState().seekTargetSeconds).toBe(1);
+    expect(h.sequence.store.getState().seekTargetSeconds).toBe(11);
+  });
+
+  it("does nothing for a frame seek on another clip or at an index that is not a frame", () => {
+    const h = harness([a1, b1]);
+    attach(h.playback, A);
+    h.sequence.seekToClipFrame("missing", 5);
+    h.sequence.seekToClipFrame("b1", -1);
+    h.sequence.seekToClipFrame("b1", 1.5);
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+    expect(h.playback.getState().seekTargetSeconds).toBeNull();
+  });
+
   it("reports a step that cannot run", () => {
     const h = harness([a1, b1]);
     expect(h.sequence.store.getState().seekNominal(1)).toBe("none");

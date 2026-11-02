@@ -20,6 +20,10 @@
  *
  * A pixel position only chooses a seek target, and the browser chooses the frame.
  *
+ * On a sequence of several clips with no shared frame grid (ADR 052), the trim uses the grid of
+ * the clip that holds the moving edge (`TrimClipGrid`), and the edge stays inside that clip. A
+ * sequence whose clips share one grid trims on that grid, across the junctions.
+ *
  * The functions take plain facts and return decisions, so the tests need no store and no
  * document. `segmentTrimSession.ts` runs them against the stores, and the timeline panel feeds
  * the samples of its pointer gesture to that session.
@@ -33,6 +37,11 @@ import {
   type PlaybackState,
 } from "@/features/playback";
 import { findCurrentSegment } from "@/features/timeline";
+import {
+  clipAtVirtualPts,
+  type VirtualClip,
+  type VirtualTimeline,
+} from "@/features/timeline/virtualTime";
 import {
   assertPositiveTimeBase,
   elapsedSecondsToPts,
@@ -85,6 +94,39 @@ export type SegmentTrimPlayback = Pick<
   | "isPlaying"
 >;
 
+/**
+ * The frame grid of the clip that holds the moving edge, on a sequence of several clips with no
+ * shared frame grid (ADR 052). Every PTS here is on the axis of the lane, the virtual axis.
+ */
+export interface TrimClipGrid {
+  readonly clipId: string;
+  /** The PTS of frame 0 of the grid: the first frame of the source of the clip. */
+  readonly originPts: Pts;
+  /** The video time base of the source of the clip. It sets the frame boundary margin. */
+  readonly videoTimeBase: Rational;
+  /** The ticks of the lane for one tick of `videoTimeBase`. */
+  readonly scale: bigint;
+  /** The PTS where the clip starts. */
+  readonly startPts: Pts;
+  /** The PTS where the clip ends, or null when the extent of the clip is not known. */
+  readonly endPts: Pts | null;
+}
+
+/**
+ * The sequence facts that a trim on the grid of a clip reads: the virtual axis, and the probe of
+ * each source by source ID.
+ */
+export interface TrimSequence {
+  readonly virtual: VirtualTimeline;
+  readonly sources: Readonly<Record<string, { readonly probe: SegmentTrimProbe }>>;
+  /**
+   * The clip that the preview shows, or null during a cold switch. A trim on the grid of a clip
+   * starts only on an edge of this clip: the drag stays inside the clip, so it never attaches
+   * another one, and the calibration holds to the release.
+   */
+  readonly attachedClipId: string | null;
+}
+
 /** One trim of one segment edge, as it was recorded at its start. */
 export interface SegmentTrim {
   readonly segmentId: string;
@@ -96,10 +138,26 @@ export interface SegmentTrim {
    * source changed, and the trim is dropped.
    */
   readonly sourceRevisionKey: string;
+  /** The start PTS of the lane. The snap targets and the playhead count from it. */
   readonly videoStartPts: Pts;
+  /** The time base of the lane. */
   readonly videoTimeBase: Rational;
-  /** The nominal frame rate of the exact frame grid (`resolveTrimGridRate`). */
+  /**
+   * The nominal frame rate of the exact frame grid (`resolveTrimGridRate`): of the one source,
+   * or of the clip of `clip`.
+   */
   readonly gridRate: Rational;
+  /**
+   * The grid of the clip that holds the moving edge, on a sequence of several clips with no
+   * shared frame grid. Absent for the one source, and for a sequence with one shared grid: the
+   * frames then count from `videoStartPts`.
+   */
+  readonly clip?: TrimClipGrid;
+  /**
+   * The earliest seek target, on the grid of a clip: the start of the clip. Absent for the one
+   * source and for a shared grid.
+   */
+  readonly minPts?: Pts;
   /** The stored boundary that the trim moves, at the start. */
   readonly originalPts: Pts;
   /** The stored boundary of the other edge, at the start. The preview holds it still. */
@@ -112,15 +170,16 @@ export interface SegmentTrim {
   /**
    * The last nominal frame of the source extent (`calculateTrimLastFrameIndex`). For the Out
    * edge it is at least the frame of the stored Out, a frame that the browser showed, because an
-   * extent can end before the end of the last frame. Only the Out edge stops at it. Null when the
-   * extent is not known.
+   * extent can end before the end of the last frame. The Out edge stops at it, and on the grid of
+   * a clip (`clip`) the In edge too. Null when the extent is not known.
    */
   readonly lastFrameIndex: bigint | null;
   /**
    * For the Out edge, the latest seek target: the nominal start of `lastFrameIndex`.
    * An Out edge dragged to the end of the source stops on the last frame, and the result is the
-   * Out that Mark Out on the last frame gives (ADR 007). Null for the In edge, and when the
-   * extent is not known.
+   * Out that Mark Out on the last frame gives (ADR 007). Null when the extent is not known. Null
+   * for the In edge too, except on the grid of a clip, where the In stops on the last frame of
+   * the clip.
    */
   readonly maxPts: Pts | null;
   /**
@@ -152,6 +211,11 @@ export interface SegmentTrimStartInput {
   readonly probe: SegmentTrimProbe | null;
   /** The source extent of the ruler (ADR 007), or null when it is not known. */
   readonly totalDurationSeconds: number | null;
+  /**
+   * The sequence, while it has several clips. When its probe has no exact frame grid, the trim
+   * uses the grid of the clip of the moving edge (`TrimClipGrid`). Absent or null otherwise.
+   */
+  readonly sequence?: TrimSequence | null;
 }
 
 /**
@@ -198,20 +262,31 @@ function nominalFrameTicks(
  *
  * Returns null when the segment is not a valid pair, when the time base is not positive, or
  * when the limit leaves the signed 64-bit range.
+ *
+ * @param timeBase The video time base of the source of the grid. The interval rounds to its
+ *   ticks, the ticks of the real frame starts.
+ * @param scale The ticks of the segment PTS for one tick of `timeBase`: 1 for the one source, and
+ *   the scale of the clip on the virtual axis of a sequence (`TrimClipGrid.scale`).
  */
 export function calculateTrimLimitPts(
   edge: SegmentEdge,
   segment: Pick<Segment, "inPts" | "outPts">,
   frameRate: Rational | null,
   timeBase: Rational,
+  scale = 1n,
 ): Pts | null {
   if (!isValidSegmentRange(segment.inPts, segment.outPts)) {
     return null;
   }
-  const step = nominalFrameTicks(frameRate, timeBase, edge === "in" ? "floor" : "ceil");
-  if (step === null) {
+  const ticks = nominalFrameTicks(
+    frameRate,
+    timeBase,
+    edge === "in" ? "floor" : "ceil",
+  );
+  if (ticks === null || scale < 1n) {
     return null;
   }
+  const step = ticks * scale;
   const limit =
     edge === "in"
       ? ptsToBigInt(segment.outPts) - step
@@ -371,11 +446,13 @@ export function trimFrameIndexOf(trim: SegmentTrim, pts: Pts): bigint | null {
   if (!isPtsString(pts)) {
     return null;
   }
+  // On the grid of a clip, frame 0 is the first frame of its source, and the margin is the one
+  // of its own time base, as the timecode of that source names its frames.
   return frameIndexOfTicks(
-    ptsToBigInt(pts) - ptsToBigInt(trim.videoStartPts),
+    ptsToBigInt(pts) - ptsToBigInt(trim.clip?.originPts ?? trim.videoStartPts),
     trim.videoTimeBase,
     trim.gridRate,
-    trim.videoTimeBase,
+    trim.clip?.videoTimeBase ?? trim.videoTimeBase,
   );
 }
 
@@ -387,7 +464,7 @@ export function trimFrameIndexOf(trim: SegmentTrim, pts: Pts): bigint | null {
  */
 export function trimNearestFrameIndexOf(trim: SegmentTrim, pts: Pts): bigint | null {
   return nearestFrameIndexOf(
-    trim.videoStartPts,
+    trim.clip?.originPts ?? trim.videoStartPts,
     trim.videoTimeBase,
     trim.gridRate,
     pts,
@@ -468,7 +545,6 @@ export function planSegmentTrimStart(input: SegmentTrimStartInput): SegmentTrim 
     playback.attachedSourceRevisionKey === null ||
     input.sourceId === null ||
     probe === null ||
-    gridRate === null ||
     !probe.videoStartPts ||
     !isPtsString(probe.videoStartPts) ||
     !probe.videoTimeBase ||
@@ -483,6 +559,23 @@ export function planSegmentTrimStart(input: SegmentTrimStartInput): SegmentTrim 
   const { segment } = current;
   const startPts = probe.videoStartPts;
   const timeBase = probe.videoTimeBase;
+  if (gridRate === null) {
+    // The probe of a sequence has a rate only while its clips share one frame grid. Without
+    // one, the trim uses the grid of the clip of the edge (ADR 052).
+    const sequence = input.sequence;
+    return sequence == null || sequence.virtual.clips.length < 2
+      ? null
+      : planClipTrimStart({
+          segment,
+          edge,
+          sourceId: input.sourceId,
+          sourceRevisionKey: playback.attachedSourceRevisionKey,
+          laneStartPts: startPts,
+          laneTimeBase: timeBase,
+          playback,
+          sequence,
+        });
+  }
   const limitPts = calculateTrimLimitPts(edge, segment, gridRate, timeBase);
   if (limitPts === null) {
     return null;
@@ -530,6 +623,194 @@ export function planSegmentTrimStart(input: SegmentTrimStartInput): SegmentTrim 
   };
 }
 
+/** The inputs of `planClipTrimStart`. */
+interface ClipTrimStartInput {
+  readonly segment: Segment;
+  readonly edge: SegmentEdge;
+  readonly sourceId: string;
+  readonly sourceRevisionKey: string;
+  /** The start PTS of the lane: the origin of the virtual axis. */
+  readonly laneStartPts: Pts;
+  /** The time base of the lane: the virtual time base. */
+  readonly laneTimeBase: Rational;
+  readonly playback: SegmentTrimPlayback;
+  readonly sequence: TrimSequence;
+}
+
+/** `ptsFromBigInt`, or null for a value outside the signed 64-bit range. */
+function ptsOrNull(value: bigint): Pts | null {
+  try {
+    return ptsFromBigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The clip that holds the moving edge: the clip of the In, and for the Out the clip of the last
+ * frame of the segment, one tick before the Out. A junction belongs to the later clip
+ * (`clipAtVirtualPts`), so an Out on a junction belongs to the clip before it. Null when that
+ * position lies outside every clip.
+ */
+function edgeClipOf(
+  virtual: VirtualTimeline,
+  segment: Pick<Segment, "inPts" | "outPts">,
+  edge: SegmentEdge,
+): VirtualClip | null {
+  const value =
+    edge === "in" ? ptsToBigInt(segment.inPts) : ptsToBigInt(segment.outPts) - 1n;
+  const pts = ptsOrNull(value);
+  const clip = pts === null ? null : clipAtVirtualPts(virtual, pts);
+  if (clip === null) {
+    return null;
+  }
+  const start = ptsToBigInt(virtual.originPts) + clip.startTicks;
+  const inside =
+    value >= start &&
+    (clip.durationTicks === null || value < start + clip.durationTicks);
+  return inside ? clip : null;
+}
+
+/**
+ * Plans a trim on the grid of the clip that holds the moving edge (ADR 052, ADR 030). The rules
+ * of `planSegmentTrimStart` apply on that grid, and the edge stays inside the clip:
+ *
+ * - The In edge goes from the start of the clip to the limit, and no later than the start of the
+ *   last frame of the clip.
+ * - The Out edge goes from the limit, and no earlier than the start of the clip, to the start of
+ *   the last frame of the clip. As for one source, a stored Out after that frame raises the cap
+ *   to its own frame, and the cap stays before the end of the clip.
+ * - A stored Out on the junction at the end of the clip is the one form of ADR 052 for a segment
+ *   that ends with the clip. It is no frame of the clip, because the next clip starts there. The
+ *   cap of the Out edge is then that junction, which a release writes at once
+ *   (`resolveTrimTarget`). So a drag never moves that Out back by itself (ADR 030).
+ *
+ * The trim starts only on an edge of the clip that the preview shows (`TrimSequence`), and only a
+ * frame inside the clip counts as a frame of its grid (`isClipFramePts`).
+ *
+ * The limit is one nominal frame of the clip from the other edge, rounded in the ticks of the
+ * source of the clip (`calculateTrimLimitPts`). Returns null when the clip has no exact frame grid,
+ * when the edge has no room, or when a value leaves the range of a PTS.
+ */
+function planClipTrimStart(input: ClipTrimStartInput): SegmentTrim | null {
+  const { segment, edge, sequence, laneTimeBase } = input;
+  const clip = edgeClipOf(sequence.virtual, segment, edge);
+  const probe = clip === null ? undefined : sequence.sources[clip.sourceId]?.probe;
+  const gridRate = probe === undefined ? null : resolveTrimGridRate(probe);
+  if (
+    clip === null ||
+    clip.clipId !== sequence.attachedClipId ||
+    probe === undefined ||
+    gridRate === null ||
+    clip.rangeStart === null ||
+    !probe.videoStartPts ||
+    !isPtsString(probe.videoStartPts) ||
+    !probe.videoTimeBase
+  ) {
+    return null;
+  }
+  const clipTimeBase = probe.videoTimeBase;
+  const start = ptsToBigInt(sequence.virtual.originPts) + clip.startTicks;
+  const origin =
+    start + (ptsToBigInt(probe.videoStartPts) - clip.rangeStart) * clip.scale;
+  const end = clip.durationTicks === null ? null : start + clip.durationTicks;
+  const originPts = ptsOrNull(origin);
+  const startPts = ptsOrNull(start);
+  const endPts = end === null ? null : ptsOrNull(end);
+  const limitPts = calculateTrimLimitPts(
+    edge,
+    segment,
+    gridRate,
+    clipTimeBase,
+    clip.scale,
+  );
+  if (
+    originPts === null ||
+    startPts === null ||
+    (end !== null && endPts === null) ||
+    limitPts === null
+  ) {
+    return null;
+  }
+
+  // The last frame of the clip on its grid. The extent counts from frame 0 of the grid, in ticks
+  // of the source, so the rules of `calculateTrimLastFrameIndex` apply as for one source: an
+  // exact extent takes the rule of a reported extent, and an estimate the rule of an approximate
+  // one.
+  let extentLastFrameIndex: bigint | null = null;
+  if (end !== null && end > origin) {
+    const extentTicks = (end - origin) / clip.scale;
+    extentLastFrameIndex = clip.exactDuration
+      ? lastFrameIndexOfExtent(extentTicks, clipTimeBase, gridRate)
+      : lastFrameIndexOfApproximateExtent(extentTicks, clipTimeBase, gridRate);
+  }
+  const onJunction =
+    edge === "out" && end !== null && ptsToBigInt(segment.outPts) === end;
+  const storedOutFrameIndex =
+    edge === "out" && !onJunction
+      ? nearestFrameIndexOf(originPts, laneTimeBase, gridRate, segment.outPts)
+      : null;
+  const lastFrameIndex =
+    extentLastFrameIndex !== null &&
+    storedOutFrameIndex !== null &&
+    storedOutFrameIndex > extentLastFrameIndex
+      ? storedOutFrameIndex
+      : extentLastFrameIndex;
+  let maxPts = onJunction
+    ? endPts
+    : lastFrameIndex === null
+      ? null
+      : nominalFrameStartPts(originPts, laneTimeBase, gridRate, lastFrameIndex);
+  // A cap rounds up to a tick, and a raised cap can then reach the end of the clip. The cap then
+  // stops on the stored Out, a frame of the clip, or for the In on the last tick of the clip. A
+  // clip too short to hold a whole frame has no last frame, and its last tick bounds both edges.
+  if (!onJunction && maxPts !== null && end !== null && ptsToBigInt(maxPts) >= end) {
+    maxPts = edge === "out" ? segment.outPts : ptsOrNull(end - 1n);
+  } else if (maxPts === null && end !== null) {
+    maxPts = ptsOrNull(end - 1n);
+  }
+
+  // The edge needs room inside the clip and inside the limit.
+  const limit = ptsToBigInt(limitPts);
+  const lower = edge === "in" ? start : limit > start ? limit : start;
+  const cap = maxPts === null ? null : ptsToBigInt(maxPts);
+  const upper = edge === "in" ? (cap !== null && cap < limit ? cap : limit) : cap;
+  if (upper !== null && upper < lower) {
+    return null;
+  }
+
+  const playhead = resolveTrimStartPlayhead(
+    input.playback,
+    input.laneStartPts,
+    laneTimeBase,
+  );
+  return {
+    segmentId: segment.id,
+    edge,
+    sourceId: input.sourceId,
+    sourceRevisionKey: input.sourceRevisionKey,
+    videoStartPts: input.laneStartPts,
+    videoTimeBase: laneTimeBase,
+    gridRate,
+    clip: {
+      clipId: clip.clipId,
+      originPts,
+      videoTimeBase: clipTimeBase,
+      scale: clip.scale,
+      startPts,
+      endPts,
+    },
+    minPts: startPts,
+    originalPts: edge === "in" ? segment.inPts : segment.outPts,
+    fixedPts: edge === "in" ? segment.outPts : segment.inPts,
+    limitPts,
+    lastFrameIndex,
+    maxPts,
+    startPlayheadPts: playhead.pts,
+    startPlayheadIsFrame: playhead.isFrame,
+  };
+}
+
 /**
  * True while the trim can still commit: the calibration is ready, the element is ready, and
  * the playback source is the one of the start. A lost calibration or a new source drops the
@@ -547,19 +828,45 @@ export function isTrimCurrent(
 }
 
 /**
- * True when a PTS is inside the range of the trim: for the In edge at or before the limit, and
- * for the Out edge at or after the limit and at or before the last frame of the source.
+ * The range of the seek targets of a trim, as the bounds of `isWithinTrimLimit`. A null bound is
+ * open.
+ *
+ * - The In edge: from `minPts`, the start of the clip of a clip grid, to the limit, and on a clip
+ *   grid no later than `maxPts`, the start of the last frame of the clip.
+ * - The Out edge: from the limit, and on a clip grid no earlier than `minPts`, to `maxPts`, the
+ *   start of the last frame.
+ */
+function trimRange(trim: SegmentTrim): {
+  readonly lower: Pts | null;
+  readonly upper: Pts | null;
+} {
+  const min = trim.minPts ?? null;
+  const later = (a: Pts, b: Pts | null): Pts =>
+    b !== null && ptsToBigInt(b) > ptsToBigInt(a) ? b : a;
+  const earlier = (a: Pts, b: Pts | null): Pts =>
+    b !== null && ptsToBigInt(b) < ptsToBigInt(a) ? b : a;
+  if (trim.edge === "in") {
+    // The one source keeps no cap for the In: `maxPts` is null there.
+    return { lower: min, upper: earlier(trim.limitPts, trim.maxPts) };
+  }
+  return { lower: later(trim.limitPts, min), upper: trim.maxPts };
+}
+
+/**
+ * True when a PTS is inside the range of the trim (`trimRange`): for the In edge at or before the
+ * limit, and for the Out edge at or after the limit and at or before the last frame of the source.
+ * On the grid of a clip, both edges also stay inside the clip.
  */
 export function isWithinTrimLimit(trim: SegmentTrim, pts: Pts): boolean {
   if (!isPtsString(pts)) {
     return false;
   }
   const value = ptsToBigInt(pts);
-  const limit = ptsToBigInt(trim.limitPts);
-  if (trim.edge === "in") {
-    return value <= limit;
-  }
-  return value >= limit && (trim.maxPts === null || value <= ptsToBigInt(trim.maxPts));
+  const { lower, upper } = trimRange(trim);
+  return (
+    (lower === null || value >= ptsToBigInt(lower)) &&
+    (upper === null || value <= ptsToBigInt(upper))
+  );
 }
 
 /** Moves a PTS into the range of the trim (`isWithinTrimLimit`). */
@@ -567,14 +874,11 @@ export function clampTrimPts(trim: SegmentTrim, pts: Pts): Pts {
   if (isWithinTrimLimit(trim, pts)) {
     return pts;
   }
-  if (
-    trim.edge === "out" &&
-    trim.maxPts !== null &&
-    ptsToBigInt(pts) > ptsToBigInt(trim.maxPts)
-  ) {
-    return trim.maxPts;
+  const { lower, upper } = trimRange(trim);
+  if (upper !== null && ptsToBigInt(pts) > ptsToBigInt(upper)) {
+    return upper;
   }
-  return trim.limitPts;
+  return lower ?? trim.limitPts;
 }
 
 /** The inputs of `collectTrimSnapBoundaries`. */
@@ -710,9 +1014,30 @@ export function resolveTrimTarget(
     return null;
   }
   if (snap !== null && snap.pts === request.pts && isWithinTrimLimit(trim, snap.pts)) {
-    return { pts: snap.pts, snap, writesAtOnce: snaps.exactPts.has(snap.pts) };
+    return {
+      pts: snap.pts,
+      snap,
+      writesAtOnce: snaps.exactPts.has(snap.pts) || isClipEndPts(trim, snap.pts),
+    };
   }
-  return { pts: clampTrimPts(trim, request.pts), snap: null, writesAtOnce: false };
+  // The junction at the end of a clip is no frame of the clip, so no frame can commit it. It is
+  // the canonical Out there, so a release writes it at once (`planClipTrimStart`).
+  const pts = clampTrimPts(trim, request.pts);
+  return { pts, snap: null, writesAtOnce: isClipEndPts(trim, pts) };
+}
+
+/**
+ * The PTS that the scrub of a sample seeks to. It is the target, except for the junction at the
+ * end of the clip of a clip grid: the sequence gives that junction to the next clip, and a seek
+ * there would attach the next clip and end the trim. The scrub then seeks to the last tick of the
+ * clip, which shows its last frame. The target keeps the junction, which the release writes.
+ */
+export function trimScrubPts(trim: SegmentTrim, target: TrimTarget): Pts {
+  const end = trim.clip?.endPts ?? null;
+  if (end === null || ptsToBigInt(target.pts) < ptsToBigInt(end)) {
+    return target.pts;
+  }
+  return ptsOrNull(ptsToBigInt(end) - 1n) ?? target.pts;
 }
 
 /**
@@ -720,18 +1045,30 @@ export function resolveTrimTarget(
  * frame before the frame of the Out, and for the Out edge, a frame after the frame of the In and
  * no later than the last frame of the source. The stored boundaries are frame starts, so their
  * nearest frame is their own frame.
+ *
+ * On the grid of a clip, the In edge also stops at the last frame of the clip. The In of an Out
+ * edge can lie in an earlier clip, before frame 0 of the grid, and it then sets no bound inside
+ * the clip.
  */
 function releaseFrameIndex(trim: SegmentTrim, target: Pts): bigint | null {
   const index = trimFrameIndexOf(trim, target);
   const fixed = trimNearestFrameIndexOf(trim, trim.fixedPts);
-  if (index === null || fixed === null) {
+  if (index === null) {
     return null;
   }
-  if (trim.edge === "in") {
-    return index < fixed ? index : fixed - 1n;
-  }
   const last = trim.lastFrameIndex;
+  if (trim.edge === "in") {
+    if (fixed === null) {
+      return null;
+    }
+    const capped =
+      trim.clip !== undefined && last !== null && index > last ? last : index;
+    return capped < fixed ? capped : fixed - 1n;
+  }
   const capped = last !== null && index > last ? last : index;
+  if (fixed === null) {
+    return trim.clip === undefined ? null : capped;
+  }
   return capped > fixed ? capped : fixed + 1n;
 }
 
@@ -772,6 +1109,7 @@ function isFrameOnScreen(
   return (
     frame !== null &&
     playback.seekTargetSeconds === null &&
+    isClipFramePts(trim, frame.inferredSourcePts) &&
     trimNearestFrameIndexOf(trim, frame.inferredSourcePts) === frameIndex
   );
 }
@@ -803,9 +1141,21 @@ export function planTrimRelease(
     const pts = target.pts;
     const frameIndex = trimNearestFrameIndexOf(trim, pts);
     let seek: TrimSeek | null;
-    if (isTargetOnScreen(playback, pts)) {
+    if (isClipEndPts(trim, pts)) {
+      // The junction at the end of the clip of a clip grid starts the next clip, and a seek there
+      // would attach that clip. The drag ends with the exact seek of ADR 022 to the last tick of
+      // the clip instead (`trimScrubPts`), which shows its last frame. No seek runs only while
+      // that frame is on screen with no seek pending.
+      const last = trim.lastFrameIndex;
+      seek =
+        last !== null && isFrameOnScreen(trim, playback, last)
+          ? null
+          : { kind: "pts", pts: trimScrubPts(trim, target) };
+    } else if (isTargetOnScreen(playback, pts)) {
       seek = null;
-    } else if (frameIndex === null) {
+    } else if (frameIndex === null || !isClipFramePts(trim, pts)) {
+      // A value outside the clip of a clip grid is no frame of that grid. The seek goes to its
+      // PTS, and the sequence finds its clip.
       seek = { kind: "pts", pts };
     } else {
       seek = isFrameOnScreen(trim, playback, frameIndex)
@@ -821,6 +1171,7 @@ export function planTrimRelease(
   const frame = playback.presentedFrame;
   if (
     frame !== null &&
+    isClipFramePts(trim, frame.inferredSourcePts) &&
     trimNearestFrameIndexOf(trim, frame.inferredSourcePts) === frameIndex
   ) {
     return {
@@ -901,6 +1252,7 @@ export function resolveTrimAwait(
   const frame = playback.presentedFrame;
   if (
     frame !== null &&
+    isClipFramePts(awaiting.trim, frame.inferredSourcePts) &&
     trimNearestFrameIndexOf(awaiting.trim, frame.inferredSourcePts) ===
       awaiting.frameIndex
   ) {
@@ -946,6 +1298,35 @@ export function canCommitTrim(
     : isValidSegmentRange(inPts, pts);
 }
 
+/** True when `pts` lies in the clip of a clip grid, from its start to before its end. */
+function isInsideClip(clip: TrimClipGrid, pts: Pts): boolean {
+  const value = ptsToBigInt(pts);
+  return (
+    value >= ptsToBigInt(clip.startPts) &&
+    (clip.endPts === null || value < ptsToBigInt(clip.endPts))
+  );
+}
+
+/**
+ * True when a presented frame can be a frame of the grid of the trim. On the grid of a clip, only a
+ * frame inside the clip can. A frame of the next clip can round to the last frame of the grid,
+ * because the first frames of the next clip lie within half a frame of its end.
+ */
+function isClipFramePts(trim: SegmentTrim, pts: Pts): boolean {
+  return trim.clip === undefined || (isPtsString(pts) && isInsideClip(trim.clip, pts));
+}
+
+/** True when `pts` is the junction at the end of the clip of a clip grid (`planClipTrimStart`). */
+function isClipEndPts(trim: SegmentTrim, pts: Pts): boolean {
+  const end = trim.clip?.endPts ?? null;
+  return (
+    trim.edge === "out" &&
+    end !== null &&
+    isPtsString(pts) &&
+    ptsToBigInt(pts) === ptsToBigInt(end)
+  );
+}
+
 /**
  * The seek of `Escape` during a trim: back to where the playhead was drawn at the start
  * (ADR 030), or null for no seek.
@@ -968,6 +1349,11 @@ export function planTrimCancel(
     isTargetOnScreen(playback, pts)
   ) {
     return null;
+  }
+  // A playhead outside the clip of a clip grid has no frame on that grid. The seek then goes to
+  // its PTS, and the sequence finds its clip.
+  if (trim.clip !== undefined && !isInsideClip(trim.clip, pts)) {
+    return { kind: "pts", pts };
   }
   const frameIndex = trim.startPlayheadIsFrame
     ? trimNearestFrameIndexOf(trim, pts)

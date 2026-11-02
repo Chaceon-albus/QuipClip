@@ -40,9 +40,11 @@ import {
   planTrimCancel,
   planTrimRelease,
   resolveTrimAwait,
+  trimScrubPts,
   TRIM_FRAME_WAIT_MS,
   type SegmentTrim,
   type SegmentTrimProbe,
+  type TrimSequence,
   type TrimAwait,
   type TrimAwaitDecision,
   type TrimSeek,
@@ -75,6 +77,12 @@ export interface SegmentTrimSessionStores {
    * visibility of the document by default, and true where no document exists.
    */
   readonly isVisible?: () => boolean;
+  /**
+   * Seeks to a frame of the grid of a clip (`SequencePlayback.seekToClipFrame`). A trim on the
+   * grid of a clip sends its frame seeks here (ADR 052). Without it, no such trim starts, and a
+   * press on its edge is the click.
+   */
+  readonly seekToClipFrame?: (clipId: string, frameIndex: number) => void;
 }
 
 /** The facts of a press that the timeline panel passes to start a trim. */
@@ -87,6 +95,11 @@ export interface SegmentTrimBeginInput {
   readonly probe: SegmentTrimProbe | null;
   /** The source extent of the ruler (ADR 007), or null when it is not known. */
   readonly totalDurationSeconds: number | null;
+  /**
+   * The sequence, while it has several clips (`SegmentTrimStartInput.sequence`). Absent or null
+   * otherwise.
+   */
+  readonly sequence?: TrimSequence | null;
 }
 
 /**
@@ -274,14 +287,18 @@ export function createSegmentTrimSession(
 
   /**
    * Sends a seek of the trim: `seekToPts` to a PTS, or `seekToFrameIndex` to a nominal frame of
-   * the grid, which aims at the middle of the frame and shows its nominal start (ADR 022).
+   * the grid, which aims at the middle of the frame and shows its nominal start (ADR 022). A
+   * frame of the grid of a clip goes to that frame of the clip (`seekToClipFrame`, ADR 052).
    */
-  const runSeek = (seek: TrimSeek): void => {
+  const runSeek = (seek: TrimSeek, of: SegmentTrim): void => {
     const state = playback.getState();
     if (seek.kind === "pts") {
       state.seekToPts(seek.pts);
-    } else {
+    } else if (of.clip === undefined) {
       state.seekToFrameIndex(Number(seek.frameIndex));
+    } else {
+      // `plan` starts a trim on the grid of a clip only with `seekToClipFrame`.
+      stores.seekToClipFrame?.(of.clip.clipId, Number(seek.frameIndex));
     }
   };
 
@@ -295,7 +312,7 @@ export function createSegmentTrimSession(
 
   const plan = (input: SegmentTrimBeginInput): SegmentTrim | null => {
     const { segments, sourceId } = timeline.getState();
-    return planSegmentTrimStart({
+    const planned = planSegmentTrimStart({
       segmentId: input.segmentId,
       edge: input.edge,
       segments,
@@ -304,7 +321,13 @@ export function createSegmentTrimSession(
       playback: playback.getState(),
       probe: input.probe,
       totalDurationSeconds: input.totalDurationSeconds,
+      sequence: input.sequence,
     });
+    // A trim on the grid of a clip seeks to the frames of that clip, so it needs the seek of the
+    // sequence playback.
+    return planned?.clip !== undefined && stores.seekToClipFrame === undefined
+      ? null
+      : planned;
   };
 
   /**
@@ -368,10 +391,12 @@ export function createSegmentTrimSession(
     },
 
     scrub: (target) => {
-      if (draggingTrim() === null || target === null) {
+      const dragging = draggingTrim();
+      if (dragging === null || target === null) {
         return;
       }
-      playback.getState().seekToPts(target.pts, { scrub: true });
+      // The scrub of a clip grid stays inside its clip (`trimScrubPts`).
+      playback.getState().seekToPts(trimScrubPts(dragging, target), { scrub: true });
     },
 
     release: (target) => {
@@ -390,12 +415,12 @@ export function createSegmentTrimSession(
       }
       if (releasePlan.kind === "write") {
         if (releasePlan.seek !== null) {
-          runSeek(releasePlan.seek);
+          runSeek(releasePlan.seek, released);
         }
         commit(released, releasePlan.pts);
         return;
       }
-      runSeek({ kind: "frame", frameIndex: releasePlan.frameIndex });
+      runSeek({ kind: "frame", frameIndex: releasePlan.frameIndex }, released);
       const awaiting = beginTrimAwait(released, releasePlan, playback.getState());
       if (awaiting === null) {
         fail();
@@ -411,7 +436,8 @@ export function createSegmentTrimSession(
       }
       drop();
       if (target !== null && isTrimCurrent(abandoned, playback.getState())) {
-        playback.getState().seekToPts(target.pts);
+        // The exact seek of the cancelled drag goes where the drag showed the playhead.
+        playback.getState().seekToPts(trimScrubPts(abandoned, target));
       }
     },
 
@@ -425,7 +451,7 @@ export function createSegmentTrimSession(
       dragCanceller?.();
       const seek = planTrimCancel(cancelled, playback.getState());
       if (seek !== null) {
-        runSeek(seek);
+        runSeek(seek, cancelled);
       }
     },
 
@@ -452,4 +478,5 @@ export function createSegmentTrimSession(
 export const segmentTrimSession: SegmentTrimSession = createSegmentTrimSession({
   playback: sequencePlayback.store,
   timeline: timelineStore,
+  seekToClipFrame: sequencePlayback.seekToClipFrame,
 });

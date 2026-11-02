@@ -308,6 +308,29 @@ Older records name "the active source". On the sequence, the general rule is thi
 | ADR 045 | Select All, Delete and the restored selection use the active source            | They use the segments of the sequence. Undo restores the selected segments that the restored array holds.                                                                                                                          |
 | ADR 048 | The active source has one segment                                              | The export has one piece (ADR 053).                                                                                                                                                                                                 |
 
+(Changed on 2026-11-02.) The drag trim of ADR 030 on a sequence whose clips share no frame grid:
+
+- The trim uses the frame grid and the nominal rate of the clip that holds the moving edge. For
+  an In, that is the clip of the In. For an Out, it is the clip of the last frame of the segment,
+  so an Out on a junction belongs to the clip before it.
+- The edge stays inside that clip. To move an edge into another clip, the user uses Mark In and
+  Mark Out.
+- Only a frame inside that clip can commit the trim. The first frames of the next clip can round
+  to the last frame of the grid, so they never count.
+- An Out on the junction at the end of the clip is no frame of the clip. When the stored Out is
+  there, the cap of the Out edge is that junction, and a release on it writes it at once. So a
+  drag does not move such an Out back by itself.
+- The trim starts only on an edge of the clip that the preview shows, and not during a cold
+  switch. Every seek of the drag stays inside that clip. At the junction at its end, the drag
+  seeks to the last tick of the clip, and the release and the cancel of the drag end with the
+  exact seek of ADR 022 there, which shows the last frame. So the drag attaches no other clip,
+  and the calibration holds.
+- A press on an edge of another clip is the click of ADR 007, which seeks there. A drag after that
+  trims. The click of an Out on a junction seeks to the first frame of the next clip, so that Out
+  trims only while the preview shows the clip before it. One step back of one frame shows it.
+- A press on an edge in a clip with no exact frame grid is the click of ADR 007.
+- A sequence whose clips share one grid trims on that grid, across the junctions, as before.
+
 ### Room for the later features
 
 These later changes must stay small. The code that implements this record must not make

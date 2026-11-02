@@ -84,6 +84,7 @@ import {
   isTrimCurrent,
   resolveTrimGridRate,
   resolveTrimTarget,
+  type TrimSequence,
 } from "./segmentTrim";
 import { SegmentTrimPreview } from "./SegmentTrimPreview";
 import { segmentTrimSession } from "./segmentTrimSession";
@@ -260,7 +261,30 @@ export function TimelinePanel({
   // this one condition. During a decode stall the edge press is the click too: the first sample
   // of a trim would reload the preview, and the trim could then not commit, while the click
   // seeks to the boundary and reloads the preview there.
-  const canTrimEdges = exactGridRate !== null && !isDecodeStalled;
+  //
+  // On a sequence of several clips whose probe has no shared grid, a trim uses the grid of the
+  // clip of the edge (ADR 052), so the edges can trim while some clip has an exact grid. A press on
+  // an edge in a clip with no exact grid is then the click (`planSegmentTrimStart`).
+  // Such a trim starts only on an edge of the clip on screen, and not during a cold switch. A press
+  // reads both from the stores (`readTrimSequence`), because a navigation can change them after
+  // the last render.
+  const readTrimSequence = (): TrimSequence | null =>
+    virtual === null
+      ? null
+      : {
+          virtual,
+          sources,
+          attachedClipId: sequencePlayback.isSwitching()
+            ? null
+            : timelineStore.getState().attachedClipId,
+        };
+  const hasClipTrimGrid =
+    canUsePreciseSeek &&
+    virtual !== null &&
+    virtual.clips.some(
+      (clip) => resolveTrimGridRate(sources[clip.sourceId]?.probe ?? null) !== null,
+    );
+  const canTrimEdges = (exactGridRate !== null || hasClipTrimGrid) && !isDecodeStalled;
 
   const zoom = useTimelineViewportStore(selectZoom);
   // The zoom factor of the last commit. The layout effect that applies an anchor reads it as
@@ -1134,6 +1158,7 @@ export function TimelinePanel({
         hasActiveSource,
         probe,
         totalDurationSeconds,
+        sequence: readTrimSequence(),
       })
     ) {
       return;
@@ -1173,6 +1198,7 @@ export function TimelinePanel({
         hasActiveSource,
         probe: media?.probe ?? null,
         totalDurationSeconds,
+        sequence: readTrimSequence(),
       })
     ) {
       gesture.sampleNow();

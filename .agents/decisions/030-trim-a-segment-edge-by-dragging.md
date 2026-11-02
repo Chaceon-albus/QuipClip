@@ -28,7 +28,8 @@ rules, and the rules below that name the active source or the source apply as fo
   drop it either. Only a calibration that becomes unavailable for another reason does.
 - The edge can cross a junction into the next or the previous clip. The new boundary then
   names that clip. A release on a junction writes the one form of ADR 052: an Out at a
-  junction is the end of the earlier clip.
+  junction is the end of the earlier clip. (Changed on 2026-11-02: on a sequence whose clips
+  share no frame grid, the edge stays inside its clip, ADR 052.)
 - The snap targets are the boundaries of the other segments of the sequence, the playhead at
   the start of the drag, and each junction. The press clears the pending In, as before.
 - At the release, the rule "`inPts < outPts`" uses the comparison of ADR 052.
@@ -37,7 +38,8 @@ rules, and the rules below that name the active source or the source apply as fo
   nominal rate of the clip under the edge.
 - The Out edge of the last clip still stops on its last frame. The Out edge of a clip that
   another clip follows, and that has a `videoEndPts`, can reach the end of that clip, which is
-  the junction.
+  the junction. (Changed on 2026-11-02: on a sequence whose clips share no frame grid, only an
+  Out that is already on the junction reaches it, ADR 052.)
 
 A drag on an edge trims that edge. The drag moves the playhead as a scrub does, and the
 release commits the frame that the browser presents at the end of the drag.

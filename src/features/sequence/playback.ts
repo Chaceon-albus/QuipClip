@@ -113,6 +113,14 @@ export interface SequencePlayback {
    * trim that crosses a junction is not cancelled while the new clip loads.
    */
   readonly isSwitching: () => boolean;
+  /**
+   * Goes to nominal frame `frameIndex` of the grid of clip `clipId`: the frame that
+   * `seekToFrameIndex` of the playback store names, counted from the first frame of the source
+   * of the clip (ADR 022). The drag trim on the grid of a clip seeks with it (ADR 052). A clip
+   * that is not attached is attached first, and the seek runs after the attach. A negative index,
+   * an index that is not a safe integer, or a clip that is not on the sequence does nothing.
+   */
+  readonly seekToClipFrame: (clipId: string, frameIndex: number) => void;
 }
 
 /**
@@ -810,7 +818,19 @@ export function createSequencePlayback(
     return true;
   };
 
-  return { store, handleEnded, notePause, isSwitching };
+  const seekToClipFrame = (clipId: string, frameIndex: number): void => {
+    if (
+      !Number.isSafeInteger(frameIndex) ||
+      frameIndex < 0 ||
+      !timeline.getState().clips.some((clip) => clip.id === clipId)
+    ) {
+      return;
+    }
+    userNavigates();
+    navigate({ kind: "frame", clipId, frameIndex });
+  };
+
+  return { store, handleEnded, notePause, isSwitching, seekToClipFrame };
 }
 
 /** The production sequence playback, over the production stores. */
