@@ -135,18 +135,25 @@ pub fn parse_filter_list(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse the version string and configuration flags out of `-version` output.
-///
-/// `version` is the token that follows `ffmpeg version `. `configuration_flags` is the
-/// whitespace-split remainder of the line whose trimmed form starts with
-/// `configuration:`, without the `configuration:` token itself. Returns `None` when no
-/// version line is present, since that is the only field this parser cannot leave empty.
+/// [`parse_program_version`] for `ffmpeg`.
 pub fn parse_version(stdout: &str) -> Option<VersionInfo> {
-    const VERSION_PREFIX: &str = "ffmpeg version ";
+    parse_program_version(stdout, "ffmpeg")
+}
 
+/// Parse the version string and configuration flags out of `<program> -version` output, where
+/// `program` is a literal name such as `ffmpeg` or `ffprobe`.
+///
+/// `version` is the token that follows `<program> version `. The version line of another
+/// program, or of a longer name such as `ffmpegx`, does not count. `configuration_flags` is the
+/// whitespace-split remainder of the line whose trimmed form starts with `configuration:`,
+/// without the `configuration:` token itself. Each program of one build prints the same
+/// `configuration:` line. Returns `None` when no version line is present, since that is the only
+/// field this parser cannot leave empty. An empty `program` therefore always gives `None`.
+pub fn parse_program_version(stdout: &str, program: &str) -> Option<VersionInfo> {
     let version = stdout.lines().map(strip_cr).find_map(|line| {
         line.trim_start()
-            .strip_prefix(VERSION_PREFIX)
+            .strip_prefix(program)
+            .and_then(|rest| rest.strip_prefix(" version "))
             .and_then(|rest| rest.split_whitespace().next())
             .map(str::to_owned)
     })?;
@@ -170,7 +177,7 @@ pub fn parse_version(stdout: &str) -> Option<VersionInfo> {
 }
 
 /// Read the licence flags ADR 005 needs for the consent dialog out of the configuration
-/// flags [`parse_version`] returns.
+/// flags [`parse_program_version`] returns.
 pub fn license_flags(configuration_flags: &[String]) -> LicenseFlags {
     let has = |flag: &str| {
         configuration_flags
@@ -379,6 +386,55 @@ configuration: --prefix=/opt/homebrew/Cellar/ffmpeg-full/9.0.1_1 --enable-shared
         assert!(!info
             .configuration_flags
             .contains(&"configuration:".to_owned()));
+    }
+
+    /// Synthetic `ffprobe -version` output in the shape of a Windows build, not verbatim: CRLF
+    /// line ends, a version token with the suffix of its builder, and shortened lines.
+    const FFPROBE_VERSION_FIXTURE: &str = "ffprobe version 9.0.2-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers\r
+built with gcc\r
+configuration: --enable-gpl --enable-version3 --enable-static --enable-libsvtav1\r
+";
+
+    #[test]
+    fn parses_the_version_line_of_the_named_program_only() {
+        let info = parse_program_version(FFPROBE_VERSION_FIXTURE, "ffprobe").unwrap();
+        assert_eq!(info.version, "9.0.2-full_build-www.gyan.dev");
+        assert_eq!(
+            info.configuration_flags,
+            [
+                "--enable-gpl",
+                "--enable-version3",
+                "--enable-static",
+                "--enable-libsvtav1"
+            ]
+        );
+        assert_eq!(parse_version(FFPROBE_VERSION_FIXTURE), None);
+        assert_eq!(parse_program_version(VERSION_FIXTURE, "ffprobe"), None);
+        assert_eq!(
+            parse_program_version(VERSION_FIXTURE, "ffmpeg"),
+            parse_version(VERSION_FIXTURE)
+        );
+    }
+
+    #[test]
+    fn a_longer_name_that_starts_with_the_program_does_not_count() {
+        let stdout = "ffmpegx version 1.0\nffprobe-real version 2.0\n";
+        assert_eq!(parse_program_version(stdout, "ffmpeg"), None);
+        assert_eq!(parse_program_version(stdout, "ffprobe"), None);
+    }
+
+    #[test]
+    fn an_indented_version_line_after_the_configuration_line_still_parses() {
+        let stdout = "configuration: --enable-gpl\n  ffprobe version 9.0.2 Copyright\n";
+        let info = parse_program_version(stdout, "ffprobe").unwrap();
+        assert_eq!(info.version, "9.0.2");
+        assert_eq!(info.configuration_flags, ["--enable-gpl"]);
+    }
+
+    #[test]
+    fn an_empty_program_name_never_matches() {
+        assert_eq!(parse_program_version(VERSION_FIXTURE, ""), None);
+        assert_eq!(parse_program_version(" version 1.0\n", ""), None);
     }
 
     #[test]

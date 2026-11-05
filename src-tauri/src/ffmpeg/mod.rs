@@ -8,8 +8,9 @@ pub mod probe;
 pub mod waveform;
 
 pub use capabilities::{
-    license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_version,
-    Candidate, CodecKind, EncoderStatus, LicenseFlags, ListedCodec, VersionInfo, TESTED_ENCODERS,
+    license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_program_version,
+    parse_version, Candidate, CodecKind, EncoderStatus, LicenseFlags, ListedCodec, VersionInfo,
+    TESTED_ENCODERS,
 };
 pub use export::{
     build_plan, ExportAudioMode, ExportErrorCode, ExportPlan, ExportStreams, OutputTiming,

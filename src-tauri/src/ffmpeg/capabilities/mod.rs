@@ -20,7 +20,8 @@ pub mod preset_test_cache;
 pub mod smoke;
 
 pub use listing::{
-    license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_version,
+    license_flags, parse_codec_list, parse_filter_list, parse_hwaccel_list, parse_program_version,
+    parse_version,
 };
 pub use smoke::{
     classify, run_smoke_report, run_smoke_test, run_with_timeout, run_with_timeout_in,
