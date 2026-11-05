@@ -98,6 +98,9 @@ pub fn run() {
         // The one slot of the audio envelope jobs (ADR 056). The job threads share it with the
         // commands, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::waveform::registry::WaveformJobs::default()))
+        // The one slot of the install of ffmpeg (ADR 058). The job thread shares it with the
+        // commands, so the managed value is the `Arc`.
+        .manage(Arc::new(ffmpeg::install::registry::InstallJobs::default()))
         // The destination of the last published export. The show command reads the path from
         // here, so the web view names a run and never a path.
         .manage(commands::export_output::PublishedExports::default())
@@ -122,16 +125,21 @@ pub fn run() {
         // longer reads the remux windows of the page before it, and Tauri still delivers to a
         // channel of that page. The windows stop (ADR 046).
         .on_page_load(|webview, payload| {
+            // A new page of the Settings window no longer reads the channel of the install of
+            // the page before it, and the install belongs to that page (ADR 058). It stops, and
+            // the late requests of the old page are refused.
+            if webview.label() == SETTINGS_WINDOW_LABEL
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                cancel_settings_page_install(webview.app_handle());
+            }
             if webview.label() == MAIN_WINDOW_LABEL
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
                 // The page numbers its requests in microseconds since the Unix epoch, so every
                 // request of the new page lies above this floor and every late one of the old
                 // page below it.
-                let floor = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|elapsed| elapsed.as_micros() as u64)
-                    .unwrap_or(0);
+                let floor = page_floor();
                 if let Some(windows) = webview
                     .app_handle()
                     .try_state::<Arc<ffmpeg::preview::PreviewWindows>>()
@@ -153,6 +161,9 @@ pub fn run() {
                 && matches!(event, tauri::WindowEvent::Destroyed)
             {
                 commands::settings_window::report_draft_cleared(window.app_handle());
+                // The install belongs to the Settings window, so its close cancels it, with no
+                // question (ADR 058).
+                cancel_settings_page_install(window.app_handle());
             }
             if window.label() == MAIN_WINDOW_LABEL && matches!(event, tauri::WindowEvent::Destroyed)
             {
@@ -226,7 +237,10 @@ pub fn run() {
             commands::waveform::cancel_waveform,
             commands::waveform::waveform_cache_usage,
             commands::waveform::clear_waveform_cache,
-            commands::build_info::build_info
+            commands::build_info::build_info,
+            commands::ffmpeg_install::ffmpeg_download_offer,
+            commands::ffmpeg_install::start_ffmpeg_install,
+            commands::ffmpeg_install::cancel_ffmpeg_install
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -270,6 +284,7 @@ pub fn run() {
             }
             stop_preview_windows(handle);
             stop_waveform_jobs(handle);
+            stop_ffmpeg_install(handle);
             stop_export_before_exit(handle);
         }
         // After an `ExitRequested` that was not prevented, the export was already asked to
@@ -279,6 +294,7 @@ pub fn run() {
         tauri::RunEvent::Exit => {
             stop_preview_windows(handle);
             stop_waveform_jobs(handle);
+            stop_ffmpeg_install(handle);
             stop_export_before_exit(handle);
         }
         // The cleanup at start of the cache directory and of the old FLV cache runs once in each
@@ -287,10 +303,15 @@ pub fn run() {
         tauri::RunEvent::Ready => {
             let app_data = handle.path().app_data_dir().ok();
             let cache_root = handle.path().app_cache_dir().ok();
+            let download_bin = ffmpeg::locate::download_directory();
             let spawned = std::thread::Builder::new()
                 .name("cache-cleanup".to_owned())
                 .spawn(move || {
-                    app_cache::cleanup::run_at_start(app_data.as_deref(), cache_root.as_deref());
+                    app_cache::cleanup::run_at_start(
+                        app_data.as_deref(),
+                        cache_root.as_deref(),
+                        download_bin.as_deref(),
+                    );
                 });
             if let Err(error) = spawned {
                 eprintln!("cache: the cleanup did not start: {error}");
@@ -314,6 +335,32 @@ fn stop_waveform_jobs(handle: &tauri::AppHandle) {
     if let Some(jobs) = handle.try_state::<Arc<ffmpeg::waveform::registry::WaveformJobs>>() {
         jobs.close_for_exit();
     }
+}
+
+/// Cancel the install of ffmpeg and refuse new ones (ADR 058, ADR 017 amendment). The install
+/// writes into its `bin` directory only by a rename, so the exit waits for nothing more.
+fn stop_ffmpeg_install(handle: &tauri::AppHandle) {
+    if let Some(jobs) = handle.try_state::<Arc<ffmpeg::install::registry::InstallJobs>>() {
+        jobs.close_for_exit();
+    }
+}
+
+/// Cancel the install of ffmpeg of the page of the Settings window, at a reload or a close of
+/// that window, and refuse the late requests of that page (ADR 058).
+fn cancel_settings_page_install(handle: &tauri::AppHandle) {
+    if let Some(jobs) = handle.try_state::<Arc<ffmpeg::install::registry::InstallJobs>>() {
+        jobs.cancel_all(page_floor());
+    }
+}
+
+/// The time now in microseconds since the Unix epoch. A page numbers its requests on the same
+/// clock, so every request of a page that loads after this lies above it, and every late one of
+/// the page before lies below it.
+fn page_floor() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// Stops a running export before the process ends, and waits until the exit deadline
@@ -805,6 +852,10 @@ mod tests {
         // The size of the envelope cache and its clear, on the General tab (ADR 056).
         "waveform_cache_usage",
         "clear_waveform_cache",
+        // The download of ffmpeg, on the FFmpeg tab (ADR 058).
+        "ffmpeg_download_offer",
+        "start_ffmpeg_install",
+        "cancel_ffmpeg_install",
     ];
 
     /// Registered commands that no window may call: no frontend code calls them. Version 1

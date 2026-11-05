@@ -8,6 +8,7 @@ pub mod capabilities;
 pub mod export;
 pub mod export_journal;
 pub mod export_output;
+pub mod ffmpeg_install;
 pub mod media;
 pub mod preferences;
 pub mod preset_test;

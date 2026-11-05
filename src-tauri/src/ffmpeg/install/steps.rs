@@ -1240,6 +1240,10 @@ mod tests {
             (InstallErrorCode::WriteFailed, "writeFailed"),
             (InstallErrorCode::VersionCheckFailed, "versionCheckFailed"),
             (InstallErrorCode::Canceled, "canceled"),
+            (
+                InstallErrorCode::CommandExecutionFailed,
+                "commandExecutionFailed",
+            ),
         ];
         for (code, name) in names {
             assert_eq!(serde_json::to_value(code).unwrap(), name);

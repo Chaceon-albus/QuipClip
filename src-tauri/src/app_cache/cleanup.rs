@@ -10,27 +10,45 @@
 //!    files.
 //! 4. The removal of `flv-cache`, the FLV cache of the builds before ADR 057, from the application
 //!    data directory.
+//! 5. The sweep of the install work directories of `ffmpeg` (ADR 058), in the directory `work`.
+//! 6. The sweep of the temporary files that a move of the install left in `<local_data>/bin`
+//!    (ADR 058).
 //!
-//! A failure in one step writes a log line and does not stop the next step. Steps 2 and 3 remove
-//! only their own names, and only entries that this process does not use and that are old enough
-//! that no other QuipClip process of any build still uses them. So the cleanup never touches the
-//! other names at the top of the cache directory, such as the folder of WebView2.
+//! A failure in one step writes a log line and does not stop the next step. Steps 2, 3, 5 and 6
+//! remove only their own names, and only entries that this process does not use and that are old
+//! enough that no other QuipClip process of any build still uses them. So the cleanup never
+//! touches the other names at the top of the cache directory, such as the folder of WebView2, nor
+//! the programs in `bin`.
 
-use super::work::{remove_stale_work_directories, EXPORT_WORK_DIRECTORY};
+use super::work::{
+    remove_stale_work_directories, EXPORT_WORK_DIRECTORY, FFMPEG_INSTALL_WORK_DIRECTORY,
+};
 use crate::ffmpeg::capabilities::preset_test::remove_stale_outputs;
+use crate::ffmpeg::install::steps::{sweep_bin, STALE_TEMPORARY_FILE_AGE};
 use crate::ffmpeg::waveform;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::SystemTime;
 
 /// The FLV cache of the builds before ADR 057, in the application data directory.
 const LEGACY_FLV_CACHE_DIR_NAME: &str = "flv-cache";
 
-/// Run the cleanup once. `app_data` is the application data directory, and `cache_root` the
-/// application cache directory. `None` stands for a directory that Tauri gives no path for, and
-/// the steps that need it do not run.
-pub fn run_at_start(app_data: Option<&Path>, cache_root: Option<&Path>) {
-    run_at_start_with(app_data, cache_root, waveform::cache::sweep_once);
+/// Run the cleanup once. `app_data` is the application data directory, `cache_root` the
+/// application cache directory, and `download_bin` the directory of the `ffmpeg` download,
+/// `<local_data>/bin`. `None` stands for a directory that Tauri gives no path for, and the steps
+/// that need it do not run.
+pub fn run_at_start(
+    app_data: Option<&Path>,
+    cache_root: Option<&Path>,
+    download_bin: Option<&Path>,
+) {
+    run_at_start_with(
+        app_data,
+        cache_root,
+        download_bin,
+        waveform::cache::sweep_once,
+    );
 }
 
 /// [`run_at_start`] with the cleanup of the envelope cache supplied, so a test does not set the
@@ -38,6 +56,7 @@ pub fn run_at_start(app_data: Option<&Path>, cache_root: Option<&Path>) {
 fn run_at_start_with<SweepEnvelopes>(
     app_data: Option<&Path>,
     cache_root: Option<&Path>,
+    download_bin: Option<&Path>,
     sweep_envelopes: SweepEnvelopes,
 ) where
     SweepEnvelopes: FnOnce(&Path) -> io::Result<()>,
@@ -62,6 +81,15 @@ fn run_at_start_with<SweepEnvelopes>(
                 legacy.display()
             );
         }
+    }
+    if let Some(cache_root) = cache_root {
+        remove_stale_work_directories(
+            &super::work_directory(cache_root),
+            FFMPEG_INSTALL_WORK_DIRECTORY,
+        );
+    }
+    if let Some(download_bin) = download_bin {
+        sweep_bin(download_bin, SystemTime::now(), STALE_TEMPORARY_FILE_AGE);
     }
 }
 
@@ -137,11 +165,39 @@ mod tests {
             age_directory(path);
         }
 
-        run_at_start_with(None, Some(&cache.path), no_envelope_sweep);
+        run_at_start_with(None, Some(&cache.path), None, no_envelope_sweep);
 
         assert!(!in_work.exists());
         assert!(!at_top.exists());
         assert!(work_directory(&cache.path).is_dir());
+    }
+
+    #[test]
+    fn old_install_work_directories_and_old_temporary_files_in_bin_go() {
+        let cache = TestDirectory::new();
+        let local = TestDirectory::new();
+        let install = work_directory(&cache.path).join("ffmpeg-install-1-0");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("archive-0.zip"), b"PK").unwrap();
+        age_directory(&install);
+        let bin = local.path.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let program = bin.join(crate::ffmpeg::locate::FFMPEG_NAME);
+        fs::write(&program, b"a program").unwrap();
+        let temporary = bin.join(format!(".{}.tmp-1-0", crate::ffmpeg::locate::FFMPEG_NAME));
+        fs::write(&temporary, b"left by a kill").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&temporary)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(25 * 60 * 60))
+            .unwrap();
+
+        run_at_start_with(None, Some(&cache.path), Some(&bin), no_envelope_sweep);
+
+        assert!(!install.exists());
+        assert!(!temporary.exists());
+        assert!(program.is_file(), "the programs stay");
     }
 
     #[test]
@@ -160,7 +216,7 @@ mod tests {
         }
         fs::create_dir(app_data.path.join("bin")).unwrap();
 
-        run_at_start_with(Some(&app_data.path), None, no_envelope_sweep);
+        run_at_start_with(Some(&app_data.path), None, None, no_envelope_sweep);
 
         assert!(!app_data.path.join(LEGACY_FLV_CACHE_DIR_NAME).exists());
         for name in kept {
@@ -179,7 +235,7 @@ mod tests {
         write_old_file(&in_work);
         write_old_file(&at_top);
 
-        run_at_start_with(None, Some(&cache.path), no_envelope_sweep);
+        run_at_start_with(None, Some(&cache.path), None, no_envelope_sweep);
 
         assert!(!in_work.exists());
         assert!(!at_top.exists());
@@ -212,7 +268,7 @@ mod tests {
         let young_output = cache.path.join(other_output_name(2));
         fs::write(&young_output, b"a test of another process").unwrap();
 
-        run_at_start_with(None, Some(&cache.path), no_envelope_sweep);
+        run_at_start_with(None, Some(&cache.path), None, no_envelope_sweep);
 
         assert!(web_view.join("Preferences").is_file());
         assert!(envelope.is_file());
@@ -226,7 +282,7 @@ mod tests {
     fn the_envelope_cleanup_gets_the_cache_directory() {
         let cache = TestDirectory::new();
         let swept = RefCell::new(Vec::new());
-        run_at_start_with(None, Some(&cache.path), |root| {
+        run_at_start_with(None, Some(&cache.path), None, |root| {
             swept.borrow_mut().push(root.to_path_buf());
             Ok(())
         });
@@ -241,7 +297,7 @@ mod tests {
         let at_top = cache.path.join(other_output_name(3));
         write_old_file(&at_top);
 
-        run_at_start_with(Some(&app_data.path), Some(&cache.path), |_| {
+        run_at_start_with(Some(&app_data.path), Some(&cache.path), None, |_| {
             Err(io::Error::other("the listing failed"))
         });
 
@@ -255,11 +311,16 @@ mod tests {
         let app_data = root.path.join("app-data");
         let cache = root.path.join("cache");
         let swept = RefCell::new(0);
-        run_at_start_with(Some(&app_data), Some(&cache), |_| {
-            *swept.borrow_mut() += 1;
-            Ok(())
-        });
-        run_at_start_with(None, None, |_| unreachable!("no cache directory"));
+        run_at_start_with(
+            Some(&app_data),
+            Some(&cache),
+            Some(&root.path.join("bin")),
+            |_| {
+                *swept.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+        run_at_start_with(None, None, None, |_| unreachable!("no cache directory"));
         assert_eq!(*swept.borrow(), 1);
         assert!(!app_data.exists());
         assert!(!cache.exists());

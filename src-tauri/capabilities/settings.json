@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings",
-  "description": "Capability for the Settings window: its event listeners, title, theme, first show and focus, the settings file, the capability probe, the preset test, its own request, close, draft report and preference broadcast, the build info, the size and the clear of the waveform cache, and the ffmpeg path picker",
+  "description": "Capability for the Settings window: its event listeners, title, theme, first show and focus, the settings file, the capability probe, the preset test, its own request, close, draft report and preference broadcast, the build info, the size and the clear of the waveform cache, the ffmpeg path picker, and the download of ffmpeg",
   "windows": ["settings"],
   "permissions": [
     "core:event:allow-listen",
@@ -24,6 +24,9 @@
     "allow-broadcast-preference",
     "allow-build-info",
     "allow-waveform-cache-usage",
-    "allow-clear-waveform-cache"
+    "allow-clear-waveform-cache",
+    "allow-ffmpeg-download-offer",
+    "allow-start-ffmpeg-install",
+    "allow-cancel-ffmpeg-install"
   ]
 }

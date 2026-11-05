@@ -43,6 +43,9 @@ const APP_COMMANDS: &[&str] = &[
     "waveform_cache_usage",
     "clear_waveform_cache",
     "build_info",
+    "ffmpeg_download_offer",
+    "start_ffmpeg_install",
+    "cancel_ffmpeg_install",
 ];
 
 fn main() {

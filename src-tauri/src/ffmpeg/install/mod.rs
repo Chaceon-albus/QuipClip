@@ -2,11 +2,13 @@
 //!
 //! [`manifest`] holds the pinned files of each target. [`download`] writes one archive to disk
 //! and checks its size and its SHA-256. [`extract`] takes one program out of a zip. [`steps`]
-//! runs the whole install, from the download to the move into `<local_data>/bin`.
+//! runs the whole install, from the download to the move into `<local_data>/bin`. [`registry`]
+//! holds the one slot of the install.
 
 pub mod download;
 pub mod extract;
 pub mod manifest;
+pub mod registry;
 pub mod steps;
 
 use serde::Serialize;
@@ -21,7 +23,7 @@ pub enum InstallErrorCode {
     Busy,
     /// Discovery finds a pair that the download must not replace.
     AlreadyFound,
-    /// Tauri gives no local data directory.
+    /// Tauri gives no data directory or no local data directory.
     AppDataUnavailable,
     /// Tauri gives no cache directory, or the install work directory cannot be made.
     WorkDirectoryUnavailable,
@@ -34,4 +36,7 @@ pub enum InstallErrorCode {
     WriteFailed,
     VersionCheckFailed,
     Canceled,
+    /// The install could not run: a thread did not start, or it stopped on an internal error.
+    /// The export, the probe and the envelope jobs have the same code.
+    CommandExecutionFailed,
 }
