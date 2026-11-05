@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "windows-x86_64": {
+      "version": "9.0.2",
+      "source": "github.com/GyanD/codexffmpeg",
+      "license": { "gpl": true, "version3": true, "nonfree": false },
+      "archives": [
+        {
+          "urls": [
+            "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build.zip"
+          ],
+          "sha256": "759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b",
+          "size": 257736868,
+          "entries": {
+            "ffmpeg": {
+              "path": "ffmpeg-9.0.2-full_build/bin/ffmpeg.exe",
+              "method": "deflate",
+              "size": 227823104
+            },
+            "ffprobe": {
+              "path": "ffmpeg-9.0.2-full_build/bin/ffprobe.exe",
+              "method": "deflate",
+              "size": 227621376
+            }
+          }
+        }
+      ]
+    },
+    "macos-aarch64": {
+      "version": "9.0.2",
+      "source": "ffmpeg.martin-riedl.de",
+      "license": { "gpl": true, "version3": true, "nonfree": false },
+      "archives": [
+        {
+          "urls": [
+            "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip"
+          ],
+          "sha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
+          "size": 28395699,
+          "entries": {
+            "ffmpeg": { "path": "ffmpeg", "method": "deflate", "size": 66332880 }
+          }
+        },
+        {
+          "urls": [
+            "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip"
+          ],
+          "sha256": "fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6",
+          "size": 28317701,
+          "entries": {
+            "ffprobe": { "path": "ffprobe", "method": "deflate", "size": 66158064 }
+          }
+        }
+      ]
+    }
+  }
+}
