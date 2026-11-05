@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-29
 - Deciders: capric98
+- Amended by: ADR 058
 
 ## Context
 
@@ -36,6 +37,11 @@ steps 1 to 3 find no programs, the user must install `ffmpeg` and `ffprobe`, or 
 location in the settings. The rules below for the manifest, the hash mismatch, the consent
 and the install stay the plan for step 4. The read of the licence flags from
 `ffmpeg -version` is implemented.
+
+(Changed on 2026-11-05.) ADR 058 gives the design of step 4. Where this record and ADR 058
+differ, ADR 058 holds. It changes the sources, the manifest and its script, the consent, the
+place of the offer, the directory and the order of the install. Step 4 installs into
+`<local_data>/bin`, and discovery searches that directory after `<app_data>/bin`.
 
 `app_data_dir()` from the Tauri path API already follows both platform rules:
 `%APPDATA%\<identifier>` on Windows, and `~/Library/Application Support/<identifier>` on

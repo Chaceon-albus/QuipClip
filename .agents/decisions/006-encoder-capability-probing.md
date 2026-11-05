@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-03
 - Deciders: capric98
-- Amended by: ADR 023, ADR 038, ADR 041
+- Amended by: ADR 023, ADR 038, ADR 041, ADR 058
 
 ## Context
 
@@ -128,6 +128,9 @@ error for that file. The probe result reaches the frontend even when the cache w
 **Executable resolution.** The probe resolves the executables in the ADR 005 order: the path
 configured in the settings file of ADR 013, then `PATH`, then the application data directory.
 The first implementation of this record predated settings storage and used only the last two.
+(Changed on 2026-11-05.) After the application data directory, discovery also searches
+`<local_data>/bin`, where the download of ADR 058 installs the programs. Its origin is also
+`appData`.
 
 When the application does not find the executables, the `failed` payload names each
 candidate that it inspected, in search order. Each candidate holds the `ffmpeg` path, the

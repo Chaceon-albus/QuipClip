@@ -79,6 +79,7 @@ document summarizes them and shows how the parts fit together.
 | [`055-run-an-export-in-a-work-directory.md`](../.agents/decisions/055-run-an-export-in-a-work-directory.md)                                 | Each export runs in a work directory and reads its filter graph from a file        |
 | [`056-show-the-audio-envelope-of-a-source.md`](../.agents/decisions/056-show-the-audio-envelope-of-a-source.md)                             | The menu of a clip label shows a cached audio envelope of a source on the timeline |
 | [`057-keep-rebuildable-files-in-the-cache-directory.md`](../.agents/decisions/057-keep-rebuildable-files-in-the-cache-directory.md)         | Files that QuipClip can make again go in subdirectories of the cache directory     |
+| [`058-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/058-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
 
 ## Shape
 
@@ -454,7 +455,7 @@ Homebrew installation without starting a login shell.
 
 ADR 005 specifies a download manifest that pins a URL and a SHA-256 per target, because the
 Windows build server publishes no macOS asset. Neither the manifest nor the installer exists
-yet.
+yet. ADR 058 gives the design of the download.
 
 After the programs resolve, a background job finds out which encoders work. It lists them,
 then runs a fraction-of-a-second encode with each candidate, because a listed hardware
