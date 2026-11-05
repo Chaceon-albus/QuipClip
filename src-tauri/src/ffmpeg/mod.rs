@@ -2,6 +2,7 @@
 
 pub mod capabilities;
 pub mod export;
+pub mod install;
 pub mod locate;
 pub mod preview;
 pub mod probe;

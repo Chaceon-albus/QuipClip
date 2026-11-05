@@ -22,14 +22,16 @@ const BIN_DIR_NAME: &str = "bin";
 /// discovery then skips `<local_data>/bin`.
 static LOCAL_DATA_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
+// The file names of the two programs on this platform. The install of ADR 058 writes these
+// names, so discovery finds what it installs.
 #[cfg(windows)]
-const FFMPEG_NAME: &str = "ffmpeg.exe";
+pub(crate) const FFMPEG_NAME: &str = "ffmpeg.exe";
 #[cfg(not(windows))]
-const FFMPEG_NAME: &str = "ffmpeg";
+pub(crate) const FFMPEG_NAME: &str = "ffmpeg";
 #[cfg(windows)]
-const FFPROBE_NAME: &str = "ffprobe.exe";
+pub(crate) const FFPROBE_NAME: &str = "ffprobe.exe";
 #[cfg(not(windows))]
-const FFPROBE_NAME: &str = "ffprobe";
+pub(crate) const FFPROBE_NAME: &str = "ffprobe";
 
 /// The location class that supplied a complete executable pair.
 ///
