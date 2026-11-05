@@ -168,6 +168,16 @@ owns its arrow keys under ADR 021, and the layer does nothing with them. `Home` 
 then move the splitter and not the playhead. Every other key keeps its meaning. While a
 drag of the splitter runs, the layer also leaves `Escape` alone, and the drag cancels on it.
 
+(Added on 2026-11-05.) The volume slider of the transport bar (ADR 019) can take the focus.
+While it has the focus, it owns the four arrow keys, `Home`, `End`, `Page Up` and `Page Down`
+with no `Ctrl`, `Cmd` or `Alt`, as the splitter owns its keys. The layer does nothing with
+them. `Shift` with an arrow moves the slider 10 percent, as `Page Up` and `Page Down` do.
+Every other key keeps its meaning, so
+`Space` still plays. The rule reads the `data-value-slider` marker and not `role="slider"`,
+because the seek surface of the timeline has that role, and the layer serves its keys. A mouse
+press on the slider gives the focus back to the element that had it before the press, as
+every transport control does (ADR 021). The arrow keys then go to the playhead again.
+
 (Changed on 2026-09-24.) While a drag trims a segment edge (ADR 030), `Escape` cancels the
 trim and does not finish the segment, and Mark In, Mark Out, Delete, Undo and Redo own the
 key press and do nothing.

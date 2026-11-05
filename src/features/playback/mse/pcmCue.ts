@@ -52,8 +52,8 @@ export interface CueVoice {
 }
 
 /**
- * The audio output of the cue: an `AudioContext` whose gain node the Mute toggle sets
- * (`createWebAudioOutput`). A test passes a fake.
+ * The audio output of the cue: an `AudioContext` whose gain node the Mute toggle and the volume
+ * slider set (`createWebAudioOutput`). A test passes a fake.
  */
 export interface CueAudioOutput {
   /** The clock of the context, in seconds. */
@@ -62,15 +62,16 @@ export interface CueAudioOutput {
   readonly play: (samples: Float32Array<ArrayBuffer>, when: number) => CueVoice;
   /** Lets a suspended context run. Only a user gesture can do so in WebKit. */
   readonly resume: () => void;
-  readonly setMuted: (muted: boolean) => void;
+  /** Sets the gain of every burst, from 0 for silence to 1 for the level of the source. */
+  readonly setGain: (gain: number) => void;
   readonly close: () => void;
 }
 
 export interface PcmCueOptions {
   /** The absolute source time of `videoStartPts`, which is media time 0. */
   readonly videoStartSeconds: number;
-  /** Creates the audio output, at the first gesture or the first burst. */
-  readonly createOutput: (muted: boolean) => CueAudioOutput;
+  /** Creates the audio output at `gain`, at the first gesture or the first burst. */
+  readonly createOutput: (gain: number) => CueAudioOutput;
   readonly timers?: ScrubAudioTimers;
   /**
    * For MPEG-TS and Matroska: opens a PCM window of the audio lane at an absolute source time.
@@ -80,7 +81,8 @@ export interface PcmCueOptions {
     startSeconds: number,
     listener: WindowListener,
   ) => WindowSession;
-  readonly muted?: boolean;
+  /** The gain of the bursts (`CueAudioOutput.setGain`). 1 when absent. */
+  readonly gain?: number;
   /** The PCM that the cue keeps, in seconds. `PCM_KEEP_SECONDS` when absent. */
   readonly keepSeconds?: number;
 }
@@ -98,7 +100,8 @@ export interface PcmCue extends ScrubCue {
    * a gesture.
    */
   readonly prime: () => void;
-  readonly setMuted: (muted: boolean) => void;
+  /** Sets the gain of the bursts, now and for an output that the cue creates later. */
+  readonly setGain: (gain: number) => void;
   readonly destroy: () => void;
 }
 
@@ -173,7 +176,7 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
   /** The windows whose PCM the bound dropped. Their later pieces go nowhere. */
   const droppedKeys = new Set<number>();
   let output: CueAudioOutput | null = null;
-  let muted = options.muted ?? false;
+  let gain = options.gain ?? 1;
   let burst: Burst | null = null;
   let watchdog: number | null = null;
   let pending: PendingBurst | null = null;
@@ -197,7 +200,7 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
   const audio = (): CueAudioOutput | null => {
     if (output === null) {
       try {
-        output = options.createOutput(muted);
+        output = options.createOutput(gain);
       } catch {
         disable();
         return null;
@@ -646,9 +649,9 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
         audio()?.resume();
       }
     },
-    setMuted: (value) => {
-      muted = value;
-      output?.setMuted(muted);
+    setGain: (value) => {
+      gain = value;
+      output?.setGain(gain);
     },
     destroy: () => {
       if (destroyed) {

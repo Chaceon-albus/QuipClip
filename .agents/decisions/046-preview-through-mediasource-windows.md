@@ -628,8 +628,10 @@ the source has an audio stream. On MPEG-TS and MKV it runs its own `-ss` windows
 requests one when its target lies outside the PCM that it holds. The output is about 96 KB/s.
 
 The page keeps the PCM of the last windows. It plays each burst with an `AudioBufferSourceNode`
-that starts at the sample of the target, through a gain node that the Mute toggle sets. These
-rules of ADR 019 keep their behaviour:
+that starts at the sample of the target, through a gain node that the Mute toggle sets.
+(Changed on 2026-11-05: the volume slider of ADR 019 also sets that node. The gain is 0 while
+mute is on. Otherwise it is the volume, from 0 to 1.) These rules of ADR 019 keep their
+behaviour:
 
 - the burst length of 50 ms
 - the continuation of a forward request

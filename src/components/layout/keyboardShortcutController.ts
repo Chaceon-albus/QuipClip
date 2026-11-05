@@ -68,6 +68,26 @@ export const ESCAPE_OWNER_SELECTOR = `[${RESIZING_TIMELINE_ATTRIBUTE}]`;
 export const SPLITTER_KEYS: readonly string[] = ["ArrowUp", "ArrowDown", "Home", "End"];
 
 /**
+ * Selector for a slider that sets a value with its own keys, such as the volume slider of the
+ * transport bar. The slider carries this marker. A `role="slider"` alone does not match: the
+ * seek surface of the timeline has that role, and the layer serves its keys wherever the focus
+ * is (ADR 021).
+ */
+export const VALUE_SLIDER_SELECTOR = "[data-value-slider]";
+
+/** The keys that a focused value slider owns: the keys of the ARIA slider pattern. */
+export const VALUE_SLIDER_KEYS: readonly string[] = [
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+];
+
+/**
  * The marker of a container that the browser can scroll with `ArrowUp` and `ArrowDown`: a
  * container that scrolls and that the user can focus, or that holds a control the user can
  * focus. While the focus is inside the closest marked container and that container overflows
@@ -205,6 +225,26 @@ export function isSplitterKey(event: ShortcutKeyEvent): boolean {
 }
 
 /**
+ * Determines whether a focused value slider owns this key press (`VALUE_SLIDER_KEYS`), with no
+ * `Ctrl`, `Cmd` or `Alt` held. `Shift` is allowed: the slider takes a larger step for `Shift`
+ * and an arrow.
+ *
+ * The rule is the one of the splitter (`isSplitterKey`). Without it, `ArrowLeft` on the volume
+ * slider would step the playhead, and the slider could not be set from the keyboard. Every
+ * other key keeps its meaning: `Space` still plays while the slider has the focus.
+ */
+export function isValueSliderKey(event: ShortcutKeyEvent): boolean {
+  return (
+    VALUE_SLIDER_KEYS.includes(event.key) &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    event.target !== null &&
+    event.target.hasAncestorMatching(VALUE_SLIDER_SELECTOR)
+  );
+}
+
+/**
  * Determines whether the target of the key press owns `ArrowUp` or `ArrowDown`, whatever the
  * modifiers: the target is inside a menu trigger (`MENU_TRIGGER_SELECTOR`), or inside a marked
  * container (`SCROLL_KEYS_SELECTOR`) whose content is taller than the container.
@@ -282,8 +322,9 @@ export function isGestureEscape(
  * go to another handler that the user cannot see.
  *
  * A key press that matches no binding of the table is not claimed. ArrowUp and ArrowDown go to
- * the edit points, except inside a dialog, a menu, a list box, a focused splitter, a menu
- * trigger and a marked scroll container, which keep them (`isVerticalArrowOwned`).
+ * the edit points, except inside a dialog, a menu, a list box, a focused splitter, a focused
+ * value slider, a menu trigger and a marked scroll container, which keep them
+ * (`isVerticalArrowOwned`).
  */
 export function resolveShortcut(
   event: ShortcutKeyEvent,
@@ -292,6 +333,7 @@ export function resolveShortcut(
   if (
     isShortcutSuppressed(event) ||
     isSplitterKey(event) ||
+    isValueSliderKey(event) ||
     isVerticalArrowOwned(event) ||
     isGestureEscape(event)
   ) {

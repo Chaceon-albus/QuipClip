@@ -14,9 +14,9 @@
  * clock advances only while the element really plays, so a slow start does not shorten the
  * burst. A burst therefore plays 50 milliseconds of media time, and a held key extends it.
  *
- * The controller never reads or writes `muted`. The mute toggle of the transport bar sets it
- * on the element, so a muted cue still seeks, plays and keeps its timers and its continuation
- * rule, and only its sound is silent.
+ * The controller never reads or writes `muted` or `volume`. The mute toggle and the volume
+ * slider of the transport bar set them on the element, so a muted cue still seeks, plays and
+ * keeps its timers and its continuation rule, and only its sound changes.
  */
 
 /** Burst duration in seconds (50 ms) of media time, approximating one frame duration to provide an audible cue. */

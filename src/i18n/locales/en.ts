@@ -296,6 +296,10 @@ export const en = {
       // A toggle. The name stays the same while it is on, and the button reports the state.
       // It silences the preview and the frame step sound, not the export.
       mute: "Mute Audio",
+      // The accessible name of the slider beside the mute toggle, and the first line of its
+      // tooltip. The second line is the level as a percentage, such as "75%". It sets the
+      // level of the preview and the frame step sound, not of the export.
+      volume: "Preview Volume",
     },
     // The descriptions of Mark In, Mark Out and Finish. Each is the second line of its
     // tooltip, and assistive technology reads it on the button. `inPending` shows on Mark In
@@ -308,6 +312,9 @@ export const en = {
     // pending: the first while the playhead is after the In point, where a press makes a
     // segment that ends at the playhead, and the second while it is at or before the In point,
     // where a press drops the In point.
+    // `volumeMuted` is the value of the volume slider while mute is on: the second line of its
+    // tooltip, and the value that assistive technology reads on the slider. {{level}} is the
+    // volume that unmute gives back, as a percentage such as "75%".
     state: {
       inPending: "An In point is pending. Mark an Out point to make a segment.",
       finishesSegment: "Finishes this segment and marks an In point at the playhead.",
@@ -316,6 +323,7 @@ export const en = {
         "Makes a segment from the pending In point to the playhead.",
       finishDiscardsIn:
         "Discards the pending In point. Move the playhead after it to make a segment.",
+      volumeMuted: "{{level}}, muted",
     },
     // The label above the duration at the right end of the transport bar. `segment` names the
     // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the

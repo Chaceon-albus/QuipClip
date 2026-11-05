@@ -10,8 +10,6 @@ import {
   SquareCheck,
   Trash2,
   Undo2,
-  Volume2,
-  VolumeX,
 } from "lucide-react";
 import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
@@ -30,10 +28,6 @@ import {
 import { type MediaStoreState } from "@/features/media";
 import { hasNominalFrameRate } from "@/features/playback";
 import {
-  previewMutePreferenceStore,
-  usePreviewMutePreference,
-} from "@/features/settings/previewMutePreference";
-import {
   canMarkIn,
   canMarkOut,
   canSplitCurrentSegment,
@@ -49,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { FrameStepButton } from "./FrameStepButton";
 import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
 import { SegmentDurationReadout } from "./SegmentDurationReadout";
+import { VolumeControl } from "./VolumeControl";
 import {
   presentEditDisabledReason,
   presentFinishSegmentDescription,
@@ -88,9 +83,6 @@ const selectDeleteSelectedSegments = (s: TimelineStoreState) =>
   s.deleteSelectedSegments;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
-
-// The preference action never changes, so it is read once.
-const { toggleMuted } = previewMutePreferenceStore.getState();
 
 /** Each glyph of the Play button: one grid cell, and the cross-fade of the two states. */
 const PLAY_GLYPH_CLASS =
@@ -284,8 +276,6 @@ export function TransportBar() {
   const markOutStateText = markOutFinishes === null ? null : t(markOutFinishes);
   const finishStateText = finishDescription === null ? null : t(finishDescription);
 
-  const isMuted = usePreviewMutePreference((s) => s.muted);
-
   // Every key name comes from the binding table (ADR 026).
   const undoShortcut = shortcutOf("undo");
   const redoShortcut = shortcutOf("redo");
@@ -337,15 +327,16 @@ export function TransportBar() {
    * The bar is three columns. The play group sits in the centre column, so Play is in the
    * middle of the window at every width. The left column holds the history and the mark
    * groups, packed against the play group, and the right column holds the segment group and
-   * the mute toggle, packed the same way, and the segment duration at its right end. The
-   * duration takes the free space of that column, so it moves no other control when it shows
-   * or hides. The two outer columns are one fraction each, so they are always of equal width,
-   * which is what keeps the centre column centred. At the minimum window width of 1024 px,
-   * each outer column is 410 px wide. The left one holds 375 px of controls in English and
-   * 388 px in Chinese. The right one holds 190 px of controls, and 320 px with the widest
-   * duration label, "New segment duration", in English, and 292 px in Chinese. A column never
-   * shrinks below its content, so a longer label moves the play group off the centre and does
-   * not make the controls overlap.
+   * the mute toggle with the volume slider, packed the same way, and the segment duration at
+   * its right end. The duration takes the free space of that column, so it moves no other
+   * control when it shows or hides. The two outer columns are one fraction each, so they are
+   * always of equal width, which is what keeps the centre column centred. At the minimum
+   * window width of 1024 px, each outer column is 410 px wide. The left one holds 375 px of
+   * controls in English and 388 px in Chinese. The right one holds 274 px of controls, and
+   * 404 px with the widest duration label, "New segment duration", in English, and 376 px in
+   * Chinese. The volume slider takes 84 px of that, its 80 px and the 4 px gap after the
+   * toggle. A column never shrinks below its content, so a longer label moves the play group
+   * off the centre and does not make the controls overlap.
    *
    * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
    * takes the 40 px row size, with the flex direction and the padding changed for the stack,
@@ -725,34 +716,9 @@ export function TransportBar() {
 
         <Separator orientation="vertical" className="h-8 bg-border" />
 
-        {/* Group 5: Mute. A preference and not an edit action, so it needs no source and is
-            never disabled. The name stays the same in both states, and aria-pressed says
-            whether it is on, so a screen reader does not hear a name that changes with the
-            state. The glyph and the fill show the state to the eye. While it is on, hover
-            goes one step past the rest fill, and press mixes the hover fill 5% toward the
-            foreground, the press of the secondary variant, so a press still shows. It has no
-            key: the free conventional key of media players, M, is the marker key of the
-            editors that ADR 026 follows. */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="tool-ghost"
-              size="tool-icon"
-              onMouseDown={preventFocusOnMouseDown}
-              onClick={toggleMuted}
-              className="aria-pressed:bg-muted aria-pressed:text-foreground aria-pressed:hover:bg-secondary-hover aria-pressed:active:bg-[color-mix(in_oklab,var(--secondary-hover),var(--foreground)_5%)]"
-              aria-label={t("transport.action.mute")}
-              aria-pressed={isMuted}
-            >
-              {isMuted ? (
-                <VolumeX className="size-4" />
-              ) : (
-                <Volume2 className="size-4" />
-              )}
-            </Button>
-          </TooltipTrigger>
-          <ShortcutTooltipContent label={t("transport.action.mute")} />
-        </Tooltip>
+        {/* Group 5: Mute and volume. A preference and not an edit action, so it needs no
+            source and is never disabled (VolumeControl). */}
+        <VolumeControl />
 
         {/* Group 6: The duration of the segment that is being edited, at the right end of
             the bar (SegmentDurationReadout). */}

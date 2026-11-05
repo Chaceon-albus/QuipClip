@@ -54,6 +54,8 @@ import { ANCHOR_MEDIA_TIME } from "@/features/playback/mse/timeline";
 import { createWebAudioOutput } from "@/features/playback/mse/webAudio";
 import { openPreviewWindow } from "@/features/playback/mse/windowClient";
 import {
+  previewCueGain,
+  previewElementVolume,
   previewMutePreferenceStore,
   usePreviewMutePreference,
 } from "@/features/settings/previewMutePreference";
@@ -237,11 +239,11 @@ function createPreviewMediaSourceOwner(pane: MediaSourcePaneReports): MediaSourc
   return createMediaSourceOwner({
     createController: (element, source, events) =>
       createMseController(element, source, BROWSER_MSE_ENVIRONMENT, events),
-    createCue: (source, muted) =>
+    createCue: (source, gain) =>
       createPcmCue({
         videoStartSeconds: source.videoStartSeconds,
         createOutput: createWebAudioOutput,
-        muted,
+        gain,
         // On FLV the PCM comes with the video windows. MPEG-TS and Matroska read their own PCM
         // windows of the audio lane.
         openPcmWindow:
@@ -436,6 +438,11 @@ export function PreviewPane() {
   // first play. It changes only what the user hears: the elements still seek, play and report
   // their events, so the calibration, the seeks and the cue of ADR 019 run as before.
   const isMuted = usePreviewMutePreference((s) => s.muted);
+  // The volume slider of the transport bar. It too changes only what the user hears. React has
+  // no `volume` attribute, so each ref callback below sets the property on its new element
+  // before the first play, and the effect below sets it on the elements that exist when it
+  // changes.
+  const volumePercent = usePreviewMutePreference((s) => s.volumePercent);
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   // The key of the media elements and of the components that follow the video element. A new
@@ -534,10 +541,24 @@ export function PreviewPane() {
   // after the store attaches the element, and stops them when the element leaves the tree.
   const mediaSourceOwnerRef = useRef<MediaSourceOwner | null>(null);
 
-  // The cue of a MediaSource source follows the mute toggle, as the elements do.
+  // The hidden element of the frame step cue (ADR 019) that the scrub ref callback below holds,
+  // so the volume reaches it.
+  const scrubAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // The elements follow the volume, and the cue of a MediaSource source follows the mute
+  // toggle and the volume through its gain (ADR 046).
   useEffect(() => {
-    mediaSourceOwnerRef.current?.setMuted(isMuted);
-  }, [isMuted]);
+    const volume = previewElementVolume(volumePercent);
+    if (videoRef.current) {
+      videoRef.current.volume = volume;
+    }
+    if (scrubAudioRef.current) {
+      scrubAudioRef.current.volume = volume;
+    }
+    mediaSourceOwnerRef.current?.setGain(
+      previewCueGain({ muted: isMuted, volumePercent }),
+    );
+  }, [isMuted, volumePercent]);
 
   // The wait follows the deferred navigation of the store, and it counts only while the
   // document is visible, because a hidden window presents no frames.
@@ -706,6 +727,8 @@ export function PreviewPane() {
         }
         return;
       }
+      const audioLevel = previewMutePreferenceStore.getState();
+      element.volume = previewElementVolume(audioLevel.volumePercent);
       // A MediaSource source starts its controller after the store attached the element, so
       // the first reports find the attachment (ADR 046).
       const current = attachedMediaStore.getState().media;
@@ -744,7 +767,7 @@ export function PreviewPane() {
             ),
             hasAudio: current.probe.audio !== null,
           },
-          previewMutePreferenceStore.getState().muted,
+          previewCueGain(audioLevel),
         );
       }
     },
@@ -765,10 +788,17 @@ export function PreviewPane() {
       return (node: HTMLAudioElement | null) => {
         if (node) {
           ownedElement = node;
+          scrubAudioRef.current = node;
+          node.volume = previewElementVolume(
+            previewMutePreferenceStore.getState().volumePercent,
+          );
           scrubAudioController.attach(node);
         } else {
           const elToDetach = ownedElement;
           ownedElement = null;
+          if (scrubAudioRef.current === elToDetach) {
+            scrubAudioRef.current = null;
+          }
           if (elToDetach) {
             scrubAudioController.detach(elToDetach);
           }

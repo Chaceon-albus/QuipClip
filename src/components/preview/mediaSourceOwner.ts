@@ -109,10 +109,10 @@ export interface MediaSourceOwnerDependencies {
     events: MseControllerEvents,
   ) => MseController;
   /**
-   * Creates the cue of a source. On MPEG-TS and Matroska it reads its own PCM windows of the
-   * audio lane.
+   * Creates the cue of a source at the gain of its bursts (`PcmCue.setGain`). On MPEG-TS and
+   * Matroska it reads its own PCM windows of the audio lane.
    */
-  readonly createCue: (source: MseSource, muted: boolean) => PcmCue;
+  readonly createCue: (source: MseSource, gain: number) => PcmCue;
   readonly setScrubCue: (cue: ScrubCue | null) => void;
   /**
    * Calls `callback` at each pointer and key gesture of the window, and returns a function that
@@ -136,11 +136,12 @@ export interface MediaSourceOwner {
   readonly attach: (
     element: HTMLVideoElement,
     target: MediaSourceTarget,
-    muted: boolean,
+    gain: number,
   ) => void;
   /** Stops the MediaSource of `element`, if the owner holds it. */
   readonly detach: (element: HTMLVideoElement) => void;
-  readonly setMuted: (muted: boolean) => void;
+  /** Sets the gain of the cue of the element that the owner holds. */
+  readonly setGain: (gain: number) => void;
   /** The element that the owner holds, or null. */
   readonly element: () => HTMLVideoElement | null;
 }
@@ -207,7 +208,7 @@ export function createMediaSourceOwner(
   };
 
   return {
-    attach: (element, target, muted) => {
+    attach: (element, target, gain) => {
       if (owned?.element === element) {
         return;
       }
@@ -216,7 +217,7 @@ export function createMediaSourceOwner(
       // The cue needs PCM, which a source without audio, or with its audio left out, lacks.
       const cue =
         target.hasAudio && source.audio !== "omit"
-          ? dependencies.createCue(source, muted)
+          ? dependencies.createCue(source, gain)
           : null;
       let current: Owned | null = null;
       const isCurrent = (): boolean => current !== null && owned === current;
@@ -353,8 +354,8 @@ export function createMediaSourceOwner(
         release();
       }
     },
-    setMuted: (muted) => {
-      owned?.cue?.setMuted(muted);
+    setGain: (gain) => {
+      owned?.cue?.setGain(gain);
     },
     element: () => owned?.element ?? null,
   };

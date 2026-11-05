@@ -200,6 +200,7 @@ export const zhCN: TranslationCatalog = {
       previousStep: "后退一帧",
       nextStep: "前进一帧",
       mute: "静音",
+      volume: "预览音量",
     },
     state: {
       inPending: "已有待定的入点。请标记出点以生成片段。",
@@ -207,6 +208,7 @@ export const zhCN: TranslationCatalog = {
       finishesAtOut: "在出点处结束当前片段。",
       finishCompletesSegment: "生成从待定入点到播放头的片段。",
       finishDiscardsIn: "放弃待定的入点。将播放头移到入点之后即可生成片段。",
+      volumeMuted: "{{level}}，已静音",
     },
     segmentDuration: {
       segment: "片段 {{index}} 时长",

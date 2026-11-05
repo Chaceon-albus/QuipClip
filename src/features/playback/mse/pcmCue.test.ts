@@ -47,7 +47,7 @@ class FakeVoice implements CueVoice {
 
 class FakeOutput implements CueAudioOutput {
   time = NOW;
-  muted = false;
+  gain = 1;
   closed = false;
   resumes = 0;
   voices: FakeVoice[] = [];
@@ -60,8 +60,8 @@ class FakeOutput implements CueAudioOutput {
   resume = (): void => {
     this.resumes++;
   };
-  setMuted = (muted: boolean): void => {
-    this.muted = muted;
+  setGain = (gain: number): void => {
+    this.gain = gain;
   };
   close = (): void => {
     this.closed = true;
@@ -115,9 +115,9 @@ function setup(options: Partial<PcmCueOptions> = {}) {
   let created = 0;
   const cue = createPcmCue({
     videoStartSeconds: START,
-    createOutput: (muted) => {
+    createOutput: (gain) => {
       created++;
-      output.muted = muted;
+      output.gain = gain;
       return output;
     },
     timers,
@@ -369,12 +369,32 @@ describe("createPcmCue", () => {
     });
 
     it("silences the bursts through the gain node", () => {
-      const { cue, output } = setup({ muted: true });
+      const { cue, output } = setup({ gain: 0 });
       cue.addPcm(1, 100, pcm(1));
       cue.request(0.2, 1);
-      expect(output.muted).toBe(true);
-      cue.setMuted(false);
-      expect(output.muted).toBe(false);
+      expect(output.gain).toBe(0);
+      cue.setGain(1);
+      expect(output.gain).toBe(1);
+    });
+
+    it("plays at the full level when no gain is given", () => {
+      const { cue, output } = setup();
+      output.gain = Number.NaN;
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
+      expect(output.gain).toBe(1);
+    });
+
+    it("sets the level of the bursts, and gives a later output the last level", () => {
+      const { cue, output, created } = setup({ gain: 0.5 });
+      cue.setGain(0.3);
+      expect(created()).toBe(0);
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
+      expect(created()).toBe(1);
+      expect(output.gain).toBe(0.3);
+      cue.setGain(0.8);
+      expect(output.gain).toBe(0.8);
     });
 
     it("stops the burst and the wait on stop, and closes everything on destroy", () => {

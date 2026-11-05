@@ -69,7 +69,7 @@ function fakeCue(): PcmCue & { added: unknown[][] } {
     endPcm: vi.fn(),
     ensure: vi.fn(),
     prime: vi.fn(),
-    setMuted: vi.fn(),
+    setGain: vi.fn(),
     destroy: vi.fn(),
   };
 }
@@ -119,12 +119,10 @@ function setup(repairsLateSeeks = true) {
       controllers.push({ element, source, events, destroy });
       return { destroy, frameStarts: () => [1, 1.05] };
     },
-    createCue: (source, muted) => {
+    createCue: (source, gain) => {
       void source;
       const cue = fakeCue();
-      if (muted) {
-        cue.setMuted(true);
-      }
+      cue.setGain(gain);
       cues.push(cue);
       return cue;
     },
@@ -167,21 +165,21 @@ describe("createMediaSourceOwner", () => {
   it("starts the controller and installs the cue of the element", () => {
     const { owner, controllers, cues, installed } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     expect(controllers).toHaveLength(1);
     expect(controllers[0]?.element).toBe(element);
     expect(controllers[0]?.source).toBe(SOURCE);
     expect(installed).toEqual([cues[0]]);
     expect(owner.element()).toBe(element);
 
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     expect(controllers).toHaveLength(1);
   });
 
   it("gives the store the frames of the controller, and takes them back when it stops", () => {
     const { owner, store } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     expect(store.syncFrameTable).toHaveBeenCalledTimes(1);
     const [key, given, table] = store.syncFrameTable.mock.calls[0] as [
       string,
@@ -197,12 +195,8 @@ describe("createMediaSourceOwner", () => {
 
   it("starts no cue for a source without audio or with its audio left out", () => {
     const { owner, cues, installed } = setup();
-    owner.attach(fakeElement(), { ...TARGET, hasAudio: false }, false);
-    owner.attach(
-      fakeElement(),
-      { ...TARGET, source: { ...SOURCE, audio: "omit" } },
-      false,
-    );
+    owner.attach(fakeElement(), { ...TARGET, hasAudio: false }, 1);
+    owner.attach(fakeElement(), { ...TARGET, source: { ...SOURCE, audio: "omit" } }, 1);
     expect(cues).toHaveLength(0);
     expect(installed).toEqual([]);
   });
@@ -212,7 +206,7 @@ describe("createMediaSourceOwner", () => {
     try {
       const { owner, controllers, store } = setup();
       const element = Object.assign(fakeElement(), { seeking: true });
-      owner.attach(element, TARGET, false);
+      owner.attach(element, TARGET, 1);
       controllers[0]?.events.onSeekDataArrived?.(64.533, true);
       vi.advanceTimersByTime(500);
       element.seeking = false;
@@ -241,7 +235,7 @@ describe("createMediaSourceOwner", () => {
 
       // Another web view lands right, and a released element gets none.
       const other = setup(false);
-      other.owner.attach(fakeElement(), TARGET, false);
+      other.owner.attach(fakeElement(), TARGET, 1);
       other.controllers[0]?.events.onSeekDataArrived?.(64.533, true);
       vi.advanceTimersByTime(2000);
       expect(other.store.repairSeek).not.toHaveBeenCalled();
@@ -257,7 +251,7 @@ describe("createMediaSourceOwner", () => {
   it("connects the reports to the store and the pane", () => {
     const { owner, controllers, cues, store, pane, warn } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     const events = controllers[0]?.events;
     events?.onExpectedFirstFrame(0.08);
     expect(store.syncExpectedFirstFrame).toHaveBeenCalledWith("live", element, 0.08);
@@ -292,7 +286,7 @@ describe("createMediaSourceOwner", () => {
   it("seeks over a gap once the store is ready", () => {
     const { owner, controllers, store, setReady } = setup();
     setReady(false);
-    owner.attach(fakeElement(), TARGET, false);
+    owner.attach(fakeElement(), TARGET, 1);
     controllers[0]?.events.onGap(0.08, 0);
     expect(store.seekOverGap).not.toHaveBeenCalled();
     setReady(true);
@@ -303,7 +297,7 @@ describe("createMediaSourceOwner", () => {
     const { owner, controllers, store, setReady } = setup();
     setReady(false);
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     controllers[0]?.events.onGap(0.08, 0);
     // The seek of a reload ran first.
     element.currentTime = 120;
@@ -314,7 +308,7 @@ describe("createMediaSourceOwner", () => {
   it("seeks back over a gap for an element that waits after its start", () => {
     const { owner, controllers, store } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     element.currentTime = 33.98;
     controllers[0]?.events.onGap(29.749, 33.98);
     expect(store.seekOverGap).toHaveBeenCalledWith(29.749);
@@ -324,7 +318,7 @@ describe("createMediaSourceOwner", () => {
     const { owner, controllers, store, setReady } = setup();
     setReady(false);
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     controllers[0]?.events.onGap(0.08, 0);
     // The seek of a reload landed just after the first frame.
     element.currentTime = 0.09;
@@ -340,7 +334,7 @@ describe("createMediaSourceOwner", () => {
     const { owner, controllers, store, setReady } = setup();
     setReady(false);
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     controllers[0]?.events.onGap(0.08, 0);
     owner.detach(element);
     setReady(true);
@@ -350,7 +344,7 @@ describe("createMediaSourceOwner", () => {
   it("stops everything when the element leaves, and ignores the reports of a stopped one", () => {
     const { owner, controllers, cues, installed, store } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     owner.detach(fakeElement());
     expect(controllers[0]?.destroy).not.toHaveBeenCalled();
 
@@ -365,8 +359,8 @@ describe("createMediaSourceOwner", () => {
 
   it("stops the previous element when another one attaches", () => {
     const { owner, controllers } = setup();
-    owner.attach(fakeElement(), TARGET, false);
-    owner.attach(fakeElement(), TARGET, false);
+    owner.attach(fakeElement(), TARGET, 1);
+    owner.attach(fakeElement(), TARGET, 1);
     expect(controllers[0]?.destroy).toHaveBeenCalledTimes(1);
     expect(controllers).toHaveLength(2);
   });
@@ -374,7 +368,7 @@ describe("createMediaSourceOwner", () => {
   it("asks for the PCM at each seek target on MPEG-TS and Matroska only", () => {
     const { owner, cues } = setup();
     const ts = fakeElement();
-    owner.attach(ts, { ...TARGET, source: { ...SOURCE, container: "mpegTs" } }, false);
+    owner.attach(ts, { ...TARGET, source: { ...SOURCE, container: "mpegTs" } }, 1);
     ts.currentTime = 42;
     ts.fire("seeking");
     expect(cues[0]?.ensure).toHaveBeenCalledWith(42);
@@ -383,7 +377,7 @@ describe("createMediaSourceOwner", () => {
     expect(cues[0]?.ensure).toHaveBeenCalledTimes(1);
 
     const flv = fakeElement();
-    owner.attach(flv, TARGET, false);
+    owner.attach(flv, TARGET, 1);
     flv.fire("seeking");
     expect(cues[1]?.ensure).not.toHaveBeenCalled();
   });
@@ -391,22 +385,22 @@ describe("createMediaSourceOwner", () => {
   it("starts the AudioContext of the cue at each gesture while the cue is installed", () => {
     const { owner, cues, gesture, gestureCount } = setup();
     const element = fakeElement();
-    owner.attach(element, TARGET, false);
+    owner.attach(element, TARGET, 1);
     gesture();
     expect(cues[0]?.prime).toHaveBeenCalledTimes(1);
     owner.detach(element);
     expect(gestureCount()).toBe(0);
 
-    owner.attach(fakeElement(), { ...TARGET, hasAudio: false }, false);
+    owner.attach(fakeElement(), { ...TARGET, hasAudio: false }, 1);
     expect(gestureCount()).toBe(0);
   });
 
-  it("passes the mute state to the cue", () => {
+  it("passes the gain of the mute toggle and the volume to the cue", () => {
     const { owner, cues } = setup();
-    owner.attach(fakeElement(), TARGET, true);
-    expect(cues[0]?.setMuted).toHaveBeenCalledWith(true);
-    owner.setMuted(false);
-    expect(cues[0]?.setMuted).toHaveBeenLastCalledWith(false);
+    owner.attach(fakeElement(), TARGET, 0);
+    expect(cues[0]?.setGain).toHaveBeenCalledWith(0);
+    owner.setGain(0.4);
+    expect(cues[0]?.setGain).toHaveBeenLastCalledWith(0.4);
   });
 });
 
@@ -462,7 +456,7 @@ describe("the seek over a gap, with the playback store", () => {
     const { store, owner, controllers, target } = setupWithStore();
     const video = element();
     store.getState().attach(FLV, video);
-    owner.attach(video, target, false);
+    owner.attach(video, target, 1);
     controllers[0]?.onGap(0.08, 0);
     expect(video.currentTime).toBe(0);
 
@@ -476,7 +470,7 @@ describe("the seek over a gap, with the playback store", () => {
     const { store, owner, controllers, target } = setupWithStore();
     const video = element();
     store.getState().attach(FLV, video);
-    owner.attach(video, target, false);
+    owner.attach(video, target, 1);
     video.readyState = 1;
     store.getState().syncReady(key, video);
     store.getState().syncPresentedFrame(key, 0, 1, video);
@@ -515,7 +509,7 @@ describe("the seek over a gap, with the playback store", () => {
     // of the new element. The metadata then runs the seek of the reload at once.
     const next = element();
     store.getState().attach(FLV, next);
-    owner.attach(next, target, false);
+    owner.attach(next, target, 1);
     controllers[0]?.onGap(0.08, 0);
     next.readyState = 1;
     store.getState().syncReady(key, next);

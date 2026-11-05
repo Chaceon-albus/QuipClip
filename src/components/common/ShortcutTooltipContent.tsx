@@ -17,7 +17,10 @@ interface ShortcutTooltipContentProps extends Omit<
    * (`ShortcutLabel.chips`), or null when the action has no key.
    */
   readonly keys?: string | readonly string[] | null;
-  /** A second, muted line: what the user must do first, or null. */
+  /**
+   * A second, muted line: what the user must do first, or the value of a control that has one,
+   * such as the level of the volume slider. Null for none.
+   */
   readonly reason?: string | null;
 }
 

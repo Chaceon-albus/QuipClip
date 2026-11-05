@@ -1,6 +1,6 @@
 /**
  * The Web Audio output of the scrub cue of a MediaSource source (ADR 046): an `AudioContext`
- * with a gain node that the Mute toggle sets.
+ * with a gain node that the Mute toggle and the volume slider set (`previewCueGain`).
  */
 
 import { PCM_SAMPLE_RATE, type CueAudioOutput } from "./pcmCue";
@@ -8,11 +8,13 @@ import { PCM_SAMPLE_RATE, type CueAudioOutput } from "./pcmCue";
 /**
  * Creates the output. The cue calls it at the first pointer or key gesture, or at the first
  * burst, which a drag can request outside a gesture.
+ *
+ * @param level The gain of the bursts, from 0 for silence to 1 for the level of the source.
  */
-export function createWebAudioOutput(muted: boolean): CueAudioOutput {
+export function createWebAudioOutput(level: number): CueAudioOutput {
   const context = new AudioContext();
   const gain = context.createGain();
-  gain.gain.value = muted ? 0 : 1;
+  gain.gain.value = level;
   gain.connect(context.destination);
   return {
     currentTime: () => context.currentTime,
@@ -46,8 +48,8 @@ export function createWebAudioOutput(muted: boolean): CueAudioOutput {
         context.resume().catch(() => undefined);
       }
     },
-    setMuted: (value) => {
-      gain.gain.value = value ? 0 : 1;
+    setGain: (value) => {
+      gain.gain.value = value;
     },
     close: () => {
       context.close().catch(() => undefined);

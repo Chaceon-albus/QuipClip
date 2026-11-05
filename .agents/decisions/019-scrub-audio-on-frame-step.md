@@ -192,6 +192,27 @@ The controller does not read it, so a muted burst still seeks, plays, starts bot
 applies the continuation rule. The calibration of ADR 003 and the export do not change. The
 toggle has no key, because `M` adds a marker in the editors that ADR 026 follows.
 
+(Changed on 2026-11-05.) The two paragraphs above say that there is no volume control. That
+is no longer true. A volume slider now stands beside the Mute toggle. It sets the
+`volume` property of the preview `<video>` and of the cue element, from 0 to 100 percent of
+the level of the source. The preview never makes the sound louder than the source. Each
+element takes the volume when it is created, before the first play and the first burst. The
+volume persists in the web view store under `quipclip.preview_volume`, as a whole number of
+percent. The default is 100.
+
+Mute and the volume are two values, and these rules join them:
+
+- Mute keeps the volume, so a second press of the toggle gives back the level from before.
+- The preview is silent while mute is on or while the volume is 0. The toggle shows both
+  states as pressed.
+- A move of the slider to a level above 0 turns mute off.
+- A press of the toggle that ends the silence at a volume of 0 also sets the volume to 100, so
+  that press always gives sound.
+
+The volume, like mute, changes only the sound. The controller does not read it. The
+calibration and the export do not change. The slider moves in steps of 5 percent. `Page Up`,
+`Page Down`, and `Shift` with an arrow move it 10 percent.
+
 The application does not show an error when the cue fails. An element error, or a rejected
 `play` promise that is not an `AbortError`, disables the controller for that source. The
 cue helps the user find a frame. It is not an edit action, and a message about it would

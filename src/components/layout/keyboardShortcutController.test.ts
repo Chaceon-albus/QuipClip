@@ -10,10 +10,13 @@ import {
   SCROLL_KEYS_SELECTOR,
   SPLITTER_KEYS,
   SPLITTER_SELECTOR,
+  VALUE_SLIDER_KEYS,
+  VALUE_SLIDER_SELECTOR,
   VERTICAL_ARROW_KEYS,
   isGestureEscape,
   isShortcutSuppressed,
   isSplitterKey,
+  isValueSliderKey,
   isVerticalArrowOwned,
   resolveShortcut,
   type ShortcutContext,
@@ -1364,6 +1367,99 @@ describe("keyboardShortcutController", () => {
     it("does not own a splitter key when the target is not a splitter", () => {
       expect(isSplitterKey(createKeyEvent({ key: "Home" }))).toBe(false);
       expect(isSplitterKey(createKeyEvent({ key: "Home", target: null }))).toBe(false);
+    });
+  });
+
+  describe("a focused value slider", () => {
+    // The target answers the value slider selector only, as the focused thumb of the volume
+    // slider does: its root carries the marker, inside no dialog, menu or list box.
+    const sliderTarget = createTarget({
+      tagName: "SPAN",
+      hasAncestorMatching: (selector) => selector === VALUE_SLIDER_SELECTOR,
+    });
+    // The seek surface of the timeline has role="slider" and no marker.
+    const seekSurfaceTarget = createTarget({
+      tagName: "DIV",
+      hasAncestorMatching: (selector) =>
+        selector.split(",").some((part) => part.trim() === '[role="slider"]'),
+    });
+
+    it("names the value slider marker, and not every slider", () => {
+      expect(VALUE_SLIDER_SELECTOR).toBe("[data-value-slider]");
+      expect(VALUE_SLIDER_SELECTOR).not.toContain("role");
+      expect(VALUE_SLIDER_KEYS).toEqual([
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+      ]);
+      expect(sliderTarget.hasAncestorMatching(KEYBOARD_OWNER_SELECTOR)).toBe(false);
+    });
+
+    it("keeps the keys of the ARIA slider pattern for the slider, with and without Shift", () => {
+      for (const key of VALUE_SLIDER_KEYS) {
+        for (const shiftKey of [false, true]) {
+          const event = createKeyEvent({ key, shiftKey, target: sliderTarget });
+          expect(isValueSliderKey(event)).toBe(true);
+          expect(resolveShortcut(event, allAvailable)).toEqual(NOT_CLAIMED);
+          expect(resolveShortcut({ ...event, repeat: true }, allAvailable)).toEqual(
+            NOT_CLAIMED,
+          );
+        }
+      }
+    });
+
+    it("keeps every other key of the table while the slider has the focus", () => {
+      for (const platform of PLATFORMS) {
+        for (const binding of SHORTCUT_BINDINGS) {
+          if (!bindingAppliesToPlatform(binding, platform)) {
+            continue;
+          }
+          const event = eventForBinding(binding, platform, { target: sliderTarget });
+          if (isValueSliderKey(event)) {
+            continue;
+          }
+          expect(resolveShortcut(event, contextWith("all", platform))).toEqual({
+            claimed: true,
+            action: binding.action,
+          });
+        }
+      }
+    });
+
+    it("still plays with Space while the slider has the focus", () => {
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: " ", target: sliderTarget }),
+          allAvailable,
+        ),
+      ).toEqual({ claimed: true, action: "togglePlayback" });
+    });
+
+    it("does not own a slider key with Ctrl, Cmd or Alt", () => {
+      for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+        const event = createKeyEvent({
+          key: "ArrowLeft",
+          target: sliderTarget,
+          [modifier]: true,
+        });
+        expect(isValueSliderKey(event)).toBe(false);
+      }
+    });
+
+    it("leaves the keys of the timeline seek surface to the layer", () => {
+      for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) {
+        const event = createKeyEvent({ key, target: seekSurfaceTarget });
+        expect(isValueSliderKey(event)).toBe(false);
+        expect(resolveShortcut(event, allAvailable).claimed).toBe(true);
+      }
+      expect(isValueSliderKey(createKeyEvent({ key: "ArrowLeft", target: null }))).toBe(
+        false,
+      );
     });
   });
 
