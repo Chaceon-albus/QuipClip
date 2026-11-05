@@ -596,7 +596,9 @@ export const en = {
       origin: {
         path: "Found in a folder in PATH.",
         pathMac: "Found in a folder in PATH or in a standard Homebrew folder.",
-        appData: "Found in the bin folder in the QuipClip application data folder.",
+        // Two folders have this origin: `<app_data>/bin`, and `<local_data>/bin`, where the
+        // download puts FFmpeg (ADR 058). On macOS they are one folder.
+        appData: "Found in a bin folder in the QuipClip data folders.",
       },
       fallback:
         "QuipClip cannot use the path that you chose. It uses the FFmpeg that it detected automatically.",
@@ -617,6 +619,57 @@ export const en = {
           "To install FFmpeg with winget, run this command in PowerShell or Command Prompt:",
         windowsAfter:
           "After the install, quit QuipClip and open it again from the Start menu. QuipClip gets PATH when it starts, and a terminal that was open before the install still has the old PATH.",
+      },
+    },
+    // The download of the FFmpeg tab (ADR 058). QuipClip downloads a pinned build and checks
+    // it. The keys sit outside `ffmpeg`, because a fifth level of keys makes the types of `t`
+    // too deep for TypeScript.
+    ffmpegDownload: {
+      // Opens the consent dialog.
+      button: "Download FFmpeg…",
+      // With the install guide below the block.
+      offer:
+        "QuipClip can download FFmpeg {{version}} for you. Or install FFmpeg yourself with the steps below.",
+      // Without the install guide, as when the probe of an earlier download failed.
+      offerAlone: "QuipClip can download FFmpeg {{version}} for you.",
+      dialog: {
+        title: "Download FFmpeg",
+        intro:
+          "QuipClip downloads FFmpeg {{version}} and ffprobe from {{source}}. It checks the files and puts the two programs in this folder:",
+        size: "Download size: {{size}}",
+        license: "License: {{license}}",
+        replaces:
+          "This folder holds an FFmpeg that does not work. The download replaces it.",
+        chosenPath:
+          "The path that you chose stays set. QuipClip uses the downloaded FFmpeg while it cannot use that path.",
+        close: "If you close the Settings window, the download stops.",
+        confirm: "Download",
+      },
+      phase: {
+        preparing: "Preparing the download…",
+        download: "Downloading FFmpeg: {{received}} of {{total}}",
+        extract: "Extracting the programs…",
+        check: "Checking the programs…",
+        install: "Installing the programs…",
+      },
+      // The accessible name of the progress bar.
+      progress: "Download progress",
+      cancel: "Cancel Download",
+      canceling: "Canceling…",
+      canceled: "You canceled the download.",
+      installed: "QuipClip downloaded and installed FFmpeg.",
+      failed: "QuipClip could not download FFmpeg.",
+      retry: "Try Again",
+      // They match `importError.details`.
+      details: {
+        show: "Show Details",
+        hide: "Hide Details",
+      },
+      license: {
+        gpl3: "GPL version 3 or later",
+        gpl2: "GPL version 2 or later",
+        lgpl3: "LGPL version 3 or later",
+        lgpl2: "LGPL version 2.1 or later",
       },
     },
     preset: {
@@ -926,6 +979,30 @@ export const en = {
     commandExecutionFailed:
       "QuipClip could not run the FFmpeg capability probe command.",
     unknown: "An unknown error occurred while probing FFmpeg.",
+  },
+  // The errors of the FFmpeg download (ADR 058). The keys are the codes of
+  // `FFMPEG_INSTALL_ERROR_CODES`, and `invalidResponse`.
+  ffmpegInstallError: {
+    unsupportedTarget: "QuipClip cannot download FFmpeg for this system.",
+    busy: "Another FFmpeg download is still running. Try again in a moment.",
+    // QuipClip then checks FFmpeg again by itself.
+    alreadyFound: "QuipClip found an FFmpeg program, so it did not download FFmpeg.",
+    appDataUnavailable: "The application data directory is unavailable.",
+    workDirectoryUnavailable:
+      "QuipClip could not make a temporary folder for the download.",
+    networkFailed:
+      "QuipClip could not connect to the download server, or the connection stopped.",
+    // The detail gives the status, such as 404 for a file that the source deleted.
+    httpStatus: "The download server returned an error.",
+    sizeMismatch: "The downloaded file does not have the expected size.",
+    hashMismatch: "The downloaded file does not have the expected checksum.",
+    archiveInvalid: "The downloaded archive is damaged.",
+    entryMissing: "The downloaded archive does not contain FFmpeg or ffprobe.",
+    writeFailed: "QuipClip could not write the programs to the disk.",
+    versionCheckFailed: "The downloaded programs did not pass the version check.",
+    canceled: "You canceled the download.",
+    commandExecutionFailed: "QuipClip could not run the download.",
+    invalidResponse: "QuipClip received an answer that it cannot read.",
   },
   settingsError: {
     appDataUnavailable: "The application data directory is unavailable.",

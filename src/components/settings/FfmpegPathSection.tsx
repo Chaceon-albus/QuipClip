@@ -23,6 +23,7 @@ import {
   type FfmpegStatusDetailEntry,
   type FfmpegStatusView,
 } from "@/components/layout/ffmpegStatusPresenter";
+import { FfmpegDownloadBlock } from "./FfmpegDownloadBlock";
 import {
   createFfmpegPathController,
   type FfmpegPathView,
@@ -300,6 +301,17 @@ export function FfmpegPathSection() {
           </Button>
         </div>
         <FfmpegDetailList entries={detail.leading} />
+        {/* The download comes before the install guide, which stays as the other way to get
+            FFmpeg (ADR 005, ADR 058). */}
+        <FfmpegDownloadBlock
+          status={ffmpeg.status}
+          chosenPath={view.path !== null}
+          guideShown={installGuide !== null}
+          chooseDisabled={actions.chooseDisabled}
+          onChooseFile={() => {
+            start("chooseFile", () => controller.choose("file"));
+          }}
+        />
         {installGuide !== null && <FfmpegInstallGuideView guide={installGuide} />}
         {detail.searched.length > 0 && (
           <div className={cn(installGuide !== null && "border-t border-border pt-2")}>

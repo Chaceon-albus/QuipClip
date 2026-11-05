@@ -300,9 +300,19 @@ type ActiveView = Extract<ExportIndicatorView, { kind: "active" }>;
 
 type Translate = ReturnType<typeof useTranslation>["t"];
 
+/**
+ * A view of `t` for the one message of the summary. A call of the full `t` whose result must
+ * be a string makes TypeScript resolve the return type over the whole catalog, and that grew
+ * too deep for it (TS2589) once the catalog passed about 670 messages.
+ */
+type BatchSummaryTranslate = (
+  key: "statusBar.export.batchSummary",
+  values: { count: number; finished: number },
+) => string;
+
 /** The text of the summary of a batch, such as "2 of 3 exports finished". */
 function formatBatchSummary(t: Translate, summary: ExportBatchSummary): string {
-  return t("statusBar.export.batchSummary", {
+  return (t as BatchSummaryTranslate)("statusBar.export.batchSummary", {
     count: summary.count,
     finished: summary.finished,
   });

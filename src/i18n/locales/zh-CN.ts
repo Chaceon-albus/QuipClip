@@ -421,7 +421,7 @@ export const zhCN: TranslationCatalog = {
       origin: {
         path: "位于 PATH 中的某个文件夹。",
         pathMac: "位于 PATH 中的某个文件夹，或位于 Homebrew 的标准文件夹。",
-        appData: "位于 QuipClip 应用程序数据文件夹的 bin 文件夹。",
+        appData: "位于 QuipClip 某个数据文件夹中的 bin 文件夹。",
       },
       fallback: "QuipClip 无法使用您选择的路径，因此改用自动检测到的 FFmpeg。",
       unusable: "QuipClip 无法使用您选择的路径，也没有在其他位置检测到 FFmpeg。",
@@ -438,6 +438,48 @@ export const zhCN: TranslationCatalog = {
           "要使用 winget 安装 FFmpeg，请在 PowerShell 或“命令提示符”中运行以下命令：",
         windowsAfter:
           "安装完成后，请退出 QuipClip，然后从“开始”菜单重新打开。QuipClip 在启动时获取 PATH，而安装前已打开的终端仍使用旧的 PATH。",
+      },
+    },
+    ffmpegDownload: {
+      button: "下载 FFmpeg…",
+      offer:
+        "QuipClip 可以为您下载 FFmpeg {{version}}。您也可以按下方的步骤自行安装 FFmpeg。",
+      offerAlone: "QuipClip 可以为您下载 FFmpeg {{version}}。",
+      dialog: {
+        title: "下载 FFmpeg",
+        intro:
+          "QuipClip 从 {{source}} 下载 FFmpeg {{version}} 和 ffprobe，检查文件后，将这两个程序放入以下文件夹：",
+        size: "下载大小：{{size}}",
+        license: "许可证：{{license}}",
+        replaces: "此文件夹中有一个无法使用的 FFmpeg，下载的程序会替换它。",
+        chosenPath:
+          "您选择的路径保持不变。QuipClip 无法使用该路径时，会使用下载的 FFmpeg。",
+        close: "关闭“设置”窗口后，下载会停止。",
+        confirm: "下载",
+      },
+      phase: {
+        preparing: "正在准备下载…",
+        download: "正在下载 FFmpeg：{{received}} / {{total}}",
+        extract: "正在解压程序…",
+        check: "正在检查程序…",
+        install: "正在安装程序…",
+      },
+      progress: "下载进度",
+      cancel: "取消下载",
+      canceling: "正在取消…",
+      canceled: "您已取消下载。",
+      installed: "QuipClip 已下载并安装 FFmpeg。",
+      failed: "无法下载 FFmpeg。",
+      retry: "重试",
+      details: {
+        show: "显示详细信息",
+        hide: "隐藏详细信息",
+      },
+      license: {
+        gpl3: "GPL 第 3 版或更高版本",
+        gpl2: "GPL 第 2 版或更高版本",
+        lgpl3: "LGPL 第 3 版或更高版本",
+        lgpl2: "LGPL 第 2.1 版或更高版本",
       },
     },
     preset: {
@@ -712,6 +754,24 @@ export const zhCN: TranslationCatalog = {
     cacheUnavailable: "FFmpeg 能力缓存不可用。",
     commandExecutionFailed: "无法运行 FFmpeg 能力探测命令。",
     unknown: "探测 FFmpeg 时发生未知错误。",
+  },
+  ffmpegInstallError: {
+    unsupportedTarget: "QuipClip 无法为此系统下载 FFmpeg。",
+    busy: "另一个 FFmpeg 下载仍在进行。请稍后重试。",
+    alreadyFound: "QuipClip 找到了 FFmpeg 程序，因此没有下载 FFmpeg。",
+    appDataUnavailable: "应用程序数据目录不可用。",
+    workDirectoryUnavailable: "无法为下载创建临时文件夹。",
+    networkFailed: "无法连接下载服务器，或连接已中断。",
+    httpStatus: "下载服务器返回了错误。",
+    sizeMismatch: "下载的文件大小与预期不符。",
+    hashMismatch: "下载的文件校验和与预期不符。",
+    archiveInvalid: "下载的压缩包已损坏。",
+    entryMissing: "下载的压缩包中没有 FFmpeg 或 ffprobe。",
+    writeFailed: "无法将程序写入磁盘。",
+    versionCheckFailed: "下载的程序未通过版本检查。",
+    canceled: "您已取消下载。",
+    commandExecutionFailed: "无法执行下载。",
+    invalidResponse: "收到了无法读取的响应。",
   },
   settingsError: {
     appDataUnavailable: "应用程序数据目录不可用。",

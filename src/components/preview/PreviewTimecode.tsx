@@ -357,20 +357,34 @@ export function PreviewTimecode({
   );
 }
 
+/**
+ * A view of `t` for the messages of an entry error. A call of the full `t` whose result must be
+ * a string makes TypeScript resolve the return type over the whole catalog, and that grew too
+ * deep for it (TS2589) once the catalog passed about 670 messages.
+ */
+type TimecodeEntryErrorTranslate = (
+  key:
+    | "preview.timecodeEntry.error.invalid.frames"
+    | "preview.timecodeEntry.error.invalid.milliseconds"
+    | "preview.timecodeEntry.error.tooManyDecimals"
+    | "preview.timecodeEntry.error.tooLarge",
+) => string;
+
 /** The message of an entry error, in the format of the source for a text that is not a time. */
 function timecodeEntryErrorMessage(
   t: ReturnType<typeof useTranslation>["t"],
   error: TimecodeEntryErrorCode,
   format: TimecodeDisplay["format"],
 ): string {
+  const translate = t as TimecodeEntryErrorTranslate;
   switch (error) {
     case "invalid":
       return format === "frames"
-        ? t("preview.timecodeEntry.error.invalid.frames")
-        : t("preview.timecodeEntry.error.invalid.milliseconds");
+        ? translate("preview.timecodeEntry.error.invalid.frames")
+        : translate("preview.timecodeEntry.error.invalid.milliseconds");
     case "tooManyDecimals":
-      return t("preview.timecodeEntry.error.tooManyDecimals");
+      return translate("preview.timecodeEntry.error.tooManyDecimals");
     case "tooLarge":
-      return t("preview.timecodeEntry.error.tooLarge");
+      return translate("preview.timecodeEntry.error.tooLarge");
   }
 }

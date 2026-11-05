@@ -25,6 +25,11 @@ export interface ConfirmDialogProps {
   /** Runs on the confirm button, before the dialog closes. */
   onConfirm: () => void;
   /**
+   * A second way forward, such as Choose File… beside Download. The button closes the dialog,
+   * and the focus then returns as after a cancel. `DialogActions` places it as an alternative.
+   */
+  alternative?: { label: ReactNode; disabled?: boolean; onSelect: () => void };
+  /**
    * Names the element that takes the focus when the dialog closes after a confirm, in place of
    * the element that opened it, such as the list row that takes the selection after a delete.
    * The dialog calls it when it closes, not when it opens. When it is absent or returns an
@@ -103,6 +108,7 @@ export function ConfirmDialog({
   destructive = false,
   confirmDisabled = false,
   onConfirm,
+  alternative,
   confirmFocus,
   fallbackFocus,
 }: ConfirmDialogProps) {
@@ -170,6 +176,27 @@ export function ConfirmDialog({
                     {confirmLabel}
                   </Button>
                 </AlertDialogPrimitive.Action>
+              }
+              extras={
+                alternative === undefined
+                  ? []
+                  : [
+                      {
+                        key: "alternative",
+                        role: "alternative",
+                        node: (
+                          <AlertDialogPrimitive.Action asChild>
+                            <Button
+                              variant="outline"
+                              disabled={alternative.disabled}
+                              onClick={alternative.onSelect}
+                            >
+                              {alternative.label}
+                            </Button>
+                          </AlertDialogPrimitive.Action>
+                        ),
+                      },
+                    ]
               }
             />
           </DialogFooter>
