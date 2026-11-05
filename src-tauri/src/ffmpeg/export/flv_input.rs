@@ -26,7 +26,7 @@
 //! the file decrease, the reader knows of a change of the decoder configuration, or the streams of
 //! a slice would take other indices than the probe gave them, which the filter graph addresses.
 
-use super::work_directory::ExportWorkDirectory;
+use crate::app_cache::work::WorkDirectory;
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::probe::MediaProbe;
 use crate::flv::cache::Revision;
@@ -111,7 +111,7 @@ pub struct FlvInputRequest<'a> {
     /// The application cache directory, which holds the keyframe cache of the reader (ADR 057).
     pub cache_root: &'a Path,
     /// The work directory of the export, which receives the head.
-    pub work_directory: &'a ExportWorkDirectory,
+    pub work_directory: &'a WorkDirectory,
     /// The index of the source in the plan, which names its head ([`head_name`]).
     pub source_index: usize,
     /// The open FLV sources, which the export shares with the preview: each knows what the
@@ -242,6 +242,7 @@ fn stream_order_matches(order: &[TagKind], probe: &MediaProbe) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_cache::work::EXPORT_WORK_DIRECTORY;
     use crate::ffmpeg::probe::AudioProbe;
     use crate::flv::test_support::{
         recording, restart_recording, FlvBuilder, RecordingOptions, TestDirectory,
@@ -303,15 +304,18 @@ mod tests {
         probe: &MediaProbe,
         positions: &[Rational],
     ) -> Result<FlvInput, FlvInputFallback> {
-        let work =
-            ExportWorkDirectory::create(&crate::app_cache::work_directory(cache_root)).unwrap();
+        let work = WorkDirectory::create(
+            &crate::app_cache::work_directory(cache_root),
+            EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         locate_in(path, cache_root, &work, 0, probe, positions)
     }
 
     fn locate_in(
         path: &Path,
         cache_root: &Path,
-        work_directory: &ExportWorkDirectory,
+        work_directory: &WorkDirectory,
         source_index: usize,
         probe: &MediaProbe,
         positions: &[Rational],
@@ -333,8 +337,11 @@ mod tests {
         let recording = recording(&RecordingOptions::default());
         let (directory, path) = write_source("live.flv", &recording.bytes);
         let cache_root = directory.path.join("cache");
-        let work =
-            ExportWorkDirectory::create(&crate::app_cache::work_directory(&cache_root)).unwrap();
+        let work = WorkDirectory::create(
+            &crate::app_cache::work_directory(&cache_root),
+            EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         let probe = flv_probe(Some(1));
         let input = locate_in(
             &path,
@@ -382,8 +389,11 @@ mod tests {
         let recording = recording(&RecordingOptions::default());
         let (directory, path) = write_source("live.flv", &recording.bytes);
         let cache_root = directory.path.join("cache");
-        let work =
-            ExportWorkDirectory::create(&crate::app_cache::work_directory(&cache_root)).unwrap();
+        let work = WorkDirectory::create(
+            &crate::app_cache::work_directory(&cache_root),
+            EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         // Stands for a work directory that is gone, as after an abandoned preparation.
         fs::remove_dir_all(work.path()).unwrap();
         let result = locate_in(
@@ -556,8 +566,11 @@ mod tests {
         // the source, so it knows of the change, though its own locate reads no block with it.
         source.locate(10_000, None).unwrap();
         assert!(source.has_config_change());
-        let work = ExportWorkDirectory::create(&crate::app_cache::work_directory(&directory.path))
-            .unwrap();
+        let work = WorkDirectory::create(
+            &crate::app_cache::work_directory(&directory.path),
+            EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         let result = locate_flv_input(&FlvInputRequest {
             source: &path,
             probe: &flv_probe(None),

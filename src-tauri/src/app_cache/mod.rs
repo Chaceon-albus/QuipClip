@@ -9,7 +9,8 @@
 //!   test (ADR 041), while it runs.
 //!
 //! Each cache module keeps the name of its own subdirectory. This module declares only the name of
-//! the work directory, which belongs to no single module.
+//! the work directory, which belongs to no single module. [`work`] owns the work directory of each
+//! job in it, and the kinds of those directories.
 //!
 //! On Windows, the user data folder of WebView2, `EBWebView`, is in the same directory, and the
 //! page keeps its preferences there. So no code deletes the cache directory itself, or a name at
@@ -19,6 +20,7 @@
 //! that older builds left in their old places.
 
 pub mod cleanup;
+pub mod work;
 
 use std::path::{Path, PathBuf};
 

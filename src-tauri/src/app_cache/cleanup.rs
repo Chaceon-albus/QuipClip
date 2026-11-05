@@ -16,8 +16,8 @@
 //! that no other QuipClip process of any build still uses them. So the cleanup never touches the
 //! other names at the top of the cache directory, such as the folder of WebView2.
 
+use super::work::{remove_stale_work_directories, EXPORT_WORK_DIRECTORY};
 use crate::ffmpeg::capabilities::preset_test::remove_stale_outputs;
-use crate::ffmpeg::export::work_directory::remove_stale_work_directories;
 use crate::ffmpeg::waveform;
 use std::fs;
 use std::io;
@@ -47,11 +47,11 @@ fn run_at_start_with<SweepEnvelopes>(
             eprintln!("cache: the cleanup of the envelope cache failed: {error}");
         }
         let work = super::work_directory(cache_root);
-        remove_stale_work_directories(&work);
+        remove_stale_work_directories(&work, EXPORT_WORK_DIRECTORY);
         remove_stale_outputs(&work);
         // Each sweep also tries the failed removals of the process again, so a removal that
         // failed in the sweep of `work` fails once more here, with one more log line.
-        remove_stale_work_directories(cache_root);
+        remove_stale_work_directories(cache_root, EXPORT_WORK_DIRECTORY);
         remove_stale_outputs(cache_root);
     }
     if let Some(app_data) = app_data {

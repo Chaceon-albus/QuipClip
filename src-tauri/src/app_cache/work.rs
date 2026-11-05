@@ -1,10 +1,16 @@
-//! The work directory of an export (ADR 055).
+//! The work directory of a job, such as an export (ADR 055).
 //!
-//! Each export creates the directory `export-<pid>-<n>` in the directory `work` of the cache
-//! directory of the application (ADR 057): `<pid>` is the process ID of QuipClip, and `<n>` a
-//! counter of the process. The `ffmpeg` processes of the export run in it, and their commands
-//! name its files by their names alone. It holds the graph files of [`super::graph_file`] and the
-//! head of each FLV source of the export, `h<k>.flv` (ADR 046).
+//! Each job creates the directory `<prefix><pid>-<n>` in the directory `work` of the cache
+//! directory of the application (ADR 057): `<prefix>` names the kind of the job
+//! ([`WorkDirectoryKind`]), `<pid>` is the process ID of QuipClip, and `<n>` a counter of the
+//! process. Every kind is declared here, so this file lists each name that a job puts in `work`.
+//! A sweep removes only the stale directories of its own kind, but it tries the failed removals
+//! of every kind again.
+//!
+//! An export creates `export-<pid>-<n>`. The `ffmpeg` processes of the export run in it, and
+//! their commands name its files by their names alone. It holds the graph files of
+//! [`crate::ffmpeg::export::graph_file`] and the head of each FLV source of the export,
+//! `h<k>.flv` (ADR 046).
 //!
 //! A write never creates the directory. So a write that an abandoned preparation (ADR 050) makes
 //! after the removal fails, and it leaves nothing.
@@ -15,9 +21,10 @@
 //! in total for a file that another program holds, which fits in the exit budget of ADR 017. A
 //! removal that fails writes a log line and keeps the path in a list of the process.
 //!
-//! At the start of each preparation, [`remove_stale_work_directories`] tries the paths of that
-//! list again, and removes each work directory that this process does not use and whose
-//! modification time is at least [`STALE_WORK_DIRECTORY_AGE`] old.
+//! At the start of each preparation, the export runs [`remove_stale_work_directories`] for its
+//! kind. The sweep tries the paths of that list again, and removes each export work directory
+//! that this process does not use and whose modification time is at least
+//! [`STALE_WORK_DIRECTORY_AGE`] old.
 
 use std::collections::HashSet;
 use std::fs;
@@ -37,10 +44,20 @@ pub const WORK_DIRECTORY_REMOVAL_BUDGET: Duration = Duration::from_millis(511);
 /// process that runs now.
 pub const STALE_WORK_DIRECTORY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The prefix of the name of a work directory.
-const NAME_PREFIX: &str = "export-";
+/// One kind of work directory: the prefix of its names, and the word that starts its log lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkDirectoryKind {
+    prefix: &'static str,
+    log_label: &'static str,
+}
 
-/// The most names that [`ExportWorkDirectory::create`] tries.
+/// The work directory of an export, `export-<pid>-<n>` (ADR 055).
+pub const EXPORT_WORK_DIRECTORY: WorkDirectoryKind = WorkDirectoryKind {
+    prefix: "export-",
+    log_label: "export",
+};
+
+/// The most names that [`WorkDirectory::create`] tries.
 const CREATE_ATTEMPTS: u32 = 100;
 
 /// `ERROR_DIR_NOT_EMPTY`: a file of the directory is still delete-pending, because another
@@ -54,33 +71,40 @@ static NEXT_NUMBER: AtomicU64 = AtomicU64::new(0);
 /// The work directories that this process uses now. The sweep never removes one of them.
 static LIVE: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
-/// The work directories whose removal failed. The next sweep tries them again.
-static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// The work directories whose removal failed, each with its kind. The next sweep of any kind
+/// tries them again.
+static PENDING: Mutex<Vec<(PathBuf, WorkDirectoryKind)>> = Mutex::new(Vec::new());
 
-/// The work directory of one export. It removes itself once, at [`Self::remove`] or when it
-/// drops.
+/// The work directory of one job. It removes itself once, at [`Self::remove`] or when it drops.
 #[derive(Debug)]
-pub struct ExportWorkDirectory {
+pub struct WorkDirectory {
     path: PathBuf,
+    kind: WorkDirectoryKind,
     removed: bool,
 }
 
-impl ExportWorkDirectory {
-    /// Create a new work directory in `parent`, and create `parent` when it is missing.
+impl WorkDirectory {
+    /// Create a new work directory of `kind` in `parent`, and create `parent` when it is
+    /// missing.
     ///
     /// A name that exists, for example from a crash of a process with the same ID, is skipped,
     /// and the next number is tried.
-    pub fn create(parent: &Path) -> io::Result<Self> {
-        Self::create_with(parent, std::process::id(), &NEXT_NUMBER)
+    pub fn create(parent: &Path, kind: WorkDirectoryKind) -> io::Result<Self> {
+        Self::create_with(parent, kind, std::process::id(), &NEXT_NUMBER)
     }
 
     /// [`Self::create`] with the process ID and the counter supplied, so a test can make a name
     /// collide.
-    fn create_with(parent: &Path, process: u32, counter: &AtomicU64) -> io::Result<Self> {
+    fn create_with(
+        parent: &Path,
+        kind: WorkDirectoryKind,
+        process: u32,
+        counter: &AtomicU64,
+    ) -> io::Result<Self> {
         fs::create_dir_all(parent)?;
         for _ in 0..CREATE_ATTEMPTS {
             let number = counter.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!("{NAME_PREFIX}{process}-{number}"));
+            let path = parent.join(format!("{}{process}-{number}", kind.prefix));
             // Registered under the lock, so a sweep that reads the set sees a directory that
             // exists as live.
             let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
@@ -89,6 +113,7 @@ impl ExportWorkDirectory {
                     live.get_or_insert_with(HashSet::new).insert(path.clone());
                     return Ok(Self {
                         path,
+                        kind,
                         removed: false,
                     });
                 }
@@ -134,18 +159,19 @@ impl ExportWorkDirectory {
         }
         if let Err(error) = result {
             eprintln!(
-                "export: the work directory {} was not removed: {error}",
+                "{}: the work directory {} was not removed: {error}",
+                self.kind.log_label,
                 self.path.display()
             );
             PENDING
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(self.path.clone());
+                .push((self.path.clone(), self.kind));
         }
     }
 }
 
-impl Drop for ExportWorkDirectory {
+impl Drop for WorkDirectory {
     fn drop(&mut self) {
         self.remove_once();
     }
@@ -194,17 +220,18 @@ fn is_transient_removal_error(error: &io::Error) -> bool {
         || error.raw_os_error() == Some(ERROR_DIR_NOT_EMPTY)
 }
 
-/// Remove the work directories that are left in `parent`. Best effort: a failure is logged, and
-/// the export goes on.
+/// Remove the work directories of `kind` that are left in `parent`. Best effort: a failure is
+/// logged, and the job goes on.
 ///
-/// First, each path of the list of failed removals is tried again. Then each directory named
-/// `export-<digits>-<digits>`, of any process, is removed when this process does not use it and
-/// its modification time is at least [`STALE_WORK_DIRECTORY_AGE`] old.
+/// First, each path of the list of failed removals, of any kind, is tried again. Then each
+/// directory named `<prefix><digits>-<digits>` of `kind`, of any process, is removed when this
+/// process does not use it and its modification time is at least [`STALE_WORK_DIRECTORY_AGE`]
+/// old.
 ///
 /// The sweep makes one attempt for each path and never waits. A directory that stays held, such
 /// as the current directory of an `ffmpeg` that outlived a crash, would otherwise cost the wait of
 /// [`WORK_DIRECTORY_REMOVAL_BUDGET`] in each preparation.
-pub fn remove_stale_work_directories(parent: &Path) {
+pub fn remove_stale_work_directories(parent: &Path, kind: WorkDirectoryKind) {
     let live = LIVE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -212,6 +239,7 @@ pub fn remove_stale_work_directories(parent: &Path) {
         .unwrap_or_default();
     remove_stale_work_directories_with(
         parent,
+        kind,
         SystemTime::now(),
         STALE_WORK_DIRECTORY_AGE,
         &live,
@@ -224,27 +252,29 @@ pub fn remove_stale_work_directories(parent: &Path) {
 /// it removed.
 fn remove_stale_work_directories_with(
     parent: &Path,
+    kind: WorkDirectoryKind,
     now: SystemTime,
     min_age: Duration,
     live: &HashSet<PathBuf>,
-    pending: &Mutex<Vec<PathBuf>>,
+    pending: &Mutex<Vec<(PathBuf, WorkDirectoryKind)>>,
 ) -> usize {
     let mut removed = 0;
     let retries = std::mem::take(&mut *pending.lock().unwrap_or_else(PoisonError::into_inner));
     let mut tried: HashSet<PathBuf> = HashSet::with_capacity(retries.len());
-    for path in retries {
+    for (path, retry_kind) in retries {
         tried.insert(path.clone());
         match remove_directory_once(&path) {
             Ok(()) => removed += 1,
             Err(error) => {
                 eprintln!(
-                    "export: the work directory {} was not removed again: {error}",
+                    "{}: the work directory {} was not removed again: {error}",
+                    retry_kind.log_label,
                     path.display()
                 );
                 pending
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push(path);
+                    .push((path, retry_kind));
             }
         }
     }
@@ -256,7 +286,7 @@ fn remove_stale_work_directories_with(
         if !entry
             .file_name()
             .to_str()
-            .is_some_and(is_work_directory_name)
+            .is_some_and(|name| is_work_directory_name(name, kind))
         {
             continue;
         }
@@ -278,7 +308,8 @@ fn remove_stale_work_directories_with(
         match remove_directory_once(&path) {
             Ok(()) => removed += 1,
             Err(error) => eprintln!(
-                "export: the stale work directory {} was not removed: {error}",
+                "{}: the stale work directory {} was not removed: {error}",
+                kind.log_label,
                 path.display()
             ),
         }
@@ -286,10 +317,10 @@ fn remove_stale_work_directories_with(
     removed
 }
 
-/// True for the name of a work directory, `export-<digits>-<digits>`.
-fn is_work_directory_name(name: &str) -> bool {
+/// True for the name of a work directory of `kind`, `<prefix><digits>-<digits>`.
+fn is_work_directory_name(name: &str, kind: WorkDirectoryKind) -> bool {
     let Some((process, number)) = name
-        .strip_prefix(NAME_PREFIX)
+        .strip_prefix(kind.prefix)
         .and_then(|rest| rest.split_once('-'))
     else {
         return false;
@@ -313,18 +344,21 @@ mod tests {
     #[test]
     fn each_directory_gets_a_new_name_of_this_process() {
         let parent = TestDirectory::new();
-        let first = ExportWorkDirectory::create(&parent.path).unwrap();
-        let second = ExportWorkDirectory::create(&parent.path).unwrap();
+        let first = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
+        let second = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         assert_ne!(first.path(), second.path());
         for directory in [&first, &second] {
             assert!(directory.path().is_dir());
             assert_eq!(directory.path().parent(), Some(parent.path.as_path()));
             let name = directory.path().file_name().unwrap().to_str().unwrap();
-            assert!(is_work_directory_name(name), "{name}");
+            assert!(
+                is_work_directory_name(name, EXPORT_WORK_DIRECTORY),
+                "{name}"
+            );
             assert!(name.starts_with(&format!("export-{}-", std::process::id())));
             assert!(is_live(directory.path()));
         }
-        let number = |directory: &ExportWorkDirectory| -> u64 {
+        let number = |directory: &WorkDirectory| -> u64 {
             let name = directory.path().file_name().unwrap().to_str().unwrap();
             name.rsplit('-').next().unwrap().parse().unwrap()
         };
@@ -335,7 +369,7 @@ mod tests {
     fn a_missing_parent_is_created() {
         let root = TestDirectory::new();
         let parent = root.path.join("cache").join("deeper");
-        let directory = ExportWorkDirectory::create(&parent).unwrap();
+        let directory = WorkDirectory::create(&parent, EXPORT_WORK_DIRECTORY).unwrap();
         assert!(directory.path().is_dir());
     }
 
@@ -352,7 +386,9 @@ mod tests {
             fs::create_dir(path).unwrap();
             fs::write(path.join("marker"), b"crash").unwrap();
         }
-        let directory = ExportWorkDirectory::create_with(&parent.path, process, &counter).unwrap();
+        let directory =
+            WorkDirectory::create_with(&parent.path, EXPORT_WORK_DIRECTORY, process, &counter)
+                .unwrap();
         assert_eq!(directory.path(), parent.path.join("export-4242-3"));
         for path in &taken {
             assert_eq!(fs::read(path.join("marker")).unwrap(), b"crash");
@@ -366,14 +402,15 @@ mod tests {
         for number in 0..u64::from(CREATE_ATTEMPTS) {
             fs::create_dir(parent.path.join(format!("export-7-{number}"))).unwrap();
         }
-        let error = ExportWorkDirectory::create_with(&parent.path, 7, &counter).unwrap_err();
+        let error = WorkDirectory::create_with(&parent.path, EXPORT_WORK_DIRECTORY, 7, &counter)
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[test]
     fn a_write_lands_in_the_directory_with_the_exact_bytes() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         directory.write("h0.flv", b"FLV\x01head").unwrap();
         let path = directory.file_path("h0.flv");
         assert_eq!(path, directory.path().join("h0.flv"));
@@ -383,7 +420,7 @@ mod tests {
     #[test]
     fn a_write_after_the_removal_fails_and_does_not_create_the_directory() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         let path = directory.path().to_path_buf();
         // Stands for an abandoned preparation: the directory is gone when its write comes.
         fs::remove_dir_all(&path).unwrap();
@@ -396,7 +433,7 @@ mod tests {
     #[test]
     fn a_drop_removes_the_directory_and_its_files() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         directory.write("h0.flv", b"FLV").unwrap();
         let path = directory.path().to_path_buf();
         drop(directory);
@@ -407,7 +444,7 @@ mod tests {
     #[test]
     fn an_explicit_removal_removes_the_directory_once() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         directory.write("h1.flv", b"FLV").unwrap();
         let path = directory.path().to_path_buf();
         directory.remove();
@@ -418,21 +455,33 @@ mod tests {
     #[test]
     fn a_directory_that_is_already_gone_counts_as_removed() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         let path = directory.path().to_path_buf();
         fs::remove_dir_all(&path).unwrap();
         directory.remove();
         assert!(!PENDING
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&path));
+            .iter()
+            .any(|(pending, _)| pending == &path));
     }
+
+    /// A second kind, for the tests that keep each kind to its own names.
+    const OTHER: WorkDirectoryKind = WorkDirectoryKind {
+        prefix: "other-",
+        log_label: "other",
+    };
 
     #[test]
     fn only_the_names_of_work_directories_match() {
         for name in ["export-1-0", "export-4242-17", "export-0-00"] {
-            assert!(is_work_directory_name(name), "{name}");
+            assert!(
+                is_work_directory_name(name, EXPORT_WORK_DIRECTORY),
+                "{name}"
+            );
+            assert!(!is_work_directory_name(name, OTHER), "{name}");
         }
+        assert!(is_work_directory_name("other-1-0", OTHER));
         for name in [
             "export-",
             "export-1",
@@ -448,19 +497,53 @@ mod tests {
             "work",
             "EBWebView",
             "preset-test-1-2.tmp",
+            "other-1-0",
         ] {
-            assert!(!is_work_directory_name(name), "{name}");
+            assert!(
+                !is_work_directory_name(name, EXPORT_WORK_DIRECTORY),
+                "{name}"
+            );
         }
     }
 
+    /// The sweep of the export kind.
     fn sweep(
         parent: &Path,
         now: SystemTime,
         min_age: Duration,
         live: &HashSet<PathBuf>,
-        pending: &Mutex<Vec<PathBuf>>,
+        pending: &Mutex<Vec<(PathBuf, WorkDirectoryKind)>>,
     ) -> usize {
-        remove_stale_work_directories_with(parent, now, min_age, live, pending)
+        remove_stale_work_directories_with(
+            parent,
+            EXPORT_WORK_DIRECTORY,
+            now,
+            min_age,
+            live,
+            pending,
+        )
+    }
+
+    #[test]
+    fn the_sweep_of_one_kind_keeps_the_directories_of_another_kind() {
+        let parent = TestDirectory::new();
+        let export = parent.path.join("export-1-0");
+        let other = parent.path.join("other-1-0");
+        for path in [&export, &other] {
+            fs::create_dir(path).unwrap();
+        }
+        let later = SystemTime::now() + STALE_WORK_DIRECTORY_AGE + Duration::from_secs(60);
+        let removed = remove_stale_work_directories_with(
+            &parent.path,
+            OTHER,
+            later,
+            STALE_WORK_DIRECTORY_AGE,
+            &HashSet::new(),
+            &Mutex::new(Vec::new()),
+        );
+        assert_eq!(removed, 1);
+        assert!(!other.exists());
+        assert!(export.is_dir());
     }
 
     #[test]
@@ -508,6 +591,8 @@ mod tests {
             "export-1",
             "export-a-1",
             "export-1-2.tmp",
+            // A work directory of another kind.
+            "other-1-0",
         ]
         .map(|name| parent.path.join(name));
         for path in &others {
@@ -532,7 +617,7 @@ mod tests {
     #[test]
     fn the_sweep_never_removes_a_live_directory_of_this_process() {
         let parent = TestDirectory::new();
-        let directory = ExportWorkDirectory::create(&parent.path).unwrap();
+        let directory = WorkDirectory::create(&parent.path, EXPORT_WORK_DIRECTORY).unwrap();
         directory.write("h0.flv", b"FLV").unwrap();
         let later = SystemTime::now() + STALE_WORK_DIRECTORY_AGE + Duration::from_secs(60);
         let live = LIVE
@@ -560,10 +645,19 @@ mod tests {
         fs::create_dir(&failed).unwrap();
         fs::write(failed.join("audio.graph"), b"anull").unwrap();
         let gone = other.path.join("export-7-8");
+        // A failed removal of another kind, which the sweep of the export kind also tries.
+        let other_kind = other.path.join("other-7-7");
+        fs::create_dir(&other_kind).unwrap();
         // A failed removal in the swept directory that is also old: tried once, counted once.
         let both = parent.path.join("export-7-9");
         fs::create_dir(&both).unwrap();
-        let pending = Mutex::new(vec![failed.clone(), gone, both.clone()]);
+        // The list holds failed removals of any kind, and the sweep of each kind tries them all.
+        let pending = Mutex::new(vec![
+            (failed.clone(), EXPORT_WORK_DIRECTORY),
+            (gone, EXPORT_WORK_DIRECTORY),
+            (other_kind.clone(), OTHER),
+            (both.clone(), EXPORT_WORK_DIRECTORY),
+        ]);
         let later = SystemTime::now() + STALE_WORK_DIRECTORY_AGE + Duration::from_secs(60);
         let removed = sweep(
             &parent.path,
@@ -572,8 +666,9 @@ mod tests {
             &HashSet::new(),
             &pending,
         );
-        assert_eq!(removed, 3);
+        assert_eq!(removed, 4);
         assert!(!failed.exists());
+        assert!(!other_kind.exists());
         assert!(!both.exists());
         assert!(pending.lock().unwrap().is_empty());
     }
@@ -590,7 +685,7 @@ mod tests {
         fs::create_dir_all(&failed).unwrap();
         fs::write(failed.join("h0.flv"), b"FLV").unwrap();
         fs::set_permissions(&failed, fs::Permissions::from_mode(0o500)).unwrap();
-        let pending = Mutex::new(vec![failed.clone()]);
+        let pending = Mutex::new(vec![(failed.clone(), EXPORT_WORK_DIRECTORY)]);
         let removed = sweep(
             &parent.path,
             SystemTime::now(),
@@ -603,7 +698,10 @@ mod tests {
         // A process with the right to ignore permissions removes it anyway.
         if still_there {
             assert_eq!(removed, 0);
-            assert_eq!(*pending.lock().unwrap(), vec![failed]);
+            assert_eq!(
+                *pending.lock().unwrap(),
+                vec![(failed, EXPORT_WORK_DIRECTORY)]
+            );
         }
     }
 

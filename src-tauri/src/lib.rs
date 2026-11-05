@@ -538,7 +538,7 @@ mod tests {
         assert!(
             commands::export::PREPARATION_CANCEL_GRACE
                 + commands::export::PREPARATION_POLL
-                + ffmpeg::export::work_directory::WORK_DIRECTORY_REMOVAL_BUDGET
+                + app_cache::work::WORK_DIRECTORY_REMOVAL_BUDGET
                 + REPORT_MARGIN
                 < EXIT_CANCEL_BUDGET
         );

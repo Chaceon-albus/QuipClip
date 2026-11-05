@@ -18,8 +18,8 @@
 //! The process keeps each successful answer for each `ffmpeg` binary, by its path, size and
 //! modification time. It keeps no failure, so the next export asks again.
 
-use super::work_directory::ExportWorkDirectory;
 use super::ExportErrorCode;
+use crate::app_cache::work::WorkDirectory;
 use crate::ffmpeg::capabilities::{
     run_with_timeout_in, stderr_tail, CommandOutcome, CommandStatus, RunPlace, StdoutCapture,
     PROBE_DETAIL_LIMIT,
@@ -121,7 +121,7 @@ static PROBE_MEMO: Mutex<Vec<(BinaryKey, GraphFileOption)>> = Mutex::new(Vec::ne
 ///   [`ExportErrorCode::WorkDirectoryUnavailable`].
 pub fn probe_graph_file_option(
     ffmpeg: &Path,
-    work: &ExportWorkDirectory,
+    work: &WorkDirectory,
     stop: &AtomicBool,
 ) -> Result<GraphFileOption, GraphFileProbeError> {
     probe_with(ffmpeg, work, stop, &PROBE_MEMO, run_probe)
@@ -193,7 +193,7 @@ enum Attempt {
 /// `ffmpeg`.
 fn probe_with<Run>(
     ffmpeg: &Path,
-    work: &ExportWorkDirectory,
+    work: &WorkDirectory,
     stop: &AtomicBool,
     memo: &Mutex<Vec<(BinaryKey, GraphFileOption)>>,
     mut run: Run,
@@ -289,13 +289,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_cache::work::EXPORT_WORK_DIRECTORY;
     use std::cell::RefCell;
 
     /// A temporary directory with a stand-in `ffmpeg` file and a cache for work directories.
     struct Fixture {
         root: PathBuf,
         ffmpeg: PathBuf,
-        work: ExportWorkDirectory,
+        work: WorkDirectory,
     }
 
     impl Fixture {
@@ -306,7 +307,7 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let ffmpeg = root.join("ffmpeg");
             std::fs::write(&ffmpeg, b"stand-in").unwrap();
-            let work = ExportWorkDirectory::create(&root.join("cache")).unwrap();
+            let work = WorkDirectory::create(&root.join("cache"), EXPORT_WORK_DIRECTORY).unwrap();
             Self { root, ffmpeg, work }
         }
     }

@@ -68,9 +68,9 @@
 //! [`process::ExportProcessStatus::Exited`] for the measured case where `ffmpeg` writes no frames
 //! and still exits zero.
 //!
-//! [`work_directory`] owns the work directory of an export (ADR 055): the `ffmpeg` processes run
-//! in it, it holds the FLV heads, and it is removed when the processes end and on every other exit
-//! path.
+//! [`crate::app_cache::work`] owns the work directory of an export (ADR 055): the `ffmpeg`
+//! processes run in it, it holds the FLV heads, and it is removed when the processes end and on
+//! every other exit path.
 //!
 //! [`verify`] holds the checks that read the finished file back. The frame count cannot verify an
 //! export that writes no video, so [`verify::verify_audio_output`] reads its file back through
@@ -92,7 +92,6 @@ pub mod process;
 pub mod progress;
 pub mod registry;
 pub mod verify;
-pub mod work_directory;
 
 pub use arguments::{
     build_arguments, build_audio_arguments, build_copy_arguments, check_command_line,

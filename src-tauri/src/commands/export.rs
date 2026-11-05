@@ -70,6 +70,7 @@
 //! unit; the error code stays reserved, as it is in `ffmpeg::export`.
 
 use crate::app_cache;
+use crate::app_cache::work::{remove_stale_work_directories, WorkDirectory, EXPORT_WORK_DIRECTORY};
 use crate::ffmpeg::export::flv_input::{
     locate_flv_input, FlvInput, FlvInputFallback, FlvInputRequest,
 };
@@ -78,7 +79,6 @@ use crate::ffmpeg::export::graph_file::{
     ENCODER_GRAPH_FILE,
 };
 use crate::ffmpeg::export::inputs::check_runs;
-use crate::ffmpeg::export::work_directory::{remove_stale_work_directories, ExportWorkDirectory};
 use crate::ffmpeg::export::{
     assign_inputs, build_arguments, build_audio_arguments, build_audio_graph, build_copy_arguments,
     build_plan, check_command_line, encoder_graph, inspect_path, run_export_process,
@@ -507,7 +507,7 @@ struct PreparedExport {
     /// The work directory of the export, where both processes run (ADR 055).
     /// [`run_export_with`] removes it when the processes have ended, and on every other path it
     /// removes itself when it drops.
-    work: ExportWorkDirectory,
+    work: WorkDirectory,
 }
 
 /// Start one export, or put it in the queue, and report it through [`EVENT_NAME`].
@@ -624,8 +624,8 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 /// The option probe of ADR 055 as [`prepare_export_with`] runs it: the path of `ffmpeg`, the work
 /// directory, and the stop flag of preparation. Production passes
 /// [`probe_graph_file_option`].
-type GraphFileProbe<'a> = dyn Fn(&Path, &ExportWorkDirectory, &AtomicBool) -> Result<GraphFileOption, GraphFileProbeError>
-    + 'a;
+type GraphFileProbe<'a> =
+    dyn Fn(&Path, &WorkDirectory, &AtomicBool) -> Result<GraphFileOption, GraphFileProbeError> + 'a;
 
 /// The plain data [`prepare_export_with`] needs, grouped apart from the five functions it also
 /// takes, and the option probe of ADR 055.
@@ -744,8 +744,8 @@ where
     }
     stage.enter(PreparationStage::WorkDirectory);
     let work_parent = app_cache::work_directory(cache_directory);
-    remove_stale_work_directories(&work_parent);
-    let work = ExportWorkDirectory::create(&work_parent).map_err(|error| {
+    remove_stale_work_directories(&work_parent, EXPORT_WORK_DIRECTORY);
+    let work = WorkDirectory::create(&work_parent, EXPORT_WORK_DIRECTORY).map_err(|error| {
         ExportCommandError::with_detail(
             ExportErrorCode::WorkDirectoryUnavailable,
             error.to_string(),
@@ -1000,11 +1000,7 @@ where
 /// Write `graph` as the file `name` of the work directory: the exact bytes of the builder, ASCII,
 /// with no byte order mark and no line end (ADR 055). A failed write gives
 /// `workDirectoryUnavailable`, with the error as its detail.
-fn write_graph(
-    work: &ExportWorkDirectory,
-    name: &str,
-    graph: &str,
-) -> Result<(), ExportCommandError> {
+fn write_graph(work: &WorkDirectory, name: &str, graph: &str) -> Result<(), ExportCommandError> {
     work.write(name, graph.as_bytes()).map_err(|error| {
         ExportCommandError::with_detail(
             ExportErrorCode::WorkDirectoryUnavailable,
@@ -1347,7 +1343,7 @@ struct FlvPlace<'a> {
     /// The application cache directory, which holds the cache of the FLV reader.
     cache_directory: &'a Path,
     /// The work directory of the export, which receives the head.
-    work_directory: &'a ExportWorkDirectory,
+    work_directory: &'a WorkDirectory,
     /// The index of the source in the plan, which names its head.
     source_index: usize,
 }
@@ -2162,7 +2158,7 @@ fn run_export_worker(
     //
     // Every guard has already run by the time the panic arm below is reached. The unwind
     // passes `ChildGuard`, which kills and reaps ffmpeg, `PendingOutput`, which deletes the
-    // reservation, and `ExportWorkDirectory`, which removes the work directory of ADR 055. `slot`
+    // reservation, and `WorkDirectory`, which removes the work directory of ADR 055. `slot`
     // is released by the drop at the end of this function. So this
     // arm cleans nothing up. It only supplies the report that would otherwise never come.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2756,7 +2752,7 @@ mod tests {
     /// The option probe of ADR 055 on FFmpeg 7.0 and later: `-/filter_complex`.
     fn slash_graph_file(
         _: &Path,
-        _: &ExportWorkDirectory,
+        _: &WorkDirectory,
         _: &AtomicBool,
     ) -> Result<GraphFileOption, GraphFileProbeError> {
         Ok(GraphFileOption::Slash)
@@ -3136,7 +3132,11 @@ mod tests {
             new_batch: false,
         };
         let cache_root = directory.path.join("cache");
-        let work = ExportWorkDirectory::create(&app_cache::work_directory(&cache_root)).unwrap();
+        let work = WorkDirectory::create(
+            &app_cache::work_directory(&cache_root),
+            EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         let windows = PreviewWindows::default();
         let pieces = resolve_request(&request).unwrap().pieces;
         let run = |probe: &MediaProbe, cancel: &AtomicBool| {
@@ -4897,8 +4897,11 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
-            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                .unwrap(),
+            work: WorkDirectory::create(
+                &destination.parent().unwrap().join("cache"),
+                EXPORT_WORK_DIRECTORY,
+            )
+            .unwrap(),
         };
 
         let start = start_payload("42-7", &prepared);
@@ -4933,8 +4936,11 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
-            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                .unwrap(),
+            work: WorkDirectory::create(
+                &destination.parent().unwrap().join("cache"),
+                EXPORT_WORK_DIRECTORY,
+            )
+            .unwrap(),
         };
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("42-7").unwrap();
@@ -6882,8 +6888,11 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
-            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                .unwrap(),
+            work: WorkDirectory::create(
+                &destination.parent().unwrap().join("cache"),
+                EXPORT_WORK_DIRECTORY,
+            )
+            .unwrap(),
         };
         (prepared, reserved)
     }
@@ -7315,8 +7324,11 @@ mod tests {
                 arguments: vec![],
                 audio_arguments: None,
                 pending,
-                work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                    .unwrap(),
+                work: WorkDirectory::create(
+                    &destination.parent().unwrap().join("cache"),
+                    EXPORT_WORK_DIRECTORY,
+                )
+                .unwrap(),
             };
             let registry = Arc::new(ExportRegistry::default());
             let slot = registry.begin("42-7").unwrap();
@@ -7346,7 +7358,8 @@ mod tests {
         let destination = directory.path.join("out.mp4");
         let pending = PendingOutput::reserve(&destination).unwrap();
         let reserved = pending.path().to_path_buf();
-        let work = ExportWorkDirectory::create(&directory.path.join("cache")).unwrap();
+        let work =
+            WorkDirectory::create(&directory.path.join("cache"), EXPORT_WORK_DIRECTORY).unwrap();
         let work_path = work.path().to_path_buf();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
@@ -8256,8 +8269,11 @@ mod tests {
             arguments: vec![],
             audio_arguments: Some(vec![]),
             pending,
-            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                .unwrap(),
+            work: WorkDirectory::create(
+                &destination.parent().unwrap().join("cache"),
+                EXPORT_WORK_DIRECTORY,
+            )
+            .unwrap(),
         };
         (prepared, reserved)
     }
@@ -8438,8 +8454,11 @@ mod tests {
             arguments: vec![],
             audio_arguments: None,
             pending,
-            work: ExportWorkDirectory::create(&destination.parent().unwrap().join("cache"))
-                .unwrap(),
+            work: WorkDirectory::create(
+                &destination.parent().unwrap().join("cache"),
+                EXPORT_WORK_DIRECTORY,
+            )
+            .unwrap(),
         };
         let registry = Arc::new(ExportRegistry::default());
         let slot = registry.begin("42-7").unwrap();

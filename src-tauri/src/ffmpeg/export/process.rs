@@ -1550,7 +1550,11 @@ mod tests {
     #[test]
     fn both_processes_run_in_the_working_directory() {
         let parent = crate::flv::test_support::TestDirectory::new();
-        let work = super::super::work_directory::ExportWorkDirectory::create(&parent.path).unwrap();
+        let work = crate::app_cache::work::WorkDirectory::create(
+            &parent.path,
+            crate::app_cache::work::EXPORT_WORK_DIRECTORY,
+        )
+        .unwrap();
         let directory = work.path().to_path_buf();
         let pair = pair("pwd > audio.txt", "pwd > encoder.txt; exec cat");
         let outcome = run_export_process(
