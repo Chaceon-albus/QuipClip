@@ -26,13 +26,13 @@ QuipClip can do these things:
   video only, or the audio only. An export of one segment can copy the source audio.
 - Add an export to a queue while another export runs.
 - Find `ffmpeg`, and test which encoders work on your machine.
+- Download `ffmpeg` after you agree, when QuipClip finds none.
 - Show the interface in English or Simplified Chinese, with a light or a dark theme.
 
 QuipClip cannot do these things yet:
 
 - Save a project file. QuipClip keeps the segments only until you quit. It asks before a
   quit that would lose segments.
-- Download `ffmpeg`. You must install it yourself.
 - Preview AVI or WMV files, or a video in a codec that the system web view cannot decode.
   On Windows, install the HEVC Video Extensions from the Microsoft Store to preview HEVC.
 
@@ -64,6 +64,20 @@ warning at the first start. macOS blocks the first start. To allow it:
 QuipClip does not bundle `ffmpeg`. It needs `ffmpeg` and `ffprobe` in the same folder. It
 cannot open a video without them.
 
+When QuipClip finds no `ffmpeg`, the FFmpeg tab of Settings shows **Download FFmpeg…**. A
+dialog then shows the version, the source, the license, the size, and the folder. When you
+agree, QuipClip downloads a pinned build and checks its size and its SHA-256. Then it puts the
+two programs in the `bin` folder in the local data folder. Each QuipClip release pins one
+build for each system:
+
+- Windows x64: the full build from [Gyan](https://github.com/GyanD/codexffmpeg), a download
+  of about 250 MB.
+- macOS on Apple silicon: the build from [martin-riedl.de](https://ffmpeg.martin-riedl.de).
+
+The two builds use the GPL, version 3 or later. They do not have the `libfdk_aac` encoder.
+
+You can also install `ffmpeg` yourself:
+
 - macOS, with [Homebrew](https://brew.sh): `brew install ffmpeg`. After the install, click
   **Check Again** in Settings.
 - Windows, in PowerShell or Command Prompt:
@@ -77,6 +91,9 @@ QuipClip searches for the programs in this order:
 3. The `bin` folder in the application data folder:
    - Windows: `%APPDATA%\io.github.capric98.quipclip\bin`
    - macOS: `~/Library/Application Support/io.github.capric98.quipclip/bin`
+4. The `bin` folder in the local data folder, where the download puts the programs:
+   - Windows: `%LOCALAPPDATA%\io.github.capric98.quipclip\bin`
+   - macOS: the folder of step 3
 
 ## Use
 

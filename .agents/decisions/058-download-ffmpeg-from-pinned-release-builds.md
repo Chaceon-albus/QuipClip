@@ -160,6 +160,13 @@ directory, and that a path in Settings stays first. The dialog offers Choose Fil
 alternative. The install guide of the tab stays visible: Homebrew on macOS, `winget` on
 Windows. QuipClip downloads nothing before the user agrees.
 
+(Changed on 2026-11-05.) The dialog says that the download replaces a program only when the
+offer is for a pair in `<local_data>/bin` that fails the version check. When that directory holds
+only one of the two programs, the install replaces that file, and the dialog does not say so. The
+tab shows the install guide only for the status `missing`. This also applies to the guide after
+`sizeMismatch` or `hashMismatch`, and after a deleted source file. When the status is `failed`,
+the text of the offer does not refer to the guide.
+
 ### The install
 
 1. QuipClip downloads each archive into the install work directory,
@@ -190,6 +197,10 @@ QuipClip trusts. It uses the proxy of the system, and it does not read a PAC fil
 must open within 30 s. A read that gets no byte for 60 s fails. The download has no limit of
 total time.
 
+(Added on 2026-11-05.) Until the response head arrives, the limit of 60 s is one limit for the
+whole request: the connection, the TLS, each redirect and the wait for the server. The client
+does not start that limit again at a redirect.
+
 Only a network failure, an HTTP status, a wrong size or a wrong SHA-256 makes QuipClip try the
 next URL. A local failure, such as `writeFailed`, `workDirectoryUnavailable` or `canceled`,
 stops the install at once. When each URL fails, the result is `hashMismatch` if one URL gave a
@@ -202,6 +213,14 @@ The error codes are `unsupportedTarget`, `busy`, `alreadyFound`, `appDataUnavail
 `sizeMismatch` or `hashMismatch`, the same URL would give the same bytes again. The tab then
 offers Choose File… and the install guide, and not Try Again.
 
+(Added on 2026-11-05.) A fifteenth code, `commandExecutionFailed`, reports an install that could
+not run: its thread did not start, or it stopped on an internal error. The page also uses
+`commandExecutionFailed` for a refusal with no known code, and `invalidResponse` for a reply or a
+message of the wrong shape. The tab offers Try Again after `busy`, `networkFailed`,
+`httpStatus`, `workDirectoryUnavailable`, `writeFailed`, `commandExecutionFailed` and
+`invalidResponse`, while the tab still shows the offer, because a new attempt with the same files
+can succeed. It offers no Try Again after the other codes.
+
 ### The commands
 
 | Command                 | Use                                                     |
@@ -212,6 +231,13 @@ offers Choose File… and the install guide, and not Try Again.
 
 Only the Settings window may call these commands (ADR 038). The job sends its progress and its
 end through a channel, as the envelope job of ADR 056 does. So the install needs no new event.
+
+(Added on 2026-11-05.) `start_ffmpeg_install` takes the slot first, and it checks the conditions
+of the offer while it holds the slot. So a second request gets `busy` before the version check,
+and the check cannot pass for a pair that a running install replaces. A close or a reload of the
+Settings window stops that version check, and the request then gives `canceled`. The job removes
+its work directory and frees the slot. Then it sends its end. So a page that starts again at the
+end finds the slot free.
 
 ### Cancel and exit
 

@@ -100,7 +100,8 @@ document summarizes them and shows how the parts fit together.
 |                                                             |
 |  commands/   the IPC surface                                |
 |  app_cache/  the cache layout, and its cleanup at start     |
-|  ffmpeg/     locate, probe, capabilities, export, preview   |
+|  ffmpeg/     locate, probe, capabilities, export, preview,  |
+|              envelope, install                              |
 |  flv/        FLV tags, keyframe locator, keyframe cache     |
 |  settings/   the settings file                              |
 |  fsutil.rs   atomic file replacement                        |
@@ -442,20 +443,40 @@ source edit points.
 
 ## ffmpeg lifecycle
 
-See ADR 005, ADR 006, and ADR 012.
+See ADR 005, ADR 006, ADR 012, and ADR 058.
 
-Resolution order: the configured path, then `PATH`, then `<app_data>/bin`. ADR 005 adds a
-fourth step, a download the user agreed to. That step is not implemented.
-`app_data_dir()` from the Tauri path API already follows the Windows and the macOS
-convention, so no code builds those paths by hand.
+Resolution order: the configured path, then `PATH`, then `<app_data>/bin`, then
+`<local_data>/bin`. The last directory holds the programs that the download installs. On
+macOS the two `bin` directories are one directory. Both have the origin `appData`.
+`app_data_dir()` and `app_local_data_dir()` from the Tauri path API already follow the
+Windows and the macOS convention, so no code builds those paths by hand.
 
 On macOS, the `PATH` lookup appends `/opt/homebrew/bin` and `/usr/local/bin` after the
 directories from the process `PATH`. This rule lets GUI applications find a standard
 Homebrew installation without starting a login shell.
 
-ADR 005 specifies a download manifest that pins a URL and a SHA-256 per target, because the
-Windows build server publishes no macOS asset. Neither the manifest nor the installer exists
-yet. ADR 058 gives the design of the download.
+The download is the fourth step of ADR 005 (ADR 058). The manifest
+`src-tauri/resources/ffmpeg-manifest.json` pins one FFmpeg release for each release target.
+Windows x86-64 gets the full build of Gyan. macOS arm64 gets the build of martin-riedl.de. For
+each archive the manifest gives the URLs, the size, the SHA-256, and the path of each program
+in the zip. The binary embeds the manifest. `pnpm ffmpeg:manifest` writes it again before a
+release (`docs/releasing.md`).
+
+Only Rust decides when the FFmpeg tab of the Settings window offers the download. It offers
+the download when discovery finds no pair, or when the only pair is in `<local_data>/bin` and
+fails its version check. The install never replaces a pair that works. The install takes the
+one slot, and then it does these steps:
+
+1. It downloads each archive into `<cache>/work/ffmpeg-install-<pid>-<n>/`, and compares the
+   size and the SHA-256 with the manifest.
+2. It extracts the two programs.
+3. It runs `-version` of each program, and compares the version and the licence flags with
+   the manifest.
+4. It moves `ffprobe` and then `ffmpeg` into `<local_data>/bin`.
+
+The install sends its progress and its end through a channel. A close or a reload of the
+Settings window cancels it, and the exit cancels it with no wait. After the install, the
+Settings window starts a forced probe, and the main window also gets its result (ADR 038).
 
 After the programs resolve, a background job finds out which encoders work. It lists them,
 then runs a fraction-of-a-second encode with each candidate, because a listed hardware
@@ -477,11 +498,10 @@ then renames a temporary file into place, so a late write keeps the entries that
 run wrote.
 
 Discovery reads the configured path from the settings file first, and then it falls back to
-`PATH` and the application data directory. The failure payload names each inspected
-`ffmpeg` and `ffprobe` candidate with
-its origin class, so the user sees where the application looked. The job runs two of the
-four listings. `-decoders` and `-filters` have parsers and tests, and they gain their
-command when the preview proxy and the export renderer need them.
+`PATH` and the two `bin` directories. The failure payload names each inspected `ffmpeg` and
+`ffprobe` candidate with its origin class, so the user sees where the application looked. The
+job runs two of the four listings. `-decoders` and `-filters` have parsers and tests, and they
+gain their command when the preview proxy and the export renderer need them.
 
 ## Settings
 

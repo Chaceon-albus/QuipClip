@@ -43,6 +43,9 @@ differ, ADR 058 holds. It changes the sources, the manifest and its script, the 
 place of the offer, the directory and the order of the install. Step 4 installs into
 `<local_data>/bin`, and discovery searches that directory after `<app_data>/bin`.
 
+(Added on 2026-11-05.) Step 4 is implemented as ADR 058 describes. The note of 2026-11-04 no
+longer applies.
+
 `app_data_dir()` from the Tauri path API already follows both platform rules:
 `%APPDATA%\<identifier>` on Windows, and `~/Library/Application Support/<identifier>` on
 macOS. The application does not build these paths by hand.

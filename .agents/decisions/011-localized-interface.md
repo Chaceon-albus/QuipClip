@@ -95,6 +95,14 @@ asks for it.
 
 (Changed on 2026-10-02.) The language, like the theme and the timecode format, reaches the Settings window and the main window through `preferences:changed` (ADR 038). The receiver applies the value and writes no storage.
 
+(Added on 2026-11-05.) The types of `i18next` check each call of `t` against the whole English
+catalog. A helper can take the `t` of `useTranslation` and return a `string`. TypeScript then
+resolves the return type over the whole catalog. With more than about 670 messages, TypeScript
+could not resolve that type, and it gave the error TS2589. Such a helper casts `t` to a narrow
+view that names only its own keys. `formatBatchSummary` in `ExportStatusIndicator.tsx` and
+`timecodeEntryErrorMessage` in `PreviewTimecode.tsx` do this. A component that only renders the
+result of `t` needs no such view.
+
 ## Consequences
 
 - `i18next` and `react-i18next` become runtime dependencies before feature work starts.

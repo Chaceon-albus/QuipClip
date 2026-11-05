@@ -22,12 +22,12 @@ QuipClip 可以：
 - 使用预设导出片段。输出可以同时包含视频和音频，也可以只含视频或只含音频。导出单个片段时，可以复制源音频。
 - 另一个导出正在运行时，将导出加入队列。
 - 查找 `ffmpeg`，并测试哪些编码器能在本机上使用。
+- 未找到 `ffmpeg` 时，经您同意后下载 `ffmpeg`。
 - 以英文或简体中文显示界面，使用浅色或深色主题。
 
 QuipClip 目前还不能：
 
 - 保存项目文件。QuipClip 只在退出前保留片段。如果退出会丢失片段，QuipClip 会先询问。
-- 下载 `ffmpeg`。必须自行安装。
 - 预览 AVI 或 WMV 文件，或采用系统 WebView 无法解码的编码格式的视频。在 Windows 上，要预览 HEVC，请从 Microsoft Store 安装“HEVC 视频扩展”。
 
 ## 安装
@@ -54,6 +54,15 @@ QuipClip 目前还不能：
 
 QuipClip 不附带 `ffmpeg`。它需要位于同一文件夹中的 `ffmpeg` 和 `ffprobe`，缺少它们就无法打开视频。
 
+QuipClip 未找到 `ffmpeg` 时，设置中的 FFmpeg 选项卡会显示**下载 FFmpeg…**。随后的对话框会列出版本、来源、许可证、大小和目标文件夹。您同意后，QuipClip 下载一个固定的构建版本，检查其大小和 SHA-256，然后把这两个程序放入本地数据文件夹中的 `bin` 文件夹。每个 QuipClip 发布版为每个系统固定一个构建版本：
+
+- Windows x64：[Gyan](https://github.com/GyanD/codexffmpeg) 的完整构建版本，下载大小约 250 MB。
+- macOS（Apple 芯片）：[martin-riedl.de](https://ffmpeg.martin-riedl.de) 的构建版本。
+
+这两个构建版本采用 GPL 第 3 版或更高版本许可证，不包含 `libfdk_aac` 编码器。
+
+您也可以自行安装 `ffmpeg`：
+
 - macOS，使用 [Homebrew](https://brew.sh)：`brew install ffmpeg`。安装完成后，在设置中点击**重新检测**。
 - Windows，在 PowerShell 或“命令提示符”中：`winget install -e --id Gyan.FFmpeg --source winget`。安装完成后，退出 QuipClip，然后从“开始”菜单重新打开。
 
@@ -64,6 +73,9 @@ QuipClip 按以下顺序搜索这两个程序：
 3. 应用程序数据文件夹中的 `bin` 文件夹：
    - Windows：`%APPDATA%\io.github.capric98.quipclip\bin`
    - macOS：`~/Library/Application Support/io.github.capric98.quipclip/bin`
+4. 本地数据文件夹中的 `bin` 文件夹，即下载的程序所在的位置：
+   - Windows：`%LOCALAPPDATA%\io.github.capric98.quipclip\bin`
+   - macOS：与第 3 步的文件夹相同
 
 ## 使用
 

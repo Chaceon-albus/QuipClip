@@ -64,14 +64,59 @@ A repository administrator does these steps one time.
    deletions to the maintainers. An immutable release protects its tag only after the
    publish.
 
+## Pin the FFmpeg download
+
+Step 1 of [Steps](#steps) sends you here before each release. ADR 058 gives the reasons.
+
+The application embeds `src-tauri/resources/ffmpeg-manifest.json`. That file pins the FFmpeg
+that the FFmpeg tab of Settings downloads. It holds one FFmpeg release for each release target.
+For each file it gives the URL, the size, and the SHA-256. A release must pin the newest FFmpeg
+release of each source.
+
+1. Write the manifest again:
+
+   ```bash
+   pnpm ffmpeg:manifest
+   ```
+
+   The script reads the GitHub API. Set `GITHUB_TOKEN` when the API limits your requests. The
+   script sends the token only to `api.github.com`. It exits 1 on a failure, and it prints the
+   cause.
+
+2. When `git diff -- src-tauri/resources/ffmpeg-manifest.json` shows no change, the pin is
+   current. Go to step 2 of [Steps](#steps).
+3. Read the diff. For each target that changed, the new `version` must be higher than the old
+   one. When a version is lower, or when a `sha256` changed and its `version` did not, do not
+   commit. Run `git restore src-tauri/resources/ffmpeg-manifest.json`, and find the cause.
+4. Commit only the manifest. Use the FFmpeg version in the subject:
+
+   ```bash
+   git add src-tauri/resources/ffmpeg-manifest.json
+   git commit -m "chore(ffmpeg): pin FFmpeg 9.0.2 in the download manifest"
+   ```
+
+5. Push the commit to `main`, and wait until CI passes on that commit. CI runs the test that
+   parses the embedded manifest. When `main` takes changes only through pull requests, merge
+   one.
+6. Test the download on Windows and on a Mac with Apple silicon:
+   1. Make sure that QuipClip can find no FFmpeg. No FFmpeg must be on `PATH`, in a path in
+      Settings, or in the two `bin` folders of the README. On macOS, no FFmpeg must be in
+      `/opt/homebrew/bin` or `/usr/local/bin`. When the `bin` folder in the local data folder
+      holds an earlier download, remove that folder.
+   2. Start QuipClip from the commit of step 5. Download FFmpeg from the FFmpeg tab of
+      Settings. The status must then show the new version.
+7. Go to step 2 of [Steps](#steps).
+
+`pnpm ffmpeg:manifest --check` exits 1 when the manifest differs from a new run.
+
 ## Steps
 
-An agent does steps 1 to 4 only when the user asks. The user does the push in step 5 and
-all the steps after it.
+An agent does steps 1 to 4 only when the user asks. The user does each push, the test in step 6
+of [Pin the FFmpeg download](#pin-the-ffmpeg-download), and each step after step 4.
 
-1. Update your local `main`. Make sure that `src-tauri/Cargo.toml` and
-   `src-tauri/Cargo.lock` have no uncommitted changes. The bump refuses to start when they
-   have changes.
+1. Update your local `main`. Make sure that `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`
+   have no uncommitted changes. The bump refuses to start when they have changes. Then do
+   [Pin the FFmpeg download](#pin-the-ffmpeg-download).
 2. Run the bump:
 
    ```bash

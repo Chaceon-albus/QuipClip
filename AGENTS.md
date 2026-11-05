@@ -33,7 +33,8 @@ src/            React frontend
   assets/brand/     the icon master
 src-tauri/      Rust backend
   src/app_cache/    the layout of the cache directory, and its cleanup at start
-  src/ffmpeg/       locate, probe, capabilities, export, preview windows, the audio envelope
+  src/ffmpeg/       locate, probe, capabilities, export, preview windows, the audio envelope,
+                    the download
   src/flv/          the FLV tag reader, the keyframe locator, the FLV head, the keyframe cache
   src/settings/     the settings file
   src/menu.rs       the macOS application menu
