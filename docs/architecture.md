@@ -1,18 +1,19 @@
 # QuipClip architecture
 
-QuipClip is a video editor for Windows and macOS. The user opens a video, marks several
-In and Out pairs on one timeline, and exports those segments joined in order. A
+QuipClip is a video editor for Windows and macOS. The user opens one or more videos, marks
+several In and Out pairs on one timeline, and exports those segments joined in order. A
 command-line `ffmpeg` does the export.
 
 Two requirements shape everything below.
 
 1. **Edit boundaries preserve source presentation timing.** The project stores source
    video PTS values instead of positions on a generated frame grid.
-2. **The application does not bundle `ffmpeg`.** It finds the programs, or it asks the user
-   and downloads them.
+2. **The application does not bundle `ffmpeg`.** It finds the programs that the user
+   installed. ADR 005 also specifies a download that the user agrees to. That step is not
+   implemented.
 
-Version 1 edits one source. Several sources come later, and the model already carries the
-source key that makes that possible. Multi-track is out of scope and stays out of scope.
+The timeline holds one sequence of clips. Each clip places one source, and the clips play
+one after another (ADR 052). Multi-track is out of scope and stays out of scope.
 
 ## Decision records
 
@@ -152,13 +153,15 @@ Rust defines distinct `Pts`, `TickCount`, and `FrameCount` types. TypeScript def
 corresponding branded types. These integer values cross JSON as canonical decimal strings.
 This rule preserves the full signed `i64` PTS range.
 
-Each segment stores `[inPts, outPts)` in the video stream named by `sourceId`. `inPts` is
-inclusive. `outPts` is the PTS of the first excluded presented frame. The exact duration is
-`(outPts - inPts) * videoTimeBase`.
+Each segment stores `[inPts, outPts)` as two edit points. An edit point is a clip and a PTS
+in the video stream of the source of that clip (ADR 052). `inPts` is inclusive. `outPts` is
+the PTS of the first excluded presented frame, or the end of its clip. When both edit points
+are on one clip, the exact duration is `(outPts - inPts) * videoTimeBase`.
 
 `videoDurationTicks` is source-extent metadata. It is not the end boundary of the final
 presented frame. `approximateDurationSeconds` can support UI layout and browser seek
-requests only. Neither duration value can create an edit boundary.
+requests only. Neither duration value can create an edit boundary. When the probe finds it,
+`videoEndPts` is the end boundary of the final presented frame (ADR 052).
 
 TypeScript uses `BigInt` and exact rationals for canonical calculations. It converts to a
 JavaScript number only for browser APIs and pixel layout. Checked conversion helpers reject
@@ -169,10 +172,11 @@ positions use exact rational durations or exact rescaling to a runtime common ti
 QuipClip does not persist a project timeline time base or segment timeline starts.
 
 The output frame rate is `renderSettings.frameRate`. It is a future render setting. It
-does not define edit positions. The UI shows source-relative elapsed time as
-`HH:MM:SS:FF` by default, with frames from the nominal rate for display and for typed
-timecode navigation only, and as `HH:MM:SS.mmm` when the user chooses it or the source has no
-single nominal rate (ADR 028).
+does not define edit positions. The UI shows sequence time, the elapsed time from the start
+of the sequence (ADR 052). It shows `HH:MM:SS:FF` by default, with frames from the nominal
+rate for display and for typed timecode navigation only. It shows `HH:MM:SS.mmm` when the
+user chooses it, or when the sequence does not meet the frame rules of ADR 028 and ADR 052.
+Two clips with two nominal rates are an example.
 
 ## Preview
 
@@ -277,8 +281,9 @@ time: a request that arrives while the element seeks replaces the queued request
 drag. A drag uses `fastSeek` where the web view has it, and the release always ends with an
 exact seek. See ADR 022.
 
-The current _Source_ preview plays the whole file. A future _Program_ preview will play
-only the segments, so the user can watch what the export will contain.
+The current _Source_ preview plays the sequence, one clip at a time (ADR 052). A future
+_Program_ preview will play only the segments, so the user can watch what the export will
+contain.
 
 The timeline can show the audio envelope of a source, so the user can find where a person
 sings or speaks in a long recording. The menu of a clip label starts it, and it is off by
@@ -397,9 +402,9 @@ exports that wait, so no export starts during the wait (ADR 049).
 A close or a quit that would lose work asks first (ADR 027). The window close and the
 custom macOS Quit item both reach one frontend decision. It asks when segments, a pending In
 point, an active export or an unsaved preset draft would be lost, and otherwise it quits at
-once through the `confirm_quit` command. Opening another video over one with segments also
-asks. Exits that cannot be prevented, such as the Dock Quit or a logout, still cancel the
-export and wait.
+once through the `confirm_quit` command. An import adds clips and replaces nothing, so it
+does not ask. Clear Timeline asks when segments exist (ADR 052). Exits that cannot be
+prevented, such as the Dock Quit or a logout, still cancel the export and wait.
 
 A dismissal of the export dialog during an active run hides the dialog. It does not cancel
 the run (ADR 025). Only the Stop Export button cancels, and a run of 30 seconds or more
@@ -550,6 +555,7 @@ type PersistedSource = {
   videoStreamIndex: number;
   videoTimeBase: Rational;
   videoStartPts: Pts | null;
+  videoEndPts: Pts | null; // the PTS after the last presented frame
   videoDurationTicks: TickCount | null;
   approximateDurationSeconds: number | null;
   avgFrameRate: Rational | null;
@@ -562,11 +568,17 @@ type Source = Omit<PersistedSource, "proxy"> & {
   proxy?: { path: string; state: "none" | "building" | "ready" | "failed" };
 };
 
-type Segment = {
+type Clip = {
   id: string;
   sourceId: string;
-  inPts: Pts; // inclusive
-  outPts: Pts; // exclusive
+};
+
+type SequenceSegment = {
+  id: string;
+  inClipId: string;
+  inPts: Pts; // inclusive, in the video time base of the source of inClipId
+  outClipId: string;
+  outPts: Pts; // exclusive, in the video time base of the source of outClipId
 };
 
 type Project = {
@@ -576,30 +588,44 @@ type Project = {
     resolution: { w: number; h: number };
   };
   sources: PersistedSource[];
-  segments: Segment[]; // export order is array order
-  activeSourceId: string;
+  clips: Clip[]; // sequence order is array order
+  segments: SequenceSegment[]; // export order is array order
 };
 ```
 
-The timeline axis is the active source's elapsed presentation time. It paints only segments
-that reference that source. The global segment array keeps the future export order.
+The timeline shows one sequence (ADR 052). A clip places one source on the sequence, and
+the clips play in array order. Two imports of one unchanged file give one source and two
+clips. A segment names a clip and a source PTS for its In and for its Out, so it can cross
+from one clip into the next.
 
-ADR 052 replaces this one-source model, and the code moves to it in steps. A clip places one
-source on a sequence, and the clips play in array order. A segment names a clip and a source
-PTS for its In and for its Out, so it can cross from one clip into the next. Only
-`clipRange` reads the range of a clip, and only `layoutSequence` computes where a clip starts
-on the sequence. The project stores no sequence time. A source gains `videoEndPts`, the exact
-end of its last frame. An operation on clips never changes the frames of a segment, except
-the removal of a clip. The segment array stays the export order, and the export request
-carries each segment as one or more source intervals.
+Only `clipRange` reads the range of a clip, and only `layoutSequence` computes where a clip
+starts on the sequence. The project stores no sequence time. An operation on clips never
+changes the frames of a segment, except the removal of a clip. The segment array is the
+export order, and the export request carries each segment as one or more pieces. A piece is
+an interval of one source.
 
-The ruler uses `videoDurationTicks` first. It then uses a valid approximate probe duration,
-then a finite browser duration. If none exists, the ruler is indeterminate and disables
-absolute click seeking. Approximate seeking never creates project state.
+On a sequence of several clips, the ruler spans the sum of the clip extents. The extent of a
+clip is its range, from `videoStartPts` to `videoEndPts`, when both exist. Otherwise the
+extent comes from `videoDurationTicks`, then from a valid approximate probe duration, then
+from a finite browser duration. An extent from one of these fallbacks is approximate. Each
+later clip then has an approximate start. A source with no extent cannot share the sequence
+with another clip.
 
-Mark In stores the inferred PTS of the displayed frame. Mark Out stores the current PTS as
-the first excluded frame. Split creates adjacent half-open segments. Exact inclusion of the
-final source frame needs discovery of its following boundary.
+A sequence of one clip keeps the ruler of ADR 007. The ruler uses `videoDurationTicks`
+first. It then uses a valid approximate probe duration, then a finite browser duration. If
+none exists, the ruler is indeterminate and disables absolute click seeking. Approximate
+seeking never creates project state.
+
+Mark In stores the clip and the inferred PTS of the displayed frame. Mark Out stores the
+clip and the current PTS as the first excluded frame. Split creates adjacent half-open
+segments.
+
+On the first frame of a clip, Mark Out stores the end of the clip before it, so each
+boundary has one form. When that clip has no `videoEndPts`, or when no clip comes before,
+Mark Out and Finish Segment with a pending In are disabled there. So a segment can include
+the last frame of a clip only when that clip has a `videoEndPts`. An edit action writes such
+an Out only when another clip follows that clip. A Remove or a Move can leave an Out at the
+end of the clip that becomes the last clip, and that Out is valid.
 
 One segment is current, and every edit action names it rather than inferring a target from the
 playhead. Segments may therefore overlap without ambiguity. Mark In and Mark Out adjust its
@@ -616,10 +642,9 @@ See ADR 045.
 
 `Source.id` is stable project identity. A separate revision key of path, size, and
 modification time drives runtime invalidation and the replacement warning. The generated
-source id is keyed by that revision key, so a file changed in place becomes a new source and
-the segments marked against the old one stop matching it. Source or revision changes do not
-erase canonical segments: they stay in the project array, and they stop belonging to the
-active source.
+source id is keyed by that revision key, so a file changed in place becomes a new source. A
+source or revision change does not erase segments. The import of a changed file adds a new
+source and a new clip. The segments marked on the clip of the old source stay on that clip.
 
 Before an export, the frontend re-reads the file's size and modification time through a
 stat-only command that runs no `ffprobe`, and compares them against the revision the segments
@@ -640,8 +665,8 @@ projection lists each persisted field. It does not use object spread as a serial
 filter.
 
 The project file is `.qcproj`, which is versioned JSON. See ADR 010. The document stores
-absolute and relative source paths, and it stores `activeSourceId`. Runtime proxy and browser
-state do not enter the file.
+absolute and relative source paths, and it stores the clips of the sequence. Runtime proxy
+and browser state do not enter the file.
 
 Version 1 writes no project file. The user imports the sources in each session, so the
 segments last for one session, and the export presets live in the settings file instead. Rust

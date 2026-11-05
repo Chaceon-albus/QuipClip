@@ -30,6 +30,13 @@ A `redirect/latest/...` URL answers 307 with a pinned versioned path.
 3. `<app_data_dir>/bin/ffmpeg[.exe]` and `<app_data_dir>/bin/ffprobe[.exe]`.
 4. Ask the user for consent, then download.
 
+(Added on 2026-11-04.) Steps 1 to 3 are implemented. Step 4 is not implemented. The
+application has no manifest, no manifest script, no consent dialog and no installer. When
+steps 1 to 3 find no programs, the user must install `ffmpeg` and `ffprobe`, or set their
+location in the settings. The rules below for the manifest, the hash mismatch, the consent
+and the install stay the plan for step 4. The read of the licence flags from
+`ffmpeg -version` is implemented.
+
 `app_data_dir()` from the Tauri path API already follows both platform rules:
 `%APPDATA%\<identifier>` on Windows, and `~/Library/Application Support/<identifier>` on
 macOS. The application does not build these paths by hand.

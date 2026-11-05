@@ -1,11 +1,11 @@
 # QuipClip — agent rules
 
-QuipClip is a video editor for Windows and macOS. The user opens a video, marks several
-In and Out pairs on one timeline, and exports those segments joined in order. A
+QuipClip is a video editor for Windows and macOS. The user opens one or more videos, marks
+several In and Out pairs on one timeline, and exports those segments joined in order. A
 command-line `ffmpeg` does the export. The application never bundles `ffmpeg`.
 
-Version 1 edits one source. Several sources come later. Multi-track is out of scope and
-stays out of scope.
+The timeline holds one sequence of clips. Each clip places one source, and the clips play
+one after another (ADR 052). Multi-track is out of scope and stays out of scope.
 
 ## Stack
 
@@ -25,7 +25,7 @@ Hold TypeScript at 5.9. `typescript-eslint` caps its peer range below 6.1.
 src/            React frontend
   components/ui/    shadcn output. Generated code, with marked hand edits.
   components/       common, export, layout, preview, settings, timeline, transport
-  features/         export, ffmpeg, media, playback, settings, timeline
+  features/         export, ffmpeg, media, playback, sequence, settings, timeline, waveform
   i18n/             the catalogs and the language resolver
   lib/              rational math, timecode, Tauri bindings
   styles/           globals.css holds the palette
