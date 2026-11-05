@@ -40,6 +40,9 @@ export const BACKEND_COMMANDS = {
   CANCEL_WAVEFORM: "cancel_waveform",
   WAVEFORM_CACHE_USAGE: "waveform_cache_usage",
   CLEAR_WAVEFORM_CACHE: "clear_waveform_cache",
+  FFMPEG_DOWNLOAD_OFFER: "ffmpeg_download_offer",
+  START_FFMPEG_INSTALL: "start_ffmpeg_install",
+  CANCEL_FFMPEG_INSTALL: "cancel_ffmpeg_install",
   BUILD_INFO: "build_info",
 } as const;
 
