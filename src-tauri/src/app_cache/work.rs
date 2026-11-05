@@ -12,6 +12,9 @@
 //! [`crate::ffmpeg::export::graph_file`] and the head of each FLV source of the export,
 //! `h<k>.flv` (ADR 046).
 //!
+//! An install of `ffmpeg` creates `ffmpeg-install-<pid>-<n>` (ADR 058). It holds the downloaded
+//! zips and the extracted programs until they move into `<local_data>/bin`.
+//!
 //! A write never creates the directory. So a write that an abandoned preparation (ADR 050) makes
 //! after the removal fails, and it leaves nothing.
 //!
@@ -39,9 +42,10 @@ use std::time::{Duration, SystemTime};
 pub const WORK_DIRECTORY_REMOVAL_BUDGET: Duration = Duration::from_millis(511);
 
 /// How old a work directory that this process does not use must be before
-/// [`remove_stale_work_directories`] removes it. This is far above the time limit of preparation
-/// (ADR 050), so the sweep does not remove the directory of an export of another QuipClip
-/// process that runs now.
+/// [`remove_stale_work_directories`] removes it. This is far above the time limit of the
+/// preparation of an export (ADR 050), and above the time of a download of `ffmpeg` on a slow
+/// line, so the sweep does not remove the directory of a job of another QuipClip process that
+/// runs now.
 pub const STALE_WORK_DIRECTORY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// One kind of work directory: the prefix of its names, and the word that starts its log lines.
@@ -55,6 +59,13 @@ pub struct WorkDirectoryKind {
 pub const EXPORT_WORK_DIRECTORY: WorkDirectoryKind = WorkDirectoryKind {
     prefix: "export-",
     log_label: "export",
+};
+
+/// The work directory of an install of `ffmpeg`, `ffmpeg-install-<pid>-<n>` (ADR 058). It holds
+/// the downloaded zips and the extracted programs until they move into `<local_data>/bin`.
+pub const FFMPEG_INSTALL_WORK_DIRECTORY: WorkDirectoryKind = WorkDirectoryKind {
+    prefix: "ffmpeg-install-",
+    log_label: "install",
 };
 
 /// The most names that [`WorkDirectory::create`] tries.
@@ -480,8 +491,21 @@ mod tests {
                 "{name}"
             );
             assert!(!is_work_directory_name(name, OTHER), "{name}");
+            assert!(
+                !is_work_directory_name(name, FFMPEG_INSTALL_WORK_DIRECTORY),
+                "{name}"
+            );
         }
         assert!(is_work_directory_name("other-1-0", OTHER));
+        // The two kinds of the application never take each other's names.
+        assert!(is_work_directory_name(
+            "ffmpeg-install-1-0",
+            FFMPEG_INSTALL_WORK_DIRECTORY
+        ));
+        assert!(!is_work_directory_name(
+            "ffmpeg-install-1-0",
+            EXPORT_WORK_DIRECTORY
+        ));
         for name in [
             "export-",
             "export-1",

@@ -58,6 +58,13 @@ impl Cancel {
         self.flag.load(Ordering::SeqCst)
     }
 
+    /// The flag of the cancel, for a process runner that reads a stop flag at each poll. Only
+    /// read it: a write here would not wake a download that waits. Cancel with [`Self::cancel`].
+    #[must_use]
+    pub fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+
     /// Ends when the install is canceled, also when that happened before the call.
     pub async fn canceled(&self) {
         loop {
