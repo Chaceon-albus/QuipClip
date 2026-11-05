@@ -34,6 +34,19 @@ serde_json = "1"
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-opener = "2.7.2"
 
+# The download of ffmpeg (ADR 058). `reqwest` uses the TLS of the system (Schannel on Windows,
+# Security.framework on macOS) and the proxy of the system. So it adds no OpenSSL and no C build
+# step on the two release targets. Its default TLS, rustls with aws-lc-rs, compiles C
+# (aws-lc-sys). HTTP/2, charset and decompression stay off, because the download reads one
+# binary body over HTTP/1.1. `zip` reads only stored and deflate entries, through flate2 (already
+# built for png) with its zlib-rs backend, both pure Rust. `sha2` checks each archive against the
+# manifest, and `tokio` gives the `Notify` that cancels a read. tauri already builds `sha2` 0.10
+# and `tokio` 1, so these two add no package.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+zip = { version = "9.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
 # The measurement of the macOS window buttons at startup (`traffic_lights.rs`, ADR 020). It
 # reads the frame of the standard close button through AppKit. tauri, tao and wry already
 # depend on these three crates at these versions, so the lock file gains no package. The
