@@ -4476,7 +4476,8 @@ mod tests {
         let resolved = configured_ffmpeg_path(&app_data);
         assert_eq!(resolved.as_deref(), Some(configured.as_path()));
 
-        let found = crate::ffmpeg::discover_with_path(resolved.as_deref(), &[], &app_data).unwrap();
+        let found =
+            crate::ffmpeg::discover_with_path(resolved.as_deref(), &[], &app_data, None).unwrap();
         assert_eq!(found.origin, crate::ffmpeg::ExecutableOrigin::Configured);
         assert_eq!(
             found.ffmpeg,
@@ -4501,9 +4502,13 @@ mod tests {
         let empty_resolved = configured_ffmpeg_path(&empty_app_data);
         assert_eq!(empty_resolved.as_deref(), Some(empty_configured.as_path()));
 
-        let error =
-            crate::ffmpeg::discover_with_path(empty_resolved.as_deref(), &[], &empty_app_data)
-                .unwrap_err();
+        let error = crate::ffmpeg::discover_with_path(
+            empty_resolved.as_deref(),
+            &[],
+            &empty_app_data,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(error, crate::ffmpeg::LocateError::NotFound { .. }));
     }
 }

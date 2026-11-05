@@ -180,11 +180,17 @@ pub fn run() {
         .menu(menu::build_app_menu)
         .on_menu_event(menu::handle_menu_event);
 
-    // The macOS configuration does not create the main window. This hook builds it with the
-    // position of the window buttons that centres them on this macOS version (ADR 020). See
-    // `traffic_lights`.
-    #[cfg(target_os = "macos")]
     let builder = builder.setup(|app| {
+        // Tauri runs this hook on the main thread before the event loop handles any IPC
+        // request, also after it builds the configured main window on Windows. So the first
+        // discovery already searches the download directory of ADR 058.
+        if let Ok(directory) = app.path().app_local_data_dir() {
+            ffmpeg::locate::set_local_data_directory(directory);
+        }
+        // The macOS configuration does not create the main window. This hook builds it with the
+        // position of the window buttons that centres them on this macOS version (ADR 020). See
+        // `traffic_lights`.
+        #[cfg(target_os = "macos")]
         traffic_lights::create_main_window(app)?;
         Ok(())
     });

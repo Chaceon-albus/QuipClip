@@ -1,4 +1,8 @@
 //! Discovery of a user-owned ffmpeg and ffprobe executable pair.
+//!
+//! The order is the configured path, `PATH` (on macOS, then the Homebrew directories of
+//! ADR 012), `<app_data>/bin`, then `<local_data>/bin`, where the download of ADR 058 installs
+//! the pair. Both `bin` directories have the origin `appData`.
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -8,6 +12,15 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The directory of the programs in a data directory of the application.
+const BIN_DIR_NAME: &str = "bin";
+
+/// `app_local_data_dir()` of Tauri (ADR 058). The application sets it once at its start, and it
+/// does not change while the process runs. It stays unset when Tauri gives no path, and
+/// discovery then skips `<local_data>/bin`.
+static LOCAL_DATA_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
 #[cfg(windows)]
 const FFMPEG_NAME: &str = "ffmpeg.exe";
@@ -77,13 +90,40 @@ impl fmt::Display for LocateError {
 
 impl Error for LocateError {}
 
-/// Discover executables using the current process `PATH` and platform search directories.
+/// Record the local data directory of the application, `app_local_data_dir()` of Tauri. Only the
+/// first call counts.
+pub fn set_local_data_directory(directory: PathBuf) {
+    // A second call keeps the first value, because discovery must search one place for the
+    // whole run.
+    let _ = LOCAL_DATA_DIRECTORY.set(directory);
+}
+
+/// The directory that the download of ADR 058 installs the programs into, `<local_data>/bin`.
+///
+/// `None` before [`set_local_data_directory`] runs, when Tauri gave no path, and always in tests.
+/// The install uses this function and no second call of `app_local_data_dir()`, so discovery and
+/// the install always name one directory. Tests must not call [`set_local_data_directory`],
+/// because the value cannot be reset.
+#[must_use]
+pub fn download_directory() -> Option<PathBuf> {
+    LOCAL_DATA_DIRECTORY
+        .get()
+        .map(|directory| directory.join(BIN_DIR_NAME))
+}
+
+/// Discover executables using the current process `PATH`, the platform search directories, and
+/// the download directory that [`set_local_data_directory`] recorded ([`download_directory`]).
 pub fn discover(
     configured: Option<&Path>,
     app_data_directory: &Path,
 ) -> Result<FfmpegPaths, LocateError> {
     let path_directories = search_directories(env::var_os("PATH"));
-    discover_with_path(configured, &path_directories, app_data_directory)
+    discover_with_path(
+        configured,
+        &path_directories,
+        app_data_directory,
+        download_directory().as_deref(),
+    )
 }
 
 fn search_directories(path: Option<OsString>) -> Vec<PathBuf> {
@@ -110,11 +150,14 @@ fn search_directories(path: Option<OsString>) -> Vec<PathBuf> {
     directories
 }
 
-/// Discover executables using a deterministic list of `PATH` directories.
+/// Discover executables using a deterministic list of `PATH` directories and a given download
+/// directory, `<local_data>/bin`. A download directory that is the same as `<app_data>/bin`, as
+/// on macOS, adds no second candidate.
 pub fn discover_with_path(
     configured: Option<&Path>,
     path_directories: &[PathBuf],
     app_data_directory: &Path,
+    download_directory: Option<&Path>,
 ) -> Result<FfmpegPaths, LocateError> {
     let mut candidates = Vec::new();
     if let Some(configured) = configured {
@@ -126,9 +169,12 @@ pub fn discover_with_path(
             .map(|directory| candidate_in(directory, ExecutableOrigin::Path)),
     );
     candidates.push(candidate_in(
-        &app_data_directory.join("bin"),
+        &app_data_directory.join(BIN_DIR_NAME),
         ExecutableOrigin::AppData,
     ));
+    if let Some(download_directory) = download_directory {
+        candidates.push(candidate_in(download_directory, ExecutableOrigin::AppData));
+    }
     let mut seen = HashSet::new();
     candidates
         .retain(|candidate| seen.insert((candidate.ffmpeg.clone(), candidate.ffprobe.clone())));
@@ -237,7 +283,7 @@ mod tests {
         create_pair(&path);
         create_pair(&app_data.join("bin"));
 
-        let found = discover_with_path(Some(&configured), &[path], &app_data).unwrap();
+        let found = discover_with_path(Some(&configured), &[path], &app_data, None).unwrap();
 
         assert_eq!(found.origin, ExecutableOrigin::Configured);
         assert_eq!(
@@ -262,6 +308,7 @@ mod tests {
             Some(&configured),
             &[first_path, second_path.clone()],
             &app_data,
+            None,
         )
         .unwrap();
 
@@ -282,7 +329,7 @@ mod tests {
         create_executable(&path.join(FFPROBE_NAME));
         create_pair(&app_data.join("bin"));
 
-        let found = discover_with_path(None, &[path], &app_data).unwrap();
+        let found = discover_with_path(None, &[path], &app_data, None).unwrap();
 
         assert_eq!(found.origin, ExecutableOrigin::AppData);
     }
@@ -295,7 +342,7 @@ mod tests {
         create_pair(&configured);
 
         let found =
-            discover_with_path(Some(&configured.join(FFMPEG_NAME)), &[], &app_data).unwrap();
+            discover_with_path(Some(&configured.join(FFMPEG_NAME)), &[], &app_data, None).unwrap();
 
         assert_eq!(found.origin, ExecutableOrigin::Configured);
         assert_eq!(
@@ -311,7 +358,7 @@ mod tests {
         let app_data = root.directory("app-data");
         create_pair(&configured);
 
-        let found = discover_with_path(Some(&configured), &[], &app_data).unwrap();
+        let found = discover_with_path(Some(&configured), &[], &app_data, None).unwrap();
 
         assert_eq!(found.origin, ExecutableOrigin::Configured);
     }
@@ -323,7 +370,7 @@ mod tests {
         let app_data = root.directory("app-data");
         create_pair(&app_data.join("bin"));
 
-        let found = discover_with_path(None, &[missing_path], &app_data).unwrap();
+        let found = discover_with_path(None, &[missing_path], &app_data, None).unwrap();
 
         assert_eq!(found.origin, ExecutableOrigin::AppData);
         assert_eq!(
@@ -337,6 +384,117 @@ mod tests {
     }
 
     #[test]
+    fn falls_back_to_the_download_directory_after_the_app_data_bin_directory() {
+        let root = TestDirectory::new();
+        let app_data = root.directory("app-data");
+        let download = root.directory("local-data").join("bin");
+        create_pair(&download);
+
+        let found = discover_with_path(None, &[], &app_data, Some(&download)).unwrap();
+
+        assert_eq!(found.origin, ExecutableOrigin::AppData);
+        assert_eq!(
+            found.ffmpeg,
+            download.join(FFMPEG_NAME).canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_app_data_bin_directory_precedes_the_download_directory() {
+        let root = TestDirectory::new();
+        let app_data = root.directory("app-data");
+        let download = root.directory("local-data").join("bin");
+        create_pair(&app_data.join("bin"));
+        create_pair(&download);
+
+        let found = discover_with_path(None, &[], &app_data, Some(&download)).unwrap();
+
+        assert_eq!(
+            found.ffmpeg,
+            app_data
+                .join("bin")
+                .join(FFMPEG_NAME)
+                .canonicalize()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_configured_or_path_pair_precedes_the_download_directory() {
+        let root = TestDirectory::new();
+        let configured = root.directory("configured");
+        let path = root.directory("path");
+        let app_data = root.directory("app-data");
+        let download = root.directory("local-data").join("bin");
+        create_pair(&configured);
+        create_pair(&path);
+        create_pair(&download);
+
+        let found = discover_with_path(
+            Some(&configured),
+            std::slice::from_ref(&path),
+            &app_data,
+            Some(&download),
+        )
+        .unwrap();
+        assert_eq!(found.origin, ExecutableOrigin::Configured);
+
+        let found = discover_with_path(None, &[path], &app_data, Some(&download)).unwrap();
+        assert_eq!(found.origin, ExecutableOrigin::Path);
+    }
+
+    #[test]
+    fn a_download_directory_that_is_also_on_path_is_listed_once_as_path() {
+        let root = TestDirectory::new();
+        let app_data = root.directory("app-data");
+        let download = root.directory("local-data").join("bin");
+
+        let Err(LocateError::NotFound { inspected }) = discover_with_path(
+            None,
+            std::slice::from_ref(&download),
+            &app_data,
+            Some(&download),
+        ) else {
+            panic!("no pair exists");
+        };
+        assert_eq!(
+            inspected,
+            [
+                candidate_in(&download, ExecutableOrigin::Path),
+                candidate_in(&app_data.join("bin"), ExecutableOrigin::AppData),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_download_directory_is_inspected_last_and_only_once() {
+        let root = TestDirectory::new();
+        let path = root.directory("path");
+        let app_data = root.directory("app-data");
+        let download = root.directory("local-data").join("bin");
+
+        let Err(LocateError::NotFound { inspected }) =
+            discover_with_path(None, &[path], &app_data, Some(&download))
+        else {
+            panic!("no pair exists");
+        };
+        assert_eq!(inspected.len(), 3);
+        assert_eq!(
+            inspected[2],
+            candidate_in(&download, ExecutableOrigin::AppData)
+        );
+
+        // On macOS, `<local_data>` is `<app_data>`, so both name one `bin` directory.
+        let same = app_data.join("bin");
+        let Err(LocateError::NotFound { inspected }) =
+            discover_with_path(None, &[], &app_data, Some(&same))
+        else {
+            panic!("no pair exists");
+        };
+        assert_eq!(inspected, [candidate_in(&same, ExecutableOrigin::AppData)]);
+    }
+
+    #[test]
     fn canonicalizes_accepted_paths() {
         let root = TestDirectory::new();
         let configured = root.directory("configured");
@@ -345,7 +503,7 @@ mod tests {
         let noncanonical = configured.join("child").join("..");
         fs::create_dir(configured.join("child")).unwrap();
 
-        let found = discover_with_path(Some(&noncanonical), &[], &app_data).unwrap();
+        let found = discover_with_path(Some(&noncanonical), &[], &app_data, None).unwrap();
 
         assert_eq!(
             found.ffmpeg,
@@ -369,6 +527,7 @@ mod tests {
             Some(&configured),
             &[first_path.clone(), second_path.clone()],
             &app_data,
+            None,
         )
         .unwrap_err();
 
@@ -427,7 +586,7 @@ mod tests {
         symlink(&ffmpeg, path.join(FFPROBE_NAME)).unwrap();
 
         assert!(matches!(
-            discover_with_path(None, &[path], &app_data),
+            discover_with_path(None, &[path], &app_data, None),
             Err(LocateError::NotFound { .. })
         ));
     }
@@ -443,6 +602,7 @@ mod tests {
             Some(&repeated),
             &[repeated.clone(), repeated.clone()],
             &app_data,
+            None,
         )
         .unwrap_err();
 
