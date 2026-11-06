@@ -3,11 +3,7 @@ import {
   createFfmpegListFormat,
   presentFfmpegStatus,
 } from "@/components/layout/ffmpegStatusPresenter";
-import {
-  CapabilityProbeError,
-  type FfmpegState,
-  type FfmpegStatus,
-} from "@/features/ffmpeg/types";
+import type { FfmpegState, FfmpegStatus } from "@/features/ffmpeg/types";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import type { FfmpegPathView } from "./ffmpegPathController";
@@ -24,7 +20,6 @@ import {
   presentFfmpegAnnouncement,
   presentFfmpegInstallGuide,
   presentFfmpegSource,
-  splitFfmpegStatusDetail,
   toFfmpegPlatform,
   WINGET_INSTALL_COMMAND,
   type FfmpegPlatform,
@@ -846,70 +841,6 @@ describe("presentFfmpegAnnouncement and nextFfmpegAnnouncement", () => {
 
   it("uses a message that both catalogs hold", () => {
     expectMessageInBothCatalogs("settings.ffmpeg.checking");
-  });
-});
-
-describe("splitFfmpegStatusDetail", () => {
-  it("puts the reason first and every searched location, in search order, second", () => {
-    const inspected = [
-      {
-        ffmpeg: "/configured/ffmpeg",
-        ffprobe: "/configured/ffprobe",
-        origin: "configured",
-      },
-      { ffmpeg: "/usr/bin/ffmpeg", ffprobe: "/usr/bin/ffprobe", origin: "path" },
-      {
-        ffmpeg: "/opt/homebrew/bin/ffmpeg",
-        ffprobe: "/opt/homebrew/bin/ffprobe",
-        origin: "path",
-      },
-      { ffmpeg: "/app/bin/ffmpeg", ffprobe: "/app/bin/ffprobe", origin: "appData" },
-    ] as const;
-    const state = ffmpegState({
-      status: "missing",
-      runId: null,
-      paths: null,
-      origin: null,
-      version: null,
-      license: null,
-      results: [],
-      done: 0,
-      total: 0,
-      source: null,
-      error: new CapabilityProbeError({
-        code: "ffmpegPairMissing",
-        detail: "no complete ffmpeg pair in 4 locations",
-        inspected: [...inspected],
-      }),
-      inspected: [...inspected],
-    });
-
-    const { leading, searched } = splitFfmpegStatusDetail(
-      presentFfmpegStatus(state, FORMAT).detail,
-    );
-
-    expect(leading.map((entry) => entry.key)).toEqual([
-      "ffmpegError.ffmpegPairMissing",
-      "ffmpeg.detail.raw",
-    ]);
-    expect(searched.map((entry) => entry.key)).toEqual([
-      "ffmpeg.detail.searchedPair.configured",
-      "ffmpeg.detail.searchedPair.path",
-      "ffmpeg.detail.searchedPair.path",
-      "ffmpeg.detail.searchedPair.appData",
-    ]);
-    expect(searched.map((entry) => entry.values?.path)).toEqual(
-      inspected.map((candidate) => candidate.ffmpeg),
-    );
-  });
-
-  it("keeps every entry of a state that searched nothing in the leading part", () => {
-    const detail = [
-      { key: "ffmpeg.detail.version", id: "a", mono: false },
-      { key: "ffmpeg.detail.hardwareNone", id: "b", mono: false },
-    ];
-
-    expect(splitFfmpegStatusDetail(detail)).toEqual({ leading: detail, searched: [] });
   });
 });
 

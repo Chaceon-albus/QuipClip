@@ -947,13 +947,6 @@ export const en = {
     detail: {
       program: "Program: {{path}}",
       version: "Version: {{version}}",
-      searched: "Searched: {{path}}",
-      searchedPair: {
-        configured: "Searched: {{path}} (ffprobe: {{probe}}, origin: Configured path)",
-        path: "Searched: {{path}} (ffprobe: {{probe}}, origin: System PATH)",
-        appData:
-          "Searched: {{path}} (ffprobe: {{probe}}, origin: Application data directory)",
-      },
       raw: "{{detail}}",
       license: {
         gpl: "License: GPL",

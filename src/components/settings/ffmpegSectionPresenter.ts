@@ -10,7 +10,6 @@
  */
 
 import type {
-  FfmpegStatusDetailEntry,
   FfmpegStatusLineKey,
   FfmpegStatusView,
 } from "@/components/layout/ffmpegStatusPresenter";
@@ -327,25 +326,6 @@ export function ffmpegStatusIcon(
     return "spinner";
   }
   return tone === "ready" ? "check" : "warning";
-}
-
-const SEARCHED_KEY_PREFIX = "ffmpeg.detail.searchedPair.";
-
-/**
- * Splits the status detail into the entries that explain the state and the list of searched
- * locations. The tab shows the install instructions between the two, because the searched
- * list names every `PATH` folder and can be long.
- */
-export function splitFfmpegStatusDetail(detail: readonly FfmpegStatusDetailEntry[]): {
-  leading: FfmpegStatusDetailEntry[];
-  searched: FfmpegStatusDetailEntry[];
-} {
-  const leading: FfmpegStatusDetailEntry[] = [];
-  const searched: FfmpegStatusDetailEntry[] = [];
-  for (const entry of detail) {
-    (entry.key.startsWith(SEARCHED_KEY_PREFIX) ? searched : leading).push(entry);
-  }
-  return { leading, searched };
 }
 
 // ---------------------------------------------------------------------------------------

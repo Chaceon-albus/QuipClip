@@ -622,7 +622,7 @@ describe("presentFfmpegStatus", () => {
   });
 
   describe("missing status", () => {
-    it("presents missing status with every inspected candidate in exact search order", () => {
+    it("leaves the inspected candidates out of the missing detail", () => {
       const inspected: InspectedCandidate[] = [
         {
           ffmpeg: "/Users/user/.config/quipclip/bin/ffmpeg",
@@ -675,42 +675,6 @@ describe("presentFfmpegStatus", () => {
           {
             key: "ffmpegError.ffmpegPairMissing",
             id: "ffmpegError.ffmpegPairMissing#0",
-            mono: false,
-          },
-          {
-            key: "ffmpeg.detail.searchedPair.configured",
-            values: {
-              path: "/Users/user/.config/quipclip/bin/ffmpeg",
-              probe: "/Users/user/.config/quipclip/bin/ffprobe",
-            },
-            id: "ffmpeg.detail.searchedPair.configured#1",
-            mono: false,
-          },
-          {
-            key: "ffmpeg.detail.searchedPair.path",
-            values: {
-              path: "/opt/homebrew/bin/ffmpeg",
-              probe: "/opt/homebrew/bin/ffprobe",
-            },
-            id: "ffmpeg.detail.searchedPair.path#2",
-            mono: false,
-          },
-          {
-            key: "ffmpeg.detail.searchedPair.path",
-            values: {
-              path: "/usr/local/bin/ffmpeg",
-              probe: "/usr/local/bin/ffprobe",
-            },
-            id: "ffmpeg.detail.searchedPair.path#3",
-            mono: false,
-          },
-          {
-            key: "ffmpeg.detail.searchedPair.appData",
-            values: {
-              path: "/Users/user/Library/Application Support/quipclip/ffmpeg",
-              probe: "/Users/user/Library/Application Support/quipclip/ffprobe",
-            },
-            id: "ffmpeg.detail.searchedPair.appData#4",
             mono: false,
           },
         ],
@@ -1058,38 +1022,6 @@ describe("presentFfmpegStatus", () => {
           mono: false,
         },
       ]);
-    });
-
-    it("gives every detail entry a unique id even when entries share a key", () => {
-      const inspected: InspectedCandidate[] = [
-        {
-          ffmpeg: "/Users/user/.config/quipclip/bin/ffmpeg",
-          ffprobe: "/Users/user/.config/quipclip/bin/ffprobe",
-          origin: "configured",
-        },
-        {
-          ffmpeg: "/opt/homebrew/bin/ffmpeg",
-          ffprobe: "/opt/homebrew/bin/ffprobe",
-          origin: "path",
-        },
-        {
-          ffmpeg: "/usr/local/bin/ffmpeg",
-          ffprobe: "/usr/local/bin/ffprobe",
-          origin: "path",
-        },
-      ];
-      const state: FfmpegState = {
-        ...createBaseState(),
-        status: "missing",
-        inspected,
-      };
-
-      const view = presentFfmpegStatus(state, format);
-      const ids = view.detail.map((entry) => entry.id);
-
-      // Several entries share the "ffmpeg.detail.searchedPair.path" key; ids must still be
-      // pairwise distinct, so the set of ids is exactly as large as the detail array.
-      expect(new Set(ids).size).toBe(view.detail.length);
     });
   });
 

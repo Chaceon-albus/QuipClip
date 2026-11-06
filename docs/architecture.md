@@ -499,9 +499,10 @@ run wrote.
 
 Discovery reads the configured path from the settings file first, and then it falls back to
 `PATH` and the two `bin` directories. The failure payload names each inspected `ffmpeg` and
-`ffprobe` candidate with its origin class, so the user sees where the application looked. The
-job runs two of the four listings. `-decoders` and `-filters` have parsers and tests, and they
-gain their command when the preview proxy and the export renderer need them.
+`ffprobe` candidate with its origin class. The Settings window does not show these candidates
+(ADR 006). Discovery tries one pair in each `PATH` directory, so a long `PATH` gives dozens of
+them. The job runs two of the four listings. `-decoders` and `-filters` have parsers and
+tests, and they gain their command when the preview proxy and the export renderer need them.
 
 ## Settings
 

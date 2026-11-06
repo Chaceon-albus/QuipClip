@@ -137,6 +137,12 @@ candidate that it inspected, in search order. Each candidate holds the `ffmpeg` 
 `ffprobe` path, and the origin class. The user then sees where the application looked. On
 macOS that order includes the two Homebrew directories from ADR 012.
 
+(Changed on 2026-11-05.) The Settings window does not show the candidates, so the user no
+longer sees where the application looked. Discovery tries one pair in each `PATH` directory.
+On a typical Windows machine, the list in the Settings window had dozens of lines. The
+failure payload still names each candidate, and the frontend store keeps them, but no view
+shows them. The README gives the search order.
+
 (Changed on 2026-10-02.) A forced probe sends `ffmpeg:capability-probe-forced` before its worker starts, and the other window takes that run over (ADR 038). The frontend of each window still drops the events of a run that it does not follow.
 
 (Changed on 2026-10-02.) The test of a preset on this machine (ADR 041) holds the same lock as a smoke test, so the two never run at the same time. Its results live in their own file, `preset-tests.json`, keyed by the same cache key of the binary.

@@ -19,6 +19,9 @@ import { stripVerbatimPrefix } from "@/lib/fileName";
  * identity or a field the presenter ignores no longer re-renders the component and re-runs
  * `presentFfmpegStatus`. It returns a new object on each call by design; the shallow
  * comparison, not the object identity, is what settles the equality.
+ *
+ * It also carries `inspected`, which no view reads (ADR 006), because `FfmpegState` requires
+ * it.
  */
 export function selectFfmpegState(state: FfmpegStoreState): FfmpegState {
   return {
@@ -288,21 +291,10 @@ export function presentFfmpegStatus(
         pushDetail(detail, "ffmpeg.detail.raw", { detail: state.error.detail });
       }
 
-      if (state.inspected) {
-        for (const candidate of state.inspected) {
-          // One complete key per origin. The origin class is an application-defined value,
-          // not diagnostic text, so it must not reach the message as a raw wire token
-          // (ADR 011), and a whole key per origin avoids assembling the sentence from a
-          // translated fragment.
-          pushDetail(detail, `ffmpeg.detail.searchedPair.${candidate.origin}`, {
-            path: candidate.ffmpeg,
-            probe: candidate.ffprobe,
-          });
-        }
-      }
+      // The detail does not list the searched candidates (ADR 006). Discovery tries one pair in
+      // each `PATH` directory, so that list can have dozens of lines.
 
-      // The tooltip gives the state and the reason only. The searched paths stay in the
-      // detail.
+      // The tooltip gives the state and the reason only.
       const summary = startSummary("ffmpeg.status.missing", {});
       pushDetail(summary, "ffmpegError.ffmpegPairMissing");
 

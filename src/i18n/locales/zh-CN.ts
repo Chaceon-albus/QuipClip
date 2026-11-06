@@ -725,12 +725,6 @@ export const zhCN: TranslationCatalog = {
     detail: {
       program: "程序：{{path}}",
       version: "版本：{{version}}",
-      searched: "已搜索：{{path}}",
-      searchedPair: {
-        configured: "已搜索：{{path}}（ffprobe：{{probe}}，来源：已配置的路径）",
-        path: "已搜索：{{path}}（ffprobe：{{probe}}，来源：系统 PATH）",
-        appData: "已搜索：{{path}}（ffprobe：{{probe}}，来源：应用程序数据目录）",
-      },
       raw: "{{detail}}",
       license: {
         gpl: "许可证：GPL",

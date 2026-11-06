@@ -255,7 +255,7 @@ export type FfmpegState = {
   source: CapabilityProbeSource | null;
   /** Last error encountered during discovery or probing, or null. */
   error: CapabilityProbeError | null;
-  /** Locations inspected when discovery failed, or null. */
+  /** Locations inspected when discovery failed, or null. No view shows them (ADR 006). */
   inspected: InspectedCandidate[] | null;
 };
 

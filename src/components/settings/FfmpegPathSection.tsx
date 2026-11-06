@@ -38,7 +38,6 @@ import {
   presentFfmpegAnnouncement,
   presentFfmpegInstallGuide,
   presentFfmpegSource,
-  splitFfmpegStatusDetail,
   toFfmpegPlatform,
   type FfmpegAnnouncement,
   type FfmpegInstallGuide,
@@ -140,7 +139,6 @@ export function FfmpegPathSection() {
   const actions = presentFfmpegActions(view, ffmpeg.status);
   const iconName = ffmpegStatusIcon(ffmpeg.status, statusView.tone);
   const StatusIcon = statusIcons[iconName];
-  const detail = splitFfmpegStatusDetail(statusView.detail);
   const installGuide = presentFfmpegInstallGuide(ffmpeg.status, platform);
 
   // `t` types its options from the key. The presenters return keys as plain strings, so this
@@ -297,7 +295,7 @@ export function FfmpegPathSection() {
             {t("settings.ffmpeg.reprobe")}
           </Button>
         </div>
-        <FfmpegDetailList entries={detail.leading} />
+        <FfmpegDetailList entries={statusView.detail} />
         {/* The download comes before the install guide, which stays as the other way to get
             FFmpeg (ADR 005, ADR 058). */}
         <FfmpegDownloadBlock
@@ -310,11 +308,6 @@ export function FfmpegPathSection() {
           }}
         />
         {installGuide !== null && <FfmpegInstallGuideView guide={installGuide} />}
-        {detail.searched.length > 0 && (
-          <div className={cn(installGuide !== null && "border-t border-border pt-2")}>
-            <FfmpegDetailList entries={detail.searched} />
-          </div>
-        )}
       </div>
       {/* The region exists before its text changes, so a screen reader speaks the change. It
           holds no control. */}
