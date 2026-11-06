@@ -159,6 +159,15 @@ function startSummary(
   return summary;
 }
 
+/**
+ * The list format of the hardware methods and the working encoders in `presentFfmpegStatus`.
+ * It uses the `conjunction` type, because the `unit` type puts no separator between the
+ * items in Chinese.
+ */
+export function createFfmpegListFormat(locale: string): Intl.ListFormat {
+  return new Intl.ListFormat(locale, { type: "conjunction" });
+}
+
 export function presentFfmpegStatus(
   state: FfmpegState,
   format: { list: Intl.ListFormat; number: Intl.NumberFormat },

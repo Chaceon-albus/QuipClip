@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { presentFfmpegStatus } from "@/components/layout/ffmpegStatusPresenter";
+import {
+  createFfmpegListFormat,
+  presentFfmpegStatus,
+} from "@/components/layout/ffmpegStatusPresenter";
 import {
   CapabilityProbeError,
   type FfmpegState,
@@ -56,7 +59,7 @@ const ALL_STATUSES: FfmpegStatus[] = [
 ];
 
 const FORMAT = {
-  list: new Intl.ListFormat("en", { style: "long", type: "unit" }),
+  list: createFfmpegListFormat("en"),
   number: new Intl.NumberFormat("en"),
 };
 

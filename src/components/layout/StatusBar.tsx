@@ -15,7 +15,11 @@ import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { getResolvedLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
-import { presentFfmpegStatus, selectFfmpegState } from "./ffmpegStatusPresenter";
+import {
+  createFfmpegListFormat,
+  presentFfmpegStatus,
+  selectFfmpegState,
+} from "./ffmpegStatusPresenter";
 import { ExportStatusIndicator } from "./ExportStatusIndicator";
 import {
   presentPlaybackHint,
@@ -51,11 +55,7 @@ export function StatusBar() {
   const resolvedLanguage = getResolvedLanguage(i18n);
 
   const listFormatter = useMemo(
-    () =>
-      new Intl.ListFormat(resolvedLanguage, {
-        style: "long",
-        type: "unit",
-      }),
+    () => createFfmpegListFormat(resolvedLanguage),
     [resolvedLanguage],
   );
 

@@ -18,6 +18,7 @@ import { getResolvedLanguage } from "@/i18n";
 import { isMacOS, isWindows } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
+  createFfmpegListFormat,
   presentFfmpegStatus,
   selectFfmpegState,
   type FfmpegStatusDetailEntry,
@@ -114,11 +115,7 @@ export function FfmpegPathSection() {
   const platform = useMemo(() => toFfmpegPlatform(isMacOS(), isWindows()), []);
 
   const listFormatter = useMemo(
-    () =>
-      new Intl.ListFormat(resolvedLanguage, {
-        style: "long",
-        type: "unit",
-      }),
+    () => createFfmpegListFormat(resolvedLanguage),
     [resolvedLanguage],
   );
 

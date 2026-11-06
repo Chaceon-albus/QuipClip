@@ -8,6 +8,7 @@ import {
 } from "@/features/ffmpeg/types";
 import { en } from "@/i18n/locales/en";
 import {
+  createFfmpegListFormat,
   presentFfmpegStatus,
   SHORT_VERSION_MAX_LENGTH,
   shortVersion,
@@ -15,10 +16,22 @@ import {
 
 function createFormatters(locale = "en") {
   return {
-    list: new Intl.ListFormat(locale, { style: "long", type: "unit" }),
+    list: createFfmpegListFormat(locale),
     number: new Intl.NumberFormat(locale),
   };
 }
+
+describe("createFfmpegListFormat", () => {
+  // The `unit` type puts no separator between the names in Chinese.
+  it.each([
+    ["en", "cuda, d3d11va, and qsv"],
+    ["zh-CN", "cuda、d3d11va和qsv"],
+  ])("separates the names in %s", (locale, expected) => {
+    expect(createFfmpegListFormat(locale).format(["cuda", "d3d11va", "qsv"])).toBe(
+      expected,
+    );
+  });
+});
 
 function createBaseState(): FfmpegState {
   return {
@@ -229,7 +242,7 @@ describe("presentFfmpegStatus", () => {
         {
           key: "ffmpeg.detail.workingEncoders",
           values: {
-            encoders: "h264_videotoolbox, hevc_videotoolbox, libx264, libx265, aac",
+            encoders: "h264_videotoolbox, hevc_videotoolbox, libx264, libx265, and aac",
           },
           id: "ffmpeg.detail.workingEncoders#3",
           mono: false,
@@ -284,7 +297,7 @@ describe("presentFfmpegStatus", () => {
         },
         {
           key: "ffmpeg.detail.hardware",
-          values: { methods: "cuda, vdpau" },
+          values: { methods: "cuda and vdpau" },
           id: "ffmpeg.detail.hardware#4",
           mono: false,
         },
