@@ -21,6 +21,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   confirmExportFlow,
+  needsStrictRevisionCheck,
   runExportFlow,
 } from "@/components/layout/exportFlowController";
 import {
@@ -839,6 +840,10 @@ export function ExportDialog({
     if (!canGoBackToSetup(readTargetState())) {
       return;
     }
+    // Read before the reset below clears it.
+    const strictSourceRevisionCheck = needsStrictRevisionCheck(
+      (composes ? exportComposeStore : exportStore).getState().error,
+    );
     setBackClicks((count) => count + 1);
     setSourceChangeAccepted(false);
     setChoosingDestination(false);
@@ -865,6 +870,7 @@ export function ExportDialog({
           ...effects,
           filterName: t("dialog.videoFilter"),
           audioFilterName: t("dialog.audioFilter"),
+          strictSourceRevisionCheck,
         }),
     });
   };

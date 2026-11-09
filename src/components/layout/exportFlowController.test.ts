@@ -4,6 +4,7 @@ import {
   createExportFlowController,
   ExportFlowController,
   openExportFlow,
+  needsStrictRevisionCheck,
   runExportFlow,
   SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
@@ -589,6 +590,112 @@ describe("ExportFlowController", () => {
         );
         expect(setModalOpen).toHaveBeenCalledWith(true);
         expect(openSaveDialog).not.toHaveBeenCalled();
+      });
+
+      it("an FLV that a recorder still writes reaches the setup step (ADR 058)", async () => {
+        const setModalOpen = vi.fn();
+        const reportError = vi.fn();
+        const openSaveDialog = vi.fn();
+        const media = {
+          ...createMedia("/media/live.flv", "live.flv"),
+          probe: { formatNames: ["flv"] },
+        };
+        const readSourceRevision = vi.fn().mockResolvedValue({
+          path: media.path,
+          size: media.size + 1_000_000,
+          mtime: media.mtime + 60,
+        });
+
+        await runExportFlow({
+          setModalOpen,
+          reportError,
+          openSaveDialog,
+          readSourceRevision,
+          getExportState: () => ({ status: "idle", tracking: false }),
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+          audioFilterName: "Audio Files",
+        });
+
+        expect(readSourceRevision).toHaveBeenCalledWith("/media/live.flv");
+        expect(reportError).not.toHaveBeenCalledWith(
+          expect.objectContaining({ code: "sourceRevisionChanged" }),
+        );
+        expect(setModalOpen).toHaveBeenCalledWith(true);
+      });
+
+      it("a strict check takes an FLV that grew as a mismatch again", async () => {
+        // Back after `sourceRevisionMismatch`: the backend refused the file, so the check must
+        // offer "Export anyway" again.
+        const reportError = vi.fn();
+        const media = {
+          ...createMedia("/media/live.flv", "live.flv"),
+          probe: { formatNames: ["flv"] },
+        };
+
+        const result = await runExportFlow({
+          setModalOpen: vi.fn(),
+          reportError,
+          openSaveDialog: vi.fn(),
+          readSourceRevision: vi.fn().mockResolvedValue({
+            path: media.path,
+            size: media.size + 1_000_000,
+            mtime: media.mtime + 60,
+          }),
+          getExportState: () => ({ status: "idle", tracking: false }),
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+          audioFilterName: "Audio Files",
+          strictSourceRevisionCheck: true,
+        });
+
+        expect(result).toBe(false);
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "sourceRevisionChanged" }),
+        );
+      });
+
+      it("Back after sourceRevisionMismatch, and only after it, asks for a strict check", () => {
+        expect(needsStrictRevisionCheck({ code: "sourceRevisionMismatch" })).toBe(true);
+        expect(needsStrictRevisionCheck({ code: "frameCountMismatch" })).toBe(false);
+        expect(needsStrictRevisionCheck(null)).toBe(false);
+        expect(needsStrictRevisionCheck(undefined)).toBe(false);
+      });
+
+      it("another container that grew is still a mismatch", async () => {
+        const reportError = vi.fn();
+        const media = {
+          ...createMedia("/media/source.mp4", "source.mp4"),
+          probe: { formatNames: ["mov", "mp4", "m4a", "3gp", "3g2", "mj2"] },
+        };
+
+        await runExportFlow({
+          setModalOpen: vi.fn(),
+          reportError,
+          openSaveDialog: vi.fn(),
+          readSourceRevision: vi.fn().mockResolvedValue({
+            path: media.path,
+            size: media.size + 1_000_000,
+            mtime: media.mtime + 60,
+          }),
+          getExportState: () => ({ status: "idle", tracking: false }),
+          getMedia: () => media,
+          getSourceId: () => "src-1",
+          getSegments: () => [createSegment("s1", "src-1", "0", "100")],
+          getSettings: () => createSettings([createPreset()]),
+          filterName: "Video Files",
+          audioFilterName: "Audio Files",
+        });
+
+        expect(reportError).toHaveBeenCalledWith(
+          expect.objectContaining({ code: "sourceRevisionChanged" }),
+        );
       });
 
       it("an mtime change alone is a mismatch", async () => {
@@ -2303,6 +2410,50 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     expect(readSourceRevision).toHaveBeenCalledWith("/a.mp4");
     expect(readSourceRevision).toHaveBeenCalledWith("/b.mp4");
     expect(reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "sourceRevisionChanged" }),
+    );
+  });
+
+  it("run accepts an FLV source that grew, unless the check is strict (ADR 058)", async () => {
+    loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+    mediaStore.setState({
+      sources: {
+        A: imported("/a.mp4", 10, 1),
+        B: {
+          ...imported("/b.flv", 20, 2),
+          probe: { formatNames: ["flv"] },
+        } as ImportMediaResult,
+      },
+    });
+    const run = (strictSourceRevisionCheck: boolean) => {
+      const reportError = vi.fn();
+      const result = runExportFlow({
+        setModalOpen: vi.fn(),
+        reportError,
+        openSaveDialog: vi.fn(),
+        readSourceRevision: readerOf({
+          "/a.mp4": { size: 10, mtime: 1 },
+          "/b.flv": { size: 5_000, mtime: 60 },
+        }),
+        getExportState: () => ({ status: "idle", tracking: false }),
+        getMedia: () => media,
+        getSourceId: () => "sequence:1",
+        getSegments: () => [],
+        getSettings: () => createSettings([createPreset()]),
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        strictSourceRevisionCheck,
+      });
+      return { result, reportError };
+    };
+
+    const grown = run(false);
+    expect(await grown.result).toBe(true);
+    expect(grown.reportError).not.toHaveBeenCalled();
+
+    const strict = run(true);
+    expect(await strict.result).toBe(false);
+    expect(strict.reportError).toHaveBeenCalledWith(
       expect.objectContaining({ code: "sourceRevisionChanged" }),
     );
   });

@@ -39,7 +39,7 @@ import {
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
 import {
-  isSameSourceRevision,
+  mayHoldSourceRevision,
   mediaStore,
   readSourceRevision,
   type MediaSourceRevisionDescriptor,
@@ -62,7 +62,26 @@ import type { Segment } from "@/types/project";
  */
 export type MediaFlowDescriptor = MediaSourceRevisionDescriptor & {
   fileName?: string;
+  /** The probe of the import. Its format names tell an FLV, which can grow (ADR 058). */
+  probe?: { readonly formatNames: readonly string[] };
 };
+
+/** True when the probe of `media` names the FLV container. */
+function isFlvMedia(media: MediaFlowDescriptor): boolean {
+  return media.probe?.formatNames.includes("flv") ?? false;
+}
+
+/**
+ * True when Back follows a run that ended with `error`, and the OPEN step must then compare each
+ * source revision exactly (`strictSourceRevisionCheck`). That is the case after
+ * `sourceRevisionMismatch`: the backend refused a file that the check had let pass as an FLV
+ * that a recorder still writes (ADR 058).
+ */
+export function needsStrictRevisionCheck(
+  error: { readonly code?: string } | null | undefined,
+): boolean {
+  return error?.code === "sourceRevisionMismatch";
+}
 
 /**
  * How long the replacement check of the OPEN step waits for the revision of the source file,
@@ -164,6 +183,16 @@ export interface ExportFlowControllerOptions {
   skipSourceRevisionCheck?: boolean;
 
   /**
+   * Compares each source revision exactly, also for an FLV that grew (ADR 058).
+   *
+   * Set by Back after a run that the backend refused with `sourceRevisionMismatch`
+   * (`needsStrictRevisionCheck`). The replacement check let that file pass as an FLV that a
+   * recorder still writes, and the backend found other bytes in front of the old size. The check
+   * then raises the confirmation again, which offers "Export anyway", as before ADR 058.
+   */
+  strictSourceRevisionCheck?: boolean;
+
+  /**
    * Provider for timeline segments. Defaults to `timelineStore.getState().segments`.
    */
   getSegments?: () => readonly Segment[];
@@ -238,6 +267,7 @@ export class ExportFlowController {
   ) => Promise<MediaSourceRevisionDescriptor>;
   private readonly sourceRevisionTimeoutMs: number;
   private readonly skipSourceRevisionCheck: boolean;
+  private readonly strictSourceRevisionCheck: boolean;
   private readonly getSegmentsFn: () => readonly Segment[];
   private readonly getSourceIdFn: () => string | null;
   private readonly getSettingsFn: () => Settings | null;
@@ -261,6 +291,7 @@ export class ExportFlowController {
     this.sourceRevisionTimeoutMs =
       options.sourceRevisionTimeoutMs ?? SOURCE_REVISION_CHECK_TIMEOUT_MS;
     this.skipSourceRevisionCheck = options.skipSourceRevisionCheck ?? false;
+    this.strictSourceRevisionCheck = options.strictSourceRevisionCheck ?? false;
     this.getSegmentsFn =
       options.getSegments ?? (() => timelineStore.getState().segments);
     this.getSourceIdFn =
@@ -589,6 +620,11 @@ export class ExportFlowController {
    * revision is nothing a replacement can invalidate. Such a run has to end at `noSegments`
    * from the request builder, and the user must reach that in one dialog rather than name an
    * output file on the way to it.
+   *
+   * An FLV that a recorder still writes is no mismatch either: the same path, at least the bytes
+   * of the import, and a modification time that is not earlier (ADR 058). The backend reads only
+   * those bytes and compares their fingerprint, and a file that a recorder started again fails
+   * there with `sourceRevisionMismatch`.
    */
   private async sourceRevisionStillMatches(
     media: MediaFlowDescriptor | null,
@@ -616,14 +652,20 @@ export class ExportFlowController {
       // A failed read and a read that did not answer in time: neither is a mismatch.
       return true;
     }
-    return isSameSourceRevision(media, actual);
+    return mayHoldSourceRevision(media, actual, this.mayGrow(media));
+  }
+
+  /** True when the check accepts a larger, newer file for `media`: an FLV, unless strict. */
+  private mayGrow(media: MediaFlowDescriptor): boolean {
+    return !this.strictSourceRevisionCheck && isFlvMedia(media);
   }
 
   /**
    * The revision check of a sequence of several clips: each source that a piece uses must still
-   * have the size and the modification time of its import. A read that fails or does not answer
-   * in time is no mismatch, as for one source. The reads run together, so the OPEN step waits
-   * at most one `sourceRevisionTimeoutMs`, whatever the number of sources.
+   * have the size and the modification time of its import, or be an FLV that a recorder only
+   * added to (ADR 058). A read that fails or does not answer in time is no mismatch, as for one
+   * source. The reads run together, so the OPEN step waits at most one
+   * `sourceRevisionTimeoutMs`, whatever the number of sources.
    */
   private async sourcesStillMatch(sourceIds: readonly string[]): Promise<boolean> {
     if (this.skipSourceRevisionCheck) {
@@ -645,7 +687,7 @@ export class ExportFlowController {
         } catch {
           return true;
         }
-        return isSameSourceRevision(source, actual);
+        return mayHoldSourceRevision(source, actual, this.mayGrow(source));
       }),
     );
     return matches.every(Boolean);

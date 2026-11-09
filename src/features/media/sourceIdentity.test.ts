@@ -4,6 +4,7 @@ import {
   getGeneratedSourceId,
   getSourceRevisionKey,
   isSameSourceRevision,
+  mayHoldSourceRevision,
 } from "./sourceIdentity";
 
 describe("Media Source Identity and Revision Helpers", () => {
@@ -126,6 +127,42 @@ describe("Media Source Identity and Revision Helpers", () => {
       expect(isSameSourceRevision(null, null)).toBe(false);
       expect(isSameSourceRevision(media, null)).toBe(false);
       expect(isSameSourceRevision(undefined, media)).toBe(false);
+    });
+  });
+
+  describe("mayHoldSourceRevision", () => {
+    const media = {
+      path: "/videos/live.flv",
+      size: 1_048_576,
+      mtime: 1_724_976_000,
+    };
+    const grown = { ...media, size: 2_097_152, mtime: 1_724_976_060 };
+
+    it("holds for the same revision of any container", () => {
+      expect(mayHoldSourceRevision(media, { ...media }, false)).toBe(true);
+      expect(mayHoldSourceRevision(media, { ...media }, true)).toBe(true);
+    });
+
+    it("holds for an FLV that grew, and only for an FLV", () => {
+      expect(mayHoldSourceRevision(media, grown, true)).toBe(true);
+      expect(mayHoldSourceRevision(media, { ...media, mtime: grown.mtime }, true)).toBe(
+        true,
+      );
+      expect(mayHoldSourceRevision(media, grown, false)).toBe(false);
+    });
+
+    it("fails for fewer bytes, an earlier time, another path, or no descriptor", () => {
+      expect(
+        mayHoldSourceRevision(media, { ...grown, size: media.size - 1 }, true),
+      ).toBe(false);
+      expect(
+        mayHoldSourceRevision(media, { ...grown, mtime: media.mtime - 1 }, true),
+      ).toBe(false);
+      expect(
+        mayHoldSourceRevision(media, { ...grown, path: "/videos/other.flv" }, true),
+      ).toBe(false);
+      expect(mayHoldSourceRevision(media, null, true)).toBe(false);
+      expect(mayHoldSourceRevision(null, grown, true)).toBe(false);
     });
   });
 
