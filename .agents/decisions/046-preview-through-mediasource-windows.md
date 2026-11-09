@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048, ADR 055, ADR 056, ADR 057
+- Amended by: ADR 048, ADR 055, ADR 056, ADR 057, ADR 058
 
 ## Context
 
@@ -412,6 +412,11 @@ start of ADR 057 deletes the old `<app_data>/flv-cache/`. That cleanup does not 
 sources an older build uses at the same time. When Tauri gives no path for the cache directory,
 the preview fails with `appDataUnavailable`.
 
+(Changed on 2026-11-09.) An open source reads no further than the size of its revision. The
+writer of a window stops there too. A window of an FLV that a recorder still writes opens when
+the file holds the revision of the request, and it uses that revision for the sidecar. A window
+of MPEG-TS or Matroska still needs the same size and modification time (ADR 058).
+
 ### The window policy
 
 - The page keeps about 20 s behind the play position and requests the next window when less than
@@ -697,6 +702,9 @@ and the ruler already assume:
   muxer or the `onMetaData` of an FLV gives it, and the next rule applies. QuipClip assumes that
   a length with a small start offset is rare: such a file reads short by its start.
 - Otherwise: `format.duration` minus (video start − container start).
+
+(Changed on 2026-11-09.) The import reads the last video tag of an FLV in front of the size that
+it read, not in front of the end of the file. A recorder can add bytes during the probe (ADR 058).
 
 This also changes the fallback of the native containers by the audio lead, so that it agrees
 with `videoDurationTicks` (ADR 002 amendment). The MediaSource duration is

@@ -4,7 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 007, ADR 017, ADR 038, ADR 046, ADR 052
-- Amended by: ADR 057
+- Amended by: ADR 057, ADR 058
 
 ## Context
 
@@ -260,7 +260,9 @@ agree, or whose data has the wrong length, is a miss, and Rust deletes it.
 - One lock holds every read, write, cleanup and clear of the cache.
 - At the end of a job, Rust reads the size and the modification time of the source again. When
   they changed, as when a recorder still writes the file, the job fails with `sourceChanged` and
-  writes no cache.
+  writes no cache. (Changed on 2026-11-09: an FLV that a recorder still writes holds the revision
+  of the request at the start and at the end of the job. The read of the FLV stops at the size of
+  that revision, and the cache keeps the envelope under it. See ADR 058.)
 
 The General tab of the Settings window shows the size of the cache and has a Clear button. The
 limits are constants, so the settings file does not change (ADR 013).

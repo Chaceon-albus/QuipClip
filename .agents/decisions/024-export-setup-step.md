@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053
+- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058
 
 ## Context
 
@@ -72,6 +72,12 @@ in a queue, and the file can change while it waits.
   fails again. The user can then open the file again.
 - After "Export anyway", step 4 sends no revision, and the backend checks nothing. A close,
   Back, or a started export ends that acceptance.
+- (Changed on 2026-11-09.) An FLV that a recorder still writes is no mismatch (ADR 058). Step 1
+  accepts an FLV with a size that is not smaller and a modification time that is not earlier.
+  Preparation accepts it when a fingerprint of its last bytes in front of the size did not
+  change. The slices of its FLV input then end at the last whole tag in front of that size.
+  After a failure with `sourceRevisionMismatch`, Back runs step 1 with an exact comparison, so
+  the confirmation and "Export anyway" show again.
 
 A cancel in the save dialog returns the user to the setup step. The export store stays
 `idle`, so a second attempt needs no new check.
