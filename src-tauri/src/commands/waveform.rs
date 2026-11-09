@@ -13,6 +13,7 @@ use crate::ffmpeg::waveform::job::{self, encode_buckets, EndMessage, JobRequest,
 use crate::ffmpeg::waveform::registry::{Refusal, WaveformJobs};
 use crate::ffmpeg::waveform::{origin_samples, BUCKET_RATE};
 use crate::flv::cache::Revision;
+use crate::flv::growth::{self, Verdict};
 use crate::flv::has_signature;
 use crate::settings;
 use crate::time::{Pts, Rational};
@@ -259,15 +260,19 @@ fn start(
     if !allowed(&media.path) {
         return Err(error(WaveformErrorCode::SourceNotAllowed));
     }
-    if media.size != request.size || media.mtime != request.mtime {
+    // The job serves the revision of the request. An FLV that a recorder still writes holds it
+    // in its first `size` bytes, and the read of an FLV stops there (ADR 058).
+    let revision = Revision {
+        path: media.path_text.clone(),
+        size: request.size,
+        mtime: request.mtime,
+    };
+    let verdict = growth::verdict(&revision, &media.path, media.size, media.mtime);
+    if verdict == Verdict::Changed {
         return Err(error(WaveformErrorCode::SourceChanged));
     }
     let key = EnvelopeKey {
-        revision: Revision {
-            path: media.path_text.clone(),
-            size: media.size,
-            mtime: media.mtime,
-        },
+        revision: revision.clone(),
         audio_stream_index: request.audio_stream_index,
         origin_pts: request.video_start_pts,
         time_base: request.video_time_base,
@@ -300,8 +305,11 @@ fn start(
     // be read is refused rather than read as another container.
     let flv = has_signature(&media.path)
         .map_err(|failure| error_with(WaveformErrorCode::SourceUnreadable, failure))?;
+    // Only the read of an FLV stops at the size of the revision.
+    if verdict == Verdict::Grown && !flv {
+        return Err(error(WaveformErrorCode::SourceChanged));
+    }
     let path_text = media.path_text.clone();
-    let (size, mtime) = (media.size, media.mtime);
     let job_request = JobRequest {
         ffmpeg,
         flv,
@@ -309,11 +317,13 @@ fn start(
         audio_stream_index: request.audio_stream_index,
         origin,
         duration_seconds: request.duration_seconds,
-        total_bytes: size,
+        total_bytes: request.size,
         cache_root: Some(places.cache_root.clone()),
         cache_key: key,
         still_same: Box::new(move || {
-            validate_media(&path_text).is_ok_and(|now| now.size == size && now.mtime == mtime)
+            validate_media(&path_text).is_ok_and(|now| {
+                growth::verdict(&revision, &now.path, now.size, now.mtime) != Verdict::Changed
+            })
         }),
     };
     let job_id = handle.id;
@@ -491,6 +501,68 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(refused.code, WaveformErrorCode::SourceUnreadable);
+    }
+
+    #[test]
+    fn an_flv_that_a_recorder_added_to_passes_and_a_file_without_the_signature_does_not() {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let dir = TestDirectory::new();
+        let source = dir.path.join("live.flv");
+        std::fs::write(&source, &bytes[..bytes.len() - 1000]).unwrap();
+        let media = validate_media(source.to_str().unwrap()).unwrap();
+        growth::remember(
+            &Revision {
+                path: media.path_text.clone(),
+                size: media.size,
+                mtime: media.mtime,
+            },
+            &media.path,
+        );
+        let request = StartWaveformRequest {
+            path: media.path_text.clone(),
+            size: media.size,
+            mtime: media.mtime,
+            sequence: 10,
+            audio_stream_index: 1,
+            video_start_pts: Pts::new(0),
+            video_time_base: Rational::new(1, 1000).unwrap(),
+            duration_seconds: Some(1.0),
+        };
+        let jobs = Arc::new(WaveformJobs::default());
+
+        // The recorder writes the rest. Only the missing FFmpeg stops the request.
+        std::fs::write(&source, &bytes).unwrap();
+        let refused = start(
+            &jobs,
+            &places(&dir),
+            &request,
+            &|_| true,
+            &no_ffmpeg,
+            Arc::new(Recorder::default()),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, WaveformErrorCode::FfmpegNotFound);
+
+        // The same bytes in front of the size, without the FLV signature: only the read of an
+        // FLV stops at the size of the revision.
+        let mut unsigned = bytes.clone();
+        unsigned[0] = b'X';
+        std::fs::write(&source, &unsigned).unwrap();
+        let ffmpeg = dir.path.join("ffmpeg");
+        let refused = start(
+            &jobs,
+            &places(&dir),
+            &request,
+            &|_| true,
+            &|_| Some(ffmpeg.clone()),
+            Arc::new(Recorder::default()),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, WaveformErrorCode::SourceChanged);
+        assert_eq!(jobs.running(), None);
     }
 
     #[test]

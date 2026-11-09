@@ -17,6 +17,7 @@ use crate::ffmpeg::preview::stream::{
 };
 use crate::ffmpeg::{self, SEEK_MARGIN_SECONDS};
 use crate::flv::cache::Revision;
+use crate::flv::growth::{self, Verdict};
 use crate::flv::locate::LocateMethod;
 use crate::flv::{self as flv_reader, FlvError};
 use crate::settings;
@@ -273,7 +274,16 @@ fn open_window(
     if !allowed(&media.path) {
         return Err(error(PreviewWindowErrorCode::SourceNotAllowed));
     }
-    if media.size != request.size || media.mtime != request.mtime {
+    // The window serves the revision of the request. An FLV that a recorder still writes holds
+    // it in its first `size` bytes, and the FLV source reads no further (ADR 058). A seek window
+    // gives FFmpeg the whole file, so it needs the same file.
+    let revision = Revision {
+        path: media.path_text.clone(),
+        size: request.size,
+        mtime: request.mtime,
+    };
+    let verdict = growth::verdict(&revision, &media.path, media.size, media.mtime);
+    if !serves_revision(verdict, request.container) {
         return Err(error(PreviewWindowErrorCode::SourceChanged));
     }
 
@@ -296,28 +306,32 @@ fn open_window(
     ));
 
     match request.container {
-        ContainerHint::Flv => {
-            let revision = Revision {
-                path: media.path_text.clone(),
-                size: media.size,
-                mtime: media.mtime,
-            };
-            open_flv(
-                windows,
-                cache_root,
-                request,
-                &media.path,
-                revision,
-                &ffmpeg,
-                ticket,
-                handle,
-                sink,
-                pcm_sink,
-            )
-        }
+        ContainerHint::Flv => open_flv(
+            windows,
+            cache_root,
+            request,
+            &media.path,
+            revision,
+            &ffmpeg,
+            ticket,
+            handle,
+            sink,
+            pcm_sink,
+        ),
         ContainerHint::MpegTs | ContainerHint::Matroska => {
             open_seek(windows, request, &media.path, &ffmpeg, ticket, handle, sink)
         }
+    }
+}
+
+/// True when a window of `container` serves the revision of its request from a file with
+/// `verdict` (ADR 058). An FLV source reads no further than the size of its revision. A seek
+/// window gives FFmpeg the whole file, so it needs the same file.
+fn serves_revision(verdict: Verdict, container: ContainerHint) -> bool {
+    match verdict {
+        Verdict::Same => true,
+        Verdict::Grown => container == ContainerHint::Flv,
+        Verdict::Changed => false,
     }
 }
 
@@ -652,6 +666,22 @@ mod tests {
     fn the_seek_takes_the_container_start_and_the_margin_off() {
         assert_eq!(seek_of(1264.567, 1234.567, 5.0), Some(25.0));
         assert_eq!(seek_of(1236.0, 1234.567, 5.0), None);
+    }
+
+    #[test]
+    fn only_an_flv_window_serves_a_file_that_grew() {
+        for container in [
+            ContainerHint::Flv,
+            ContainerHint::MpegTs,
+            ContainerHint::Matroska,
+        ] {
+            assert!(serves_revision(Verdict::Same, container));
+            assert!(!serves_revision(Verdict::Changed, container));
+            assert_eq!(
+                serves_revision(Verdict::Grown, container),
+                container == ContainerHint::Flv
+            );
+        }
     }
 
     #[test]

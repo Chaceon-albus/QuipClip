@@ -427,9 +427,11 @@ fn write_slice<V: Write, P: Write>(
     draining: &AtomicBool,
 ) -> WriterOutcome {
     let mut outcome = WriterOutcome::default();
+    // The read stops at the limit of the source, the size of its revision. A recording that still
+    // grows then ends inside its last tag there, as a recording that was cut (ADR 058).
     let opened = File::open(slice.source.path()).and_then(|mut file| {
         file.seek(SeekFrom::Start(slice.start_offset))?;
-        Ok(file)
+        Ok(file.take(slice.source.limit().saturating_sub(slice.start_offset)))
     });
     let file = match opened {
         Ok(file) => file,
@@ -1290,6 +1292,41 @@ mod tests {
         );
         assert!(outcome.reached_end);
         assert!(!outcome.damaged);
+    }
+
+    #[test]
+    fn the_writer_reads_a_grown_file_as_the_file_cut_at_the_limit_of_its_source() {
+        let recording = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        );
+        let start = recording.first_frame_offset;
+        // Inside the last tag, as the size of a recording that a recorder still writes.
+        let cut = recording.bytes.len() - 40;
+        let write = |source: &Arc<FlvSource>| {
+            let mut video = Vec::new();
+            let outcome = write_slice(
+                &slice(source, start, 0, 600_000),
+                &mut video,
+                None::<Vec<u8>>,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+            );
+            (outcome, video)
+        };
+
+        let dir = TestDirectory::new();
+        let path = dir.path.join("growing.flv");
+        std::fs::write(&path, &recording.bytes).unwrap();
+        let grown = Arc::new(FlvSource::open_within(&path, cut as u64, None).unwrap());
+        let (outcome, video) = write(&grown);
+
+        let other = TestDirectory::new();
+        let (cut_outcome, cut_video) = write(&write_file(&other, &recording.bytes[..cut]));
+
+        assert!(outcome.reached_end);
+        assert!(!outcome.damaged);
+        assert_eq!(outcome, cut_outcome);
+        assert_eq!(video, cut_video);
     }
 
     /// The data of the frame that a recording that was cut ends with: a NAL unit length of 202

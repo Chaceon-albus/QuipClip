@@ -395,7 +395,9 @@ impl PreviewWindows {
                 return Ok(found);
             }
         }
-        let source = Arc::new(FlvSource::open(path, cancel)?);
+        // The source reads no further than the size of its revision, so a recording that grew
+        // after its import reads as the file of that revision (ADR 058).
+        let source = Arc::new(FlvSource::open_within(path, revision.size, cancel)?);
         let cache = Arc::new(SourceCache::new(cache_root, revision));
         if let Some((table, non_monotonic)) = cache.load_table() {
             source.restore(&table, non_monotonic);

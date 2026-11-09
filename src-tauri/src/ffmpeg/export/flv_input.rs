@@ -30,6 +30,7 @@ use super::work_directory::ExportWorkDirectory;
 use crate::ffmpeg::preview::PreviewWindows;
 use crate::ffmpeg::probe::MediaProbe;
 use crate::flv::cache::Revision;
+use crate::flv::growth::{self, Verdict};
 use crate::flv::tag::TagKind;
 use crate::flv::FlvError;
 use crate::time::Rational;
@@ -50,7 +51,8 @@ pub struct FlvInput {
     /// The file name of the head in the work directory of the export, where FFmpeg runs:
     /// [`head_name`] of the index of the source in the plan (ADR 055).
     pub head_name: String,
-    /// The size of the source, where every slice ends.
+    /// Where every slice ends: the end of the last complete tag within the size of the revision.
+    /// For a file whose last tag is whole, the size of the file.
     pub source_size: u64,
     /// For each piece of this source, in concat order, the byte offset of the tag that its slice
     /// starts at. The pieces of other sources have no offset here (ADR 053).
@@ -118,6 +120,9 @@ pub struct FlvInputRequest<'a> {
     /// windows of the preview found, and the cache keeps the directory of an open source.
     pub windows: &'a PreviewWindows,
     pub cancel: Option<Arc<AtomicBool>>,
+    /// The size and the modification time of the revision that the pieces were marked against,
+    /// when the request names one. Preparation checked that the file still holds it.
+    pub expected: Option<(u64, i64)>,
 }
 
 /// The target of a locate in milliseconds: the time rounded down to the millisecond.
@@ -149,15 +154,33 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
         FlvError::Canceled => FlvInputFallback::Canceled,
         other => FlvInputFallback::Unreadable(other.to_string()),
     };
+    // The revision that the pieces were marked against, while the file still holds it. A
+    // recorder that still writes the file adds bytes after its size, and the reads and the
+    // slices stop at that size (ADR 058). The check here comes again because the preparation can
+    // take tens of seconds after its own check: a file that changed must not record its
+    // keyframes in the sidecar of the old revision. Without a revision, as after "Export anyway",
+    // and after such a change, the file is taken as it is now.
+    let now = Revision {
+        path: media.path_text.clone(),
+        size: media.size,
+        mtime: media.mtime,
+    };
+    let revision = request
+        .expected
+        .map(|(size, mtime)| Revision {
+            path: media.path_text.clone(),
+            size,
+            mtime,
+        })
+        .filter(|expected| {
+            growth::verdict(expected, &media.path, media.size, media.mtime) != Verdict::Changed
+        })
+        .unwrap_or(now);
     let (source, cache) = request
         .windows
         .flv_source(
             request.cache_root,
-            Revision {
-                path: media.path_text.clone(),
-                size: media.size,
-                mtime: media.mtime,
-            },
+            revision,
             &media.path,
             request.cancel.clone(),
         )
@@ -197,6 +220,19 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
     if !stream_order_matches(&source.window_stream_order(earliest), request.probe) {
         return Err(FlvInputFallback::StreamOrder);
     }
+    // The slices end at the last complete tag, as the windows of the preview do. A recording that
+    // still grows ends inside a tag at the size of its revision, and FFmpeg would decode the part
+    // of that tag as a damaged frame (ADR 058).
+    let end = source
+        .complete_end(request.cancel.clone())
+        .map_err(unreadable)?;
+    // Damage near the end can stop the walk to the last tag in front of a slice start, and
+    // FFmpeg cannot open a slice that starts at or after its end.
+    if segment_offsets.iter().any(|offset| *offset >= end) {
+        return Err(FlvInputFallback::Unreadable(
+            "a slice starts after the last whole tag that the reader found".to_owned(),
+        ));
+    }
     // The last read of the flag before the write of the head. An export whose preparation was
     // abandoned while a read above was blocked (`commands::export::run_export_job_with`) sets the
     // flag, and must not write the head late, when nothing will use it. A write after the
@@ -215,7 +251,7 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
         .map_err(|error| FlvInputFallback::HeadNotWritten(error.to_string()))?;
     Ok(FlvInput {
         head_name,
-        source_size: media.size,
+        source_size: end,
         segment_offsets,
         first_frame_offset: first_frame,
     })
@@ -325,6 +361,7 @@ mod tests {
             source_index,
             windows: &PreviewWindows::default(),
             cancel: None,
+            expected: None,
         })
     }
 
@@ -375,6 +412,98 @@ mod tests {
                 .all(|path| path.extension() != Some("flv".as_ref())),
             "{cached:?}"
         );
+    }
+
+    /// The FLV input of `path` for one piece at 2.067 s, for pieces marked against the revision
+    /// `expected`.
+    fn locate_expecting(path: &Path, cache_root: &Path, expected: Option<(u64, i64)>) -> FlvInput {
+        let work =
+            ExportWorkDirectory::create(&crate::app_cache::work_directory(cache_root)).unwrap();
+        locate_flv_input(&FlvInputRequest {
+            source: path,
+            probe: &flv_probe(Some(1)),
+            seek_positions: &[seconds(2_067)],
+            cache_root,
+            work_directory: &work,
+            source_index: 0,
+            windows: &PreviewWindows::default(),
+            cancel: None,
+            expected,
+        })
+        .unwrap()
+    }
+
+    /// True when the keyframe cache holds a directory for `revision`.
+    fn cached(cache_root: &Path, revision: &Revision) -> bool {
+        cache_root
+            .join(crate::flv::cache::CACHE_DIR_NAME)
+            .join(revision.key())
+            .is_dir()
+    }
+
+    #[test]
+    fn the_slices_of_a_grown_file_end_at_the_last_whole_tag_of_its_revision() {
+        let recording = recording(&RecordingOptions::default());
+        // The pieces were marked against the file at about half its size, inside a tag.
+        let size = recording.bytes.len() / 2;
+        let (directory, path) = write_source("live.flv", &recording.bytes[..size]);
+        let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
+        let revision = Revision {
+            path: media.path_text.clone(),
+            size: size as u64,
+            mtime: media.mtime,
+        };
+        growth::remember(&revision, &media.path);
+        // The recorder writes the rest.
+        fs::write(&path, &recording.bytes).unwrap();
+        let cache_root = directory.path.join("cache");
+
+        let input = locate_expecting(&path, &cache_root, Some((size as u64, media.mtime)));
+
+        // The slices end at the end of the last whole tag in front of the size.
+        let end = input.source_size;
+        assert!(end <= size as u64);
+        let whole = crate::flv::FlvSource::open(&path, None).unwrap();
+        let previous = u32::from_be_bytes(
+            recording.bytes[end as usize - 4..end as usize]
+                .try_into()
+                .unwrap(),
+        );
+        let last = whole
+            .tag_at(end - 4 - u64::from(previous))
+            .unwrap()
+            .unwrap();
+        assert_eq!(last.end(), end);
+        assert!(whole.tag_at(end).unwrap().unwrap().end() > size as u64);
+        assert!(input
+            .url("h0.flv", 0, &path)
+            .contains(&format!(",end,{end},")));
+        // The keyframe table goes to the directory of that revision.
+        assert!(cached(&cache_root, &revision));
+    }
+
+    #[test]
+    fn a_file_that_changed_after_the_check_takes_its_own_revision() {
+        let recording = recording(&RecordingOptions::default());
+        let size = recording.bytes.len() / 2;
+        let (directory, path) = write_source("live.flv", &recording.bytes[..size]);
+        let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
+        let revision = Revision {
+            path: media.path_text.clone(),
+            size: size as u64,
+            mtime: media.mtime,
+        };
+        growth::remember(&revision, &media.path);
+        // The recorder starts the file again: other bytes in front of the old size.
+        let mut restarted = recording.bytes.clone();
+        restarted[size - 10] ^= 0xFF;
+        fs::write(&path, &restarted).unwrap();
+        let cache_root = directory.path.join("cache");
+
+        let input = locate_expecting(&path, &cache_root, Some((size as u64, media.mtime)));
+
+        assert_eq!(input.source_size, restarted.len() as u64);
+        assert!(!cached(&cache_root, &revision));
     }
 
     #[test]
@@ -567,6 +696,7 @@ mod tests {
             source_index: 0,
             windows: &windows,
             cancel: None,
+            expected: None,
         });
         assert_eq!(result, Err(FlvInputFallback::ConfigChange));
     }
