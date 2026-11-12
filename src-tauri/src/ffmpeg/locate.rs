@@ -249,22 +249,21 @@ fn executable_name_matches(actual: &OsStr, expected: &str, ascii_case_insensitiv
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && may_execute(&metadata))
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+/// Any execute bit, for the owner, the group or other users, passes. The check does not ask
+/// whether this process may run the file.
+#[cfg(unix)]
+fn may_execute(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Windows has no execute bit, so this check accepts every file.
+#[cfg(not(unix))]
+fn may_execute(_metadata: &fs::Metadata) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -328,6 +327,20 @@ mod tests {
         let path = root.directory("path");
         let app_data = root.directory("app-data");
         create_file(&path.join(FFMPEG_NAME));
+        create_executable(&path.join(FFPROBE_NAME));
+        create_pair(&app_data.join("bin"));
+
+        let found = discover_with_path(None, &[path], &app_data, None).unwrap();
+
+        assert_eq!(found.origin, ExecutableOrigin::AppData);
+    }
+
+    #[test]
+    fn a_directory_with_the_program_name_is_not_accepted() {
+        let root = TestDirectory::new();
+        let path = root.directory("path");
+        let app_data = root.directory("app-data");
+        fs::create_dir(path.join(FFMPEG_NAME)).unwrap();
         create_executable(&path.join(FFPROBE_NAME));
         create_pair(&app_data.join("bin"));
 
