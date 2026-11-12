@@ -160,13 +160,16 @@ pub struct JobRequest {
     /// `videoStartPts` in samples of the PCM, the time of bucket 0.
     pub origin: i64,
     pub duration_seconds: Option<f64>,
+    /// The size of the revision of the request. The read of an FLV stops there, so a recording
+    /// that still grows reads as the file of that revision (ADR 058).
     pub total_bytes: u64,
     /// The application cache directory, or `None` when it is not known: the job then writes no
     /// cache.
     pub cache_root: Option<PathBuf>,
     pub cache_key: EnvelopeKey,
-    /// True when the source still has the size and the modification time of the request. The
-    /// source thread calls it, because it can wait for a share.
+    /// True when the source still holds the revision of the request: the same size and
+    /// modification time, or an FLV that only grew after it (ADR 058). The source thread calls
+    /// it, because it can wait for a share.
     pub still_same: Box<dyn Fn() -> bool + Send>,
 }
 
@@ -323,7 +326,7 @@ fn run_job(handle: &Arc<JobHandle>, request: JobRequest, sink: &dyn WaveformSink
             .name("waveform-source".to_owned())
             .spawn(move || {
                 let mut outcome = if flv {
-                    read_flv(&ffmpeg, &path, origin, &handle, &sender)
+                    read_flv(&ffmpeg, &path, total_bytes, origin, &handle, &sender)
                 } else {
                     decode_file(&ffmpeg, &path, audio_stream_index, origin, &handle, &sender)
                 };
@@ -714,16 +717,17 @@ impl<R: Read> Read for Counting<R> {
     }
 }
 
-type FlvStream = TagStream<BufReader<Counting<File>>>;
+type FlvStream = TagStream<BufReader<Counting<io::Take<File>>>>;
 
-fn open_stream(path: &Path, offset: u64) -> io::Result<FlvStream> {
+/// The tags of the FLV at `path` from `offset`, up to `limit` bytes of the file.
+fn open_stream(path: &Path, offset: u64, limit: u64) -> io::Result<FlvStream> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     Ok(TagStream::new(
         BufReader::with_capacity(
             FLV_READ_BUFFER,
             Counting {
-                inner: file,
+                inner: file.take(limit.saturating_sub(offset)),
                 count: offset,
             },
         ),
@@ -736,6 +740,7 @@ fn open_stream(path: &Path, offset: u64) -> io::Result<FlvStream> {
 fn read_flv(
     ffmpeg: &Path,
     path: &Path,
+    limit: u64,
     origin: i64,
     handle: &JobHandle,
     sender: &Sender<SourceEvent>,
@@ -744,7 +749,7 @@ fn read_flv(
         Ok(offset) => offset,
         Err(error) => return SourceOutcome::failed(EndCode::ReadFailed, error.to_string()),
     };
-    let mut stream = match open_stream(path, first_tag) {
+    let mut stream = match open_stream(path, first_tag, limit) {
         Ok(stream) => stream,
         Err(error) => return SourceOutcome::failed(EndCode::ReadFailed, error.to_string()),
     };
@@ -775,11 +780,12 @@ fn read_flv(
         let tag = match stream.next_tag(&mut buf) {
             Ok(Some(tag)) => tag,
             Ok(None) => break,
-            // A recording that was killed ends inside its last tag.
+            // A recording that was killed ends inside its last tag, and so does a recording that
+            // still grows, at the size of its revision.
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                match resync_after(path, stream.offset(), handle) {
-                    Ok(Some(offset)) => match open_stream(path, offset) {
+                match resync_after(path, limit, stream.offset(), handle) {
+                    Ok(Some(offset)) => match open_stream(path, offset, limit) {
                         Ok(next) => {
                             stream = next;
                             continue;
@@ -852,8 +858,13 @@ fn first_tag_offset(path: &Path) -> io::Result<u64> {
 
 /// The offset of the first proven tag after the damaged tag at `offset`, as the preview searches
 /// (ADR 046).
-fn resync_after(path: &Path, offset: u64, handle: &JobHandle) -> io::Result<Option<u64>> {
-    let mut source = FileSource::open(path, Some(handle.cancel_flag()))?;
+fn resync_after(
+    path: &Path,
+    limit: u64,
+    offset: u64,
+    handle: &JobHandle,
+) -> io::Result<Option<u64>> {
+    let mut source = FileSource::open_within(path, limit, Some(handle.cancel_flag()))?;
     let from = offset + 1;
     Ok(resync(&mut source, from, from.saturating_add(RESYNC_REACH))?.map(|tag| tag.offset))
 }
@@ -1320,6 +1331,89 @@ mod tests {
         let end = recorder.end();
         assert_eq!(end.status, EndStatus::Complete, "{end:?}");
         assert!(!end.damaged);
+    }
+
+    #[test]
+    fn the_tags_of_an_flv_end_at_the_size_of_its_revision() {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let dir = TestDirectory::new();
+        let path = dir.path.join("grown.flv");
+        // Garbage after the size of the revision would end the read as damaged.
+        let mut grown = bytes.clone();
+        grown.extend(std::iter::repeat_n(0xEE, 300));
+        std::fs::write(&path, grown).unwrap();
+        let first = first_tag_offset(&path).unwrap();
+        let mut stream = open_stream(&path, first, bytes.len() as u64).unwrap();
+        let mut buf = Vec::new();
+        let mut end = first;
+        while let Some(tag) = stream.next_tag(&mut buf).unwrap() {
+            end = tag.end();
+        }
+        assert_eq!(end, bytes.len() as u64);
+        assert_eq!(stream.reader().get_ref().count, bytes.len() as u64);
+
+        // A size inside the last tag ends the read as a recording that was cut, not as damage.
+        let mut stream = open_stream(&path, first, bytes.len() as u64 - 40).unwrap();
+        let error = loop {
+            match stream.next_tag(&mut buf) {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the read ended on a tag boundary"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_resync_finds_no_tag_after_the_size_of_the_revision() {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let first = parse_file_header(&bytes).unwrap().first_tag_offset() as usize;
+        // Garbage, then whole tags again, after the size of the revision.
+        let mut grown = bytes.clone();
+        grown.extend(std::iter::repeat_n(0xEE, 300));
+        grown.extend_from_slice(&bytes[first..]);
+        let dir = TestDirectory::new();
+        let path = dir.path.join("grown.flv");
+        std::fs::write(&path, grown).unwrap();
+        let jobs = WaveformJobs::default();
+        let handle = jobs.begin(1).unwrap();
+        let size = bytes.len() as u64;
+
+        assert_eq!(resync_after(&path, size, size, &handle).unwrap(), None);
+        assert!(resync_after(&path, u64::MAX, size, &handle)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn an_flv_reads_no_further_than_the_size_of_its_revision() {
+        let Some(ffmpeg) = ffmpeg() else { return };
+        let dir = TestDirectory::new();
+        let clean = dir.path.join("clean.flv");
+        bursts(&ffmpeg, &clean, 4, 48_000, "flv");
+        let bytes = std::fs::read(&clean).unwrap();
+        let (recorder, _) = run_to_end(request(&ffmpeg, &clean, true, &dir.path));
+        let whole = recorder.end();
+
+        // The bytes after the size of the revision, here garbage that would end the envelope as
+        // damaged, are not read: the file reads as it was at that size.
+        let mut grown = bytes.clone();
+        grown.extend(std::iter::repeat_n(0xEE, 300));
+        let path = dir.path.join("grown.flv");
+        std::fs::write(&path, grown).unwrap();
+        let mut grown_request = request(&ffmpeg, &path, true, &dir.path);
+        grown_request.total_bytes = bytes.len() as u64;
+        let (recorder, _) = run_to_end(grown_request);
+        let end = recorder.end();
+        assert_eq!(end.status, EndStatus::Complete, "{end:?}");
+        assert!(!end.damaged);
+        assert_eq!(end.bucket_count, whole.bucket_count);
     }
 
     #[cfg(unix)]

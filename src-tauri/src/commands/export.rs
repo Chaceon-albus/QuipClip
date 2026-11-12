@@ -94,6 +94,8 @@ use crate::ffmpeg::{
     self, AudioFrames, AudioGapRead, AudioProbe, FfmpegPaths, FirstAudioPacket, LocateError,
     MediaProbe, OutputAudioProbe, ProbeError,
 };
+use crate::flv::cache::Revision;
+use crate::flv::growth::{self, Verdict};
 use crate::settings::{self, Preset};
 use crate::time::{pts_seconds, Pts, Rational};
 use serde::{Deserialize, Serialize};
@@ -842,6 +844,9 @@ where
                 cache_directory,
                 work_directory: &work,
                 source_index: index,
+                expected: resolved.sources[index]
+                    .expected_revision
+                    .map(|revision| (revision.size, revision.mtime)),
             },
             preview_windows,
             cancel,
@@ -1247,6 +1252,7 @@ fn flv_input_for(
             source_index: place.source_index,
             windows: preview_windows,
             cancel: Some(reader_cancel.clone()),
+            expected: place.expected,
         })
     });
     let input = match located {
@@ -1346,6 +1352,9 @@ struct FlvPlace<'a> {
     work_directory: &'a WorkDirectory,
     /// The index of the source in the plan, which names its head.
     source_index: usize,
+    /// The size and the modification time of the revision that the pieces were marked against,
+    /// when the request names one (ADR 058).
+    expected: Option<(u64, i64)>,
 }
 
 /// Sets its flag when it drops, also during the unwind of a panic.
@@ -1532,18 +1541,27 @@ const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20
 /// A read that fails is not a mismatch. The re-probe and [`build_plan`] report a file that is
 /// gone, or that is no longer a regular file, with codes of their own. The frontend check of
 /// ADR 024 follows the same rule.
+///
+/// An FLV that a recorder still writes holds its revision in its first `size` bytes, as its
+/// fingerprint shows, and the FLV input of the source stops at that size (ADR 058).
 fn check_source_revision(source: &ExportSourceWire) -> Result<(), ExportCommandError> {
     let Some(expected) = source.expected_revision else {
         return Ok(());
     };
-    match crate::commands::media::validate_media(&source.path) {
-        Ok(actual) if actual.size != expected.size || actual.mtime != expected.mtime => {
-            Err(ExportCommandError::with_detail(
-                ExportErrorCode::SourceRevisionMismatch,
-                source.id.clone(),
-            ))
-        }
-        _ => Ok(()),
+    let Ok(actual) = crate::commands::media::validate_media(&source.path) else {
+        return Ok(());
+    };
+    let revision = Revision {
+        path: actual.path_text.clone(),
+        size: expected.size,
+        mtime: expected.mtime,
+    };
+    match growth::verdict(&revision, &actual.path, actual.size, actual.mtime) {
+        Verdict::Same | Verdict::Grown => Ok(()),
+        Verdict::Changed => Err(ExportCommandError::with_detail(
+            ExportErrorCode::SourceRevisionMismatch,
+            source.id.clone(),
+        )),
     }
 }
 
@@ -3153,6 +3171,7 @@ mod tests {
                     cache_directory: &cache_root,
                     work_directory: &work,
                     source_index: 2,
+                    expected: None,
                 },
                 &windows,
                 cancel,
@@ -3752,6 +3771,50 @@ mod tests {
             .unwrap()
             .set_modified(earlier)
             .unwrap();
+        let error = check_source_revision(&request_expecting(&source, Some(marked)).sources[0])
+            .unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);
+    }
+
+    #[test]
+    fn the_source_revision_check_accepts_an_flv_that_a_recorder_only_added_to() {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let directory = TestDirectory::new();
+        let source = directory.path.join("live.flv");
+        let cut = bytes.len() - 1000;
+        fs::write(&source, &bytes[..cut]).unwrap();
+        let earlier = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        let marked = revision_of(&source);
+        let media = crate::commands::media::validate_media(&source.to_string_lossy()).unwrap();
+        growth::remember(
+            &Revision {
+                path: media.path_text,
+                size: marked.size,
+                mtime: marked.mtime,
+            },
+            &media.path,
+        );
+
+        // The recorder writes the rest, and the modification time moves on.
+        fs::write(&source, &bytes).unwrap();
+        assert_eq!(
+            check_source_revision(&request_expecting(&source, Some(marked)).sources[0]),
+            Ok(())
+        );
+
+        // A recorder that starts the file again changes the bytes in front of the old size.
+        let mut restarted = bytes.clone();
+        restarted[cut - 10] ^= 0xFF;
+        fs::write(&source, &restarted).unwrap();
         let error = check_source_revision(&request_expecting(&source, Some(marked)).sources[0])
             .unwrap_err();
         assert_eq!(error.code, ExportErrorCode::SourceRevisionMismatch);

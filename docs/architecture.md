@@ -80,6 +80,7 @@ document summarizes them and shows how the parts fit together.
 | [`056-show-the-audio-envelope-of-a-source.md`](../.agents/decisions/056-show-the-audio-envelope-of-a-source.md)                             | The menu of a clip label shows a cached audio envelope of a source on the timeline |
 | [`057-keep-rebuildable-files-in-the-cache-directory.md`](../.agents/decisions/057-keep-rebuildable-files-in-the-cache-directory.md)         | Files that QuipClip can make again go in subdirectories of the cache directory     |
 | [`058-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/058-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
+| [`058-read-a-growing-flv-as-the-revision-of-its-import.md`](../.agents/decisions/058-read-a-growing-flv-as-the-revision-of-its-import.md)   | An FLV that a recorder still writes reads as the bytes that its import read        |
 
 ## Shape
 
@@ -681,6 +682,12 @@ time differs with `sourceRevisionMismatch`. This catches a file that was replace
 export waited in a queue. It does not catch a replacement of the same size inside the same
 second, a copy that keeps the modification time, or a change after that read. After "Export
 anyway", the request carries no revision, and the backend checks nothing (ADR 024).
+
+An FLV that a recorder still writes holds the revision of its import while its first `size`
+bytes do not change (ADR 058). The import keeps a fingerprint of the last bytes in front of that
+size. Each reader of an FLV source stops at that size, so the preview, the envelope and the export
+read the file as the import read it. Step 1 accepts an FLV that is not smaller and not older.
+Preparation and the preview compare the fingerprint.
 
 The frontend explicitly projects each runtime `Source` into `PersistedSource`. The
 projection lists each persisted field. It does not use object spread as a serialization

@@ -12,9 +12,11 @@
 //! - `locate`: the keyframe at or before a time, and the extent of the file.
 //! - `table`: the keyframes and configurations that walks found.
 //! - `cache`: the keyframe sidecar under the application cache directory.
+//! - `growth`: whether a file that a recorder still writes holds the revision of its import.
 
 pub mod amf;
 pub mod cache;
+pub mod growth;
 pub mod head;
 pub mod locate;
 pub mod reader;
@@ -152,6 +154,8 @@ fn uncovered(ranges: &[(u64, u64)], from: u64, until: u64) -> Vec<(u64, u64)> {
 /// under a lock.
 pub struct FlvSource {
     path: PathBuf,
+    /// The most bytes of the file that a read sees: the size of the revision (ADR 058).
+    limit: u64,
     head: FlvHead,
     knowledge: Mutex<Knowledge>,
 }
@@ -159,7 +163,18 @@ pub struct FlvSource {
 impl FlvSource {
     /// Read the head of the file at `path`.
     pub fn open(path: &Path, cancel: Option<Arc<AtomicBool>>) -> Result<Self, FlvError> {
-        let mut source = FileSource::open(path, cancel)?;
+        Self::open_within(path, u64::MAX, cancel)
+    }
+
+    /// Read the head of the file at `path`, as a file of at most `limit` bytes. Every later read
+    /// of this source has the same limit, so a recording that still grows reads as the file of
+    /// the revision that `limit` is the size of: as a recording cut at that size (ADR 058).
+    pub fn open_within(
+        path: &Path,
+        limit: u64,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, FlvError> {
+        let mut source = FileSource::open_within(path, limit, cancel)?;
         let head = FlvHead::read(&mut source)?;
         let mut table = KeyframeTable::new();
         for config in &head.configs {
@@ -175,6 +190,7 @@ impl FlvSource {
         );
         Ok(Self {
             path: path.to_path_buf(),
+            limit,
             head,
             knowledge: Mutex::new(Knowledge {
                 table,
@@ -187,6 +203,17 @@ impl FlvSource {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The most bytes of the file that a read of this source sees. A reader that opens the file
+    /// itself, as the writer of a window does, must stop here too.
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
+    /// The file, read in blocks, up to [`Self::limit`].
+    fn file(&self, cancel: Option<Arc<AtomicBool>>) -> io::Result<FileSource> {
+        FileSource::open_within(&self.path, self.limit, cancel)
     }
 
     pub fn head(&self) -> &FlvHead {
@@ -235,7 +262,7 @@ impl FlvSource {
             }
             knowledge.state
         };
-        let mut source = FileSource::open(&self.path, cancel)?;
+        let mut source = self.file(cancel)?;
         let mut scratch = KeyframeTable::new();
         let result = locate::locate_keyframe(
             &mut source,
@@ -269,7 +296,7 @@ impl FlvSource {
         if offset < self.head.first_tag_offset() {
             return Ok(false);
         }
-        let mut source = FileSource::open(&self.path, None)?;
+        let mut source = self.file(None)?;
         let Some(tag) = scan::read_tag(&mut source, offset)? else {
             return Ok(false);
         };
@@ -280,7 +307,7 @@ impl FlvSource {
 
     /// The tag at `offset`, when a valid tag starts there.
     pub fn tag_at(&self, offset: u64) -> Result<Option<scan::Tag>, FlvError> {
-        let mut source = FileSource::open(&self.path, None)?;
+        let mut source = self.file(None)?;
         Ok(scan::read_tag(&mut source, offset)?)
     }
 
@@ -292,7 +319,7 @@ impl FlvSource {
         offset: u64,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Option<KeyframeEntry>, FlvError> {
-        let mut source = FileSource::open(&self.path, cancel)?;
+        let mut source = self.file(cancel)?;
         let len = source.len();
         let start = match scan::read_tag(&mut source, offset)? {
             Some(tag) => Some(tag),
@@ -324,9 +351,15 @@ impl FlvSource {
         }
     }
 
+    /// The end of the last complete tag within the limit ([`locate::complete_end`]).
+    pub fn complete_end(&self, cancel: Option<Arc<AtomicBool>>) -> Result<u64, FlvError> {
+        let mut source = self.file(cancel)?;
+        locate::complete_end(&mut source, &self.head)
+    }
+
     /// The first and last video presentation times.
     pub fn extent(&self) -> Result<Extent, FlvError> {
-        let mut source = FileSource::open(&self.path, None)?;
+        let mut source = self.file(None)?;
         locate::extent(&mut source, &self.head)
     }
 
@@ -357,7 +390,7 @@ impl FlvSource {
             .into_iter()
             .map(|config| (config.kind, config))
             .collect();
-        let mut source = FileSource::open(&self.path, cancel)?;
+        let mut source = self.file(cancel)?;
         let mut framed: Vec<TagKind> = Vec::new();
         let mut position = offset;
         for _ in 0..WINDOW_HEAD_TAGS {
@@ -470,7 +503,7 @@ impl FlvSource {
         let mut read = Vec::new();
         let mut bytes_read = 0;
         if !gaps.is_empty() {
-            let mut source = FileSource::open(&self.path, cancel)?;
+            let mut source = self.file(cancel)?;
             for (start, end) in gaps {
                 let (found, stopped) = walk_configs(&mut source, start, end)?;
                 configs.extend(found);

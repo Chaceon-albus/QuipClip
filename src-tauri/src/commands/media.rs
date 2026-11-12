@@ -2,6 +2,8 @@
 
 use crate::ffmpeg::capabilities::PROBE_DETAIL_LIMIT;
 use crate::ffmpeg::{self, FfmpegPaths, MediaProbe, ProbeError};
+use crate::flv::cache::Revision;
+use crate::flv::growth;
 use crate::settings;
 use serde::Serialize;
 use std::fs;
@@ -114,7 +116,7 @@ pub async fn import_media(
             &app_data_directory,
             settings::configured_ffmpeg_path,
             ffmpeg::discover,
-            ffmpeg::probe_media,
+            ffmpeg::probe_media_up_to,
             |media_path| {
                 app.asset_protocol_scope()
                     .allow_file(media_path)
@@ -137,14 +139,21 @@ fn import_media_with<ConfiguredPath, Discover, Probe, Allow>(
 where
     ConfiguredPath: FnOnce(&Path) -> Option<PathBuf>,
     Discover: FnOnce(Option<&Path>, &Path) -> Result<FfmpegPaths, ffmpeg::LocateError>,
-    Probe: FnOnce(&Path, &Path) -> Result<MediaProbe, ProbeError>,
+    Probe: FnOnce(&Path, &Path, u64) -> Result<MediaProbe, ProbeError>,
     Allow: FnOnce(&Path) -> Result<(), String>,
 {
     let media = validate_media(path)?;
+    // Right after the size, before the probe can take seconds: a recorder that starts the file
+    // again meanwhile must not give its bytes to this revision (ADR 058). A file that is not an
+    // FLV gives none after one block.
+    let fingerprint = growth::fingerprint(&media.path, media.size);
     let configured = configured_path(app_data_directory);
     let executables = discover(configured.as_deref(), app_data_directory)
         .map_err(|_| generated_error(ImportMediaErrorCode::FfmpegPairMissing))?;
-    let probe = probe(&executables.ffprobe, &media.path).map_err(map_probe_error)?;
+    // The probe reads an FLV no further than the size of this revision, so the length that it
+    // reports is the length of the revision, also while a recorder still writes the file
+    // (ADR 058).
+    let probe = probe(&executables.ffprobe, &media.path, media.size).map_err(map_probe_error)?;
 
     // The scope denial carries its diagnostic. `import_media`'s closure stringifies the Tauri
     // error on purpose, and a denial is not an enumerable condition: the scope layer refuses a
@@ -154,6 +163,20 @@ where
     allow(&media.path).map_err(|detail| {
         ImportMediaError::with_detail(ImportMediaErrorCode::AssetScopeDenied, detail)
     })?;
+
+    // Later checks of this revision accept the file when a recorder only added to it.
+    if let Some(fingerprint) =
+        fingerprint.filter(|_| probe.format_names.iter().any(|name| name == "flv"))
+    {
+        growth::keep(
+            &Revision {
+                path: media.path_text.clone(),
+                size: media.size,
+                mtime: media.mtime,
+            },
+            fingerprint,
+        );
+    }
 
     Ok(ImportMediaResult {
         path: media.path_text,
@@ -410,7 +433,7 @@ mod tests {
                     *called.borrow_mut() = true;
                     unreachable!()
                 },
-                |_, _| unreachable!(),
+                |_, _, _| unreachable!(),
                 |_| unreachable!(),
             )
             .unwrap_err();
@@ -491,7 +514,7 @@ mod tests {
             &directory.path,
             |_| None,
             |_, _| Err(ffmpeg::LocateError::NotFound { inspected: vec![] }),
-            |_, _| {
+            |_, _, _| {
                 *probe_called.borrow_mut() = true;
                 unreachable!()
             },
@@ -526,8 +549,10 @@ mod tests {
                 events.borrow_mut().push("discover");
                 Ok(fake_executables(&directory.path))
             },
-            |_, path| {
+            |_, path, size| {
                 assert_eq!(path, canonical);
+                // The probe reads the file as the revision of the import (ADR 058).
+                assert_eq!(size, 5);
                 events.borrow_mut().push("probe");
                 Ok(fake_probe())
             },
@@ -562,7 +587,7 @@ mod tests {
                 *received.borrow_mut() = Some(configured.map(Path::to_path_buf));
                 Ok(fake_executables(&directory.path))
             },
-            |_, _| Ok(fake_probe()),
+            |_, _, _| Ok(fake_probe()),
             |_| Ok(()),
         )
         .unwrap();
@@ -587,7 +612,7 @@ mod tests {
                 *received.borrow_mut() = Some(configured.map(Path::to_path_buf));
                 Ok(fake_executables(&directory.path))
             },
-            |_, _| Ok(fake_probe()),
+            |_, _, _| Ok(fake_probe()),
             |_| Ok(()),
         )
         .unwrap();
@@ -606,7 +631,7 @@ mod tests {
             &directory.path,
             |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
-            |_, _| {
+            |_, _, _| {
                 Err(ProbeError::ProcessFailed {
                     code: Some(7),
                     stderr: b"decoder rejected input".to_vec(),
@@ -669,7 +694,7 @@ mod tests {
             &directory.path,
             |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
-            |_, _| Ok(fake_probe()),
+            |_, _, _| Ok(fake_probe()),
             |_| Err("scope rejected pattern".to_owned()),
         )
         .unwrap_err();
@@ -813,10 +838,83 @@ mod tests {
             app_data,
             |_| None,
             |_, _| Ok(fake_executables(app_data)),
-            |_, _| Ok(fake_probe()),
+            |_, _, _| Ok(fake_probe()),
             |_| Ok(()),
         )
         .unwrap()
+    }
+
+    /// Imports `bytes` as an FLV with `probe`, calls `during_probe` inside the probe, and then
+    /// writes `after` to the file. Returns the verdict on the file as it is then.
+    fn grown_import_verdict(
+        bytes: &[u8],
+        probe: MediaProbe,
+        during_probe: &dyn Fn(&Path),
+        after: &[u8],
+    ) -> growth::Verdict {
+        let directory = TestDirectory::new();
+        let media_path = directory.file("live.flv", bytes);
+        let result = import_media_with(
+            media_path.to_str().unwrap(),
+            &directory.path,
+            |_| None,
+            |_, _| Ok(fake_executables(&directory.path)),
+            |_, path, _| {
+                during_probe(path);
+                Ok(probe)
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        fs::write(&media_path, after).unwrap();
+        let now = validate_media(&result.path).unwrap();
+        growth::verdict(
+            &Revision {
+                path: result.path.clone(),
+                size: result.size,
+                mtime: result.mtime,
+            },
+            &now.path,
+            now.size,
+            now.mtime,
+        )
+    }
+
+    #[test]
+    fn an_flv_import_keeps_the_fingerprint_that_it_read_before_the_probe() {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let cut = bytes.len() - 1000;
+        let flv = || MediaProbe {
+            format_names: vec!["flv".to_owned()],
+            ..fake_probe()
+        };
+        let mut restarted = bytes.clone();
+        restarted[cut - 10] ^= 0xFF;
+
+        // A recorder that only adds to the file keeps the revision of an FLV.
+        assert_eq!(
+            grown_import_verdict(&bytes[..cut], flv(), &|_| {}, &bytes),
+            growth::Verdict::Grown
+        );
+        // Another container keeps no fingerprint.
+        assert_eq!(
+            grown_import_verdict(&bytes[..cut], fake_probe(), &|_| {}, &bytes),
+            growth::Verdict::Changed
+        );
+        // A recorder that starts the file again during the probe gives the revision no bytes of
+        // the new file: the fingerprint came before the probe.
+        assert_eq!(
+            grown_import_verdict(
+                &bytes[..cut],
+                flv(),
+                &|path| fs::write(path, &restarted).unwrap(),
+                &restarted,
+            ),
+            growth::Verdict::Changed
+        );
     }
 
     fn fake_executables(directory: &Path) -> FfmpegPaths {

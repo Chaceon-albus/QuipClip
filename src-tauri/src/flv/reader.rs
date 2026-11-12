@@ -77,8 +77,19 @@ pub struct FileSource {
 impl FileSource {
     /// Open `path` for reading. `cancel`, when set, stops the next block read.
     pub fn open(path: &Path, cancel: Option<Arc<AtomicBool>>) -> io::Result<Self> {
+        Self::open_within(path, u64::MAX, cancel)
+    }
+
+    /// Open `path` for reading as a file of at most `limit` bytes. A recording that still grows
+    /// then reads as the file of its revision: its bytes after `limit` do not exist for the
+    /// reader (ADR 058).
+    pub fn open_within(
+        path: &Path,
+        limit: u64,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> io::Result<Self> {
         let file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let len = file.metadata()?.len().min(limit);
         Ok(Self {
             file,
             len,
@@ -204,6 +215,22 @@ mod tests {
         assert_eq!(source.read_at(offset, &mut tail).unwrap(), 50);
         assert_eq!(tail[..50], bytes[offset as usize..]);
         assert!(read_exact_at(&mut source, offset, &mut tail).is_err());
+    }
+
+    #[test]
+    fn a_limit_ends_the_source_inside_a_block_and_a_shorter_file_keeps_its_length() {
+        let bytes: Vec<u8> = (0..(BLOCK_LEN * 2)).map(|i| (i % 251) as u8).collect();
+        let (_dir, path) = temp_file(&bytes);
+        let limit = BLOCK_LEN as u64 + 10;
+        let mut source = FileSource::open_within(&path, limit, None).unwrap();
+        assert_eq!(source.len(), limit);
+        let mut buf = vec![0; 100];
+        assert_eq!(source.read_at(limit - 4, &mut buf).unwrap(), 4);
+        assert_eq!(buf[..4], bytes[limit as usize - 4..limit as usize]);
+        assert_eq!(source.read_at(limit, &mut buf).unwrap(), 0);
+
+        let longer = FileSource::open_within(&path, 10 * BLOCK_LEN as u64, None).unwrap();
+        assert_eq!(longer.len(), bytes.len() as u64);
     }
 
     #[test]

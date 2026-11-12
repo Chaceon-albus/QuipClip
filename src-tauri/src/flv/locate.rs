@@ -471,6 +471,15 @@ pub fn extent(source: &mut dyn ByteSource, head: &FlvHead) -> Result<Extent, Flv
     })
 }
 
+/// The end of the last complete tag: the end of the source when its last tag is whole. A
+/// recording that was cut ends inside its last tag, and so does a recording that a recorder
+/// still writes, read within the size of its revision (ADR 058). A slice that runs to the end of
+/// the source stops here, so FFmpeg never reads the part of a tag. Without a complete tag near
+/// the end, the end of the source.
+pub fn complete_end(source: &mut dyn ByteSource, head: &FlvHead) -> Result<u64, FlvError> {
+    Ok(last_tag(source, head)?.map_or_else(|| source.len(), |tag| tag.end()))
+}
+
 /// The last complete tag: through the final `PreviousTagSize`, or, in a truncated file, through
 /// a resync near the end and a walk to the last tag that ends inside the file.
 fn last_tag(source: &mut dyn ByteSource, head: &FlvHead) -> Result<Option<Tag>, FlvError> {

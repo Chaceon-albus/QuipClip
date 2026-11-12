@@ -58,6 +58,35 @@ export function isSameSourceRevision(
 }
 
 /**
+ * Reports whether the file that `actual` describes can still hold the revision `expected`: the
+ * same revision, or, for an FLV, a file that a recorder still writes (ADR 058). Such a file has
+ * the same path, at least as many bytes, and a modification time that is not earlier. The
+ * backend reads only the first `size` bytes of an FLV and compares a fingerprint of them, so it
+ * decides. Another container must be the same revision.
+ *
+ * This is not the identity of a source: a grown file opened again is a new revision, and
+ * `isSameSourceRevision` stays the one definition of "the same source".
+ */
+export function mayHoldSourceRevision(
+  expected: MediaSourceRevisionDescriptor | null | undefined,
+  actual: MediaSourceRevisionDescriptor | null | undefined,
+  isFlv: boolean,
+): boolean {
+  if (isSameSourceRevision(expected, actual)) {
+    return true;
+  }
+  return (
+    isFlv &&
+    !!expected &&
+    !!actual &&
+    getSourceRevisionKey(expected) !== "" &&
+    expected.path === actual.path &&
+    actual.size >= expected.size &&
+    actual.mtime >= expected.mtime
+  );
+}
+
+/**
  * Session-scoped generated source IDs, keyed by the FULL revision key.
  *
  * Keyed by the revision key and not by the path, deliberately. A stale entry keyed by path

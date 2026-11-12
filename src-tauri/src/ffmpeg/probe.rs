@@ -427,8 +427,20 @@ impl From<ProbeDataError> for ProbeParseError {
 /// run leaves the end `None` and does not fail the import, as a failed read of an audio start
 /// does not fail an export (ADR 014).
 pub fn probe_media(ffprobe_path: &Path, media_path: &Path) -> Result<MediaProbe, ProbeError> {
+    probe_media_up_to(ffprobe_path, media_path, u64::MAX)
+}
+
+/// [`probe_media`] of the revision whose size is `size`: the tags of an FLV give its end from
+/// its first `size` bytes. A recorder that still writes the file adds bytes during the probe,
+/// and the end of the video must not pass the end of the revision that the preview reads
+/// (ADR 058). The import uses this form.
+pub fn probe_media_up_to(
+    ffprobe_path: &Path,
+    media_path: &Path,
+    size: u64,
+) -> Result<MediaProbe, ProbeError> {
     let (mut probe, extent) =
-        probe_media_and_flv_extent(ffprobe_path, media_path, PROBE_TIMEOUT, None)?;
+        probe_media_and_flv_extent(ffprobe_path, media_path, PROBE_TIMEOUT, None, size)?;
     probe.video_end_pts = extent
         .and_then(|extent| extent.last_video_pts)
         .and_then(|last_ms| flv_video_end(&probe, last_ms))
@@ -471,16 +483,18 @@ fn probe_media_with(
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Result<MediaProbe, ProbeError> {
-    probe_media_and_flv_extent(ffprobe_path, media_path, timeout, cancel).map(|(probe, _)| probe)
+    probe_media_and_flv_extent(ffprobe_path, media_path, timeout, cancel, u64::MAX)
+        .map(|(probe, _)| probe)
 }
 
 /// The first run of every probe of a source, with the extent that the tags of an FLV gave, when
-/// the file is an FLV that the reader can read.
+/// the file is an FLV that the reader can read. The tags are read from the first `size` bytes.
 fn probe_media_and_flv_extent(
     ffprobe_path: &Path,
     media_path: &Path,
     timeout: Duration,
     cancel: Option<&AtomicBool>,
+    size: u64,
 ) -> Result<(MediaProbe, Option<crate::flv::locate::Extent>), ProbeError> {
     let arguments = [
         OsStr::new("-v"),
@@ -502,7 +516,7 @@ fn probe_media_and_flv_extent(
     .map_err(|source| ProbeError::Spawn { source })?;
     let mut probe = finish_probe_run(run, timeout)?;
     // The tags give the length of an FLV better than ffprobe does.
-    let extent = correct_flv_file(&mut probe, media_path);
+    let extent = correct_flv_file(&mut probe, media_path, size);
     Ok((probe, extent))
 }
 
@@ -2684,16 +2698,20 @@ fn flv_video_end(probe: &MediaProbe, last_ms: i64) -> Option<Pts> {
     }
 }
 
-/// Correct the probe of the FLV at `path` with its tags, when it is an FLV that the reader can
-/// read, and return the extent that the tags gave. Any other file keeps the probe as ffprobe gave
-/// it and gives no extent.
-fn correct_flv_file(probe: &mut MediaProbe, path: &Path) -> Option<crate::flv::locate::Extent> {
+/// Correct the probe of the FLV at `path` with its tags in its first `size` bytes, when it is an
+/// FLV that the reader can read, and return the extent that the tags gave. Any other file keeps
+/// the probe as ffprobe gave it and gives no extent.
+fn correct_flv_file(
+    probe: &mut MediaProbe,
+    path: &Path,
+    size: u64,
+) -> Option<crate::flv::locate::Extent> {
     if !probe.format_names.iter().any(|name| name == "flv")
         || !crate::flv::has_signature(path).unwrap_or(false)
     {
         return None;
     }
-    let extent = crate::flv::FlvSource::open(path, None)
+    let extent = crate::flv::FlvSource::open_within(path, size, None)
         .and_then(|source| source.extent())
         .ok();
     correct_flv_probe(probe, extent);
@@ -2931,7 +2949,7 @@ mod tests {
         std::fs::write(&path, &recording.bytes).unwrap();
         let mut probe = flv_probe();
         probe.video_start_pts = Some(Pts::new(67));
-        let extent = correct_flv_file(&mut probe, &path);
+        let extent = correct_flv_file(&mut probe, &path, u64::MAX);
         let last = recording.frames.iter().map(|f| f.2).max().unwrap();
         let expected = (last as f64 + 1000.0 / 30.0 - 67.0) / 1000.0;
         let length = probe.approximate_duration_seconds.unwrap();
@@ -2950,8 +2968,24 @@ mod tests {
         std::fs::write(&other, b"not an flv").unwrap();
         let mut probe = flv_probe();
         let before = probe.approximate_duration_seconds;
-        correct_flv_file(&mut probe, &other);
+        correct_flv_file(&mut probe, &other, u64::MAX);
         assert_eq!(probe.approximate_duration_seconds, before);
+
+        // Within a size, the tags give the extent of the file cut at that size, as the import of
+        // a recording that a recorder still writes reads it (ADR 058).
+        let size = recording.bytes.len() / 2;
+        let cut = dir.path.join("cut.flv");
+        std::fs::write(&cut, &recording.bytes[..size]).unwrap();
+        let mut within_probe = flv_probe();
+        let within = correct_flv_file(&mut within_probe, &path, size as u64).unwrap();
+        let mut cut_probe = flv_probe();
+        let of_cut = correct_flv_file(&mut cut_probe, &cut, u64::MAX).unwrap();
+        assert_eq!(within, of_cut);
+        assert!(within.last_video_pts < Some(last));
+        assert_eq!(
+            within_probe.approximate_duration_seconds,
+            cut_probe.approximate_duration_seconds
+        );
     }
 
     #[test]

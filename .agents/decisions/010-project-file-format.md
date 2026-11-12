@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 052
+- Amended by: ADR 052, ADR 058
 
 ## Context
 
@@ -74,6 +74,11 @@ The stable source `id` does not depend on either path. Size and modification tim
 source revision metadata. After a path resolves, QuipClip checks the media against that
 revision and warns when the file was replaced or modified. A stable source ID does not
 suppress this check.
+
+(Changed on 2026-11-09.) A revision of an FLV names the first `size` bytes of the file. An FLV
+that a recorder still writes holds its revision when those bytes did not change. Each reader of
+the source then stops at that size (ADR 058). The identity of a source does not change: a file
+with another size or modification time is still another revision.
 
 The file stores only `PersistedSource` fields. Before serialization, the frontend maps
 each runtime `Source` through `toPersistedSource`. That function constructs a new object
