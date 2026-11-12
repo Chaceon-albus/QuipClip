@@ -297,7 +297,7 @@ export function FfmpegPathSection() {
         </div>
         <FfmpegDetailList entries={statusView.detail} />
         {/* The download comes before the install guide, which stays as the other way to get
-            FFmpeg (ADR 005, ADR 058). */}
+            FFmpeg (ADR 005, ADR 059). */}
         <FfmpegDownloadBlock
           status={ffmpeg.status}
           chosenPath={view.path !== null}

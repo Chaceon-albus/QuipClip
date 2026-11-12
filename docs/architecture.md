@@ -9,8 +9,8 @@ Two requirements shape everything below.
 1. **Edit boundaries preserve source presentation timing.** The project stores source
    video PTS values instead of positions on a generated frame grid.
 2. **The application does not bundle `ffmpeg`.** It finds the programs that the user
-   installed. ADR 005 also specifies a download that the user agrees to. That step is not
-   implemented.
+   installed. When it finds none, it can download a pinned build after the user agrees
+   (ADR 005, ADR 059).
 
 The timeline holds one sequence of clips. Each clip places one source, and the clips play
 one after another (ADR 052). Multi-track is out of scope and stays out of scope.
@@ -79,8 +79,8 @@ document summarizes them and shows how the parts fit together.
 | [`055-run-an-export-in-a-work-directory.md`](../.agents/decisions/055-run-an-export-in-a-work-directory.md)                                 | Each export runs in a work directory and reads its filter graph from a file        |
 | [`056-show-the-audio-envelope-of-a-source.md`](../.agents/decisions/056-show-the-audio-envelope-of-a-source.md)                             | The menu of a clip label shows a cached audio envelope of a source on the timeline |
 | [`057-keep-rebuildable-files-in-the-cache-directory.md`](../.agents/decisions/057-keep-rebuildable-files-in-the-cache-directory.md)         | Files that QuipClip can make again go in subdirectories of the cache directory     |
-| [`058-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/058-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
 | [`058-read-a-growing-flv-as-the-revision-of-its-import.md`](../.agents/decisions/058-read-a-growing-flv-as-the-revision-of-its-import.md)   | An FLV that a recorder still writes reads as the bytes that its import read        |
+| [`059-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/059-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
 
 ## Shape
 
@@ -444,7 +444,7 @@ source edit points.
 
 ## ffmpeg lifecycle
 
-See ADR 005, ADR 006, ADR 012, and ADR 058.
+See ADR 005, ADR 006, ADR 012, and ADR 059.
 
 Resolution order: the configured path, then `PATH`, then `<app_data>/bin`, then
 `<local_data>/bin`. The last directory holds the programs that the download installs. On
@@ -456,7 +456,7 @@ On macOS, the `PATH` lookup appends `/opt/homebrew/bin` and `/usr/local/bin` aft
 directories from the process `PATH`. This rule lets GUI applications find a standard
 Homebrew installation without starting a login shell.
 
-The download is the fourth step of ADR 005 (ADR 058). The manifest
+The download is the fourth step of ADR 005 (ADR 059). The manifest
 `src-tauri/resources/ffmpeg-manifest.json` pins one FFmpeg release for each release target.
 Windows x86-64 gets the full build of Gyan. macOS arm64 gets the build of martin-riedl.de. For
 each archive the manifest gives the URLs, the size, the SHA-256, and the path of each program

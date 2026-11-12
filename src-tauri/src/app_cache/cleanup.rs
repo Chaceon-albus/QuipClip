@@ -10,9 +10,9 @@
 //!    files.
 //! 4. The removal of `flv-cache`, the FLV cache of the builds before ADR 057, from the application
 //!    data directory.
-//! 5. The sweep of the install work directories of `ffmpeg` (ADR 058), in the directory `work`.
+//! 5. The sweep of the install work directories of `ffmpeg` (ADR 059), in the directory `work`.
 //! 6. The sweep of the temporary files that a move of the install left in `<local_data>/bin`
-//!    (ADR 058).
+//!    (ADR 059).
 //!
 //! A failure in one step writes a log line and does not stop the next step. Steps 2, 3, 5 and 6
 //! remove only their own names, and only entries that this process does not use and that are old

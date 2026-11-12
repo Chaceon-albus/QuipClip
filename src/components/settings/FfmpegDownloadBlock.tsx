@@ -41,11 +41,11 @@ type TranslatePresented = (
 ) => string;
 
 /**
- * The download of FFmpeg in the status block of the FFmpeg tab (ADR 058): the offer and its
+ * The download of FFmpeg in the status block of the FFmpeg tab (ADR 059): the offer and its
  * consent dialog, the progress of the install, and its result. See `presentFfmpegDownload`.
  *
  * The block asks Rust for the offer each time a check ends without an FFmpeg that works. Rust
- * applies the rule of ADR 058, so the block shows the offer only when Rust gives one.
+ * applies the rule of ADR 059, so the block shows the offer only when Rust gives one.
  */
 export function FfmpegDownloadBlock({
   status,
@@ -61,7 +61,7 @@ export function FfmpegDownloadBlock({
   guideShown: boolean;
   /** True while Choose File… of the tab is disabled. */
   chooseDisabled: boolean;
-  /** Choose File… of the tab, the alternative that the consent dialog offers (ADR 058). */
+  /** Choose File… of the tab, the alternative that the consent dialog offers (ADR 059). */
   onChooseFile: () => void;
 }) {
   const { t, i18n } = useTranslation();

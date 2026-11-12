@@ -34,7 +34,7 @@ serde_json = "1"
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-opener = "2.7.2"
 
-# The download of ffmpeg (ADR 058). `reqwest` uses the TLS of the system (Schannel on Windows,
+# The download of ffmpeg (ADR 059). `reqwest` uses the TLS of the system (Schannel on Windows,
 # Security.framework on macOS) and the proxy of the system. So it adds no OpenSSL and no C build
 # step on the two release targets. Its default TLS, rustls with aws-lc-rs, compiles C
 # (aws-lc-sys). HTTP/2, charset and decompression stay off, because the download reads one

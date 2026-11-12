@@ -4,7 +4,7 @@
 - Date: 2026-11-01
 - Deciders: capric98
 - Amends: ADR 041, ADR 046, ADR 055, ADR 056
-- Amended by: ADR 058
+- Amended by: ADR 059
 
 ## Context
 
@@ -72,8 +72,8 @@ and `preset-tests.json`. Their records do not change.
 - No code deletes the cache directory itself. No code deletes a name at the top of the cache
   directory that this record does not list. The web view owns the other names.
 - (Added on 2026-11-05.) On Windows the cache directory is also `app_local_data_dir()`. Its
-  `bin` directory holds the `ffmpeg` that QuipClip downloads (ADR 058). That directory is not a
-  cache, and no cleanup removes it. ADR 058 also adds the install work directory to `work`,
+  `bin` directory holds the `ffmpeg` that QuipClip downloads (ADR 059). That directory is not a
+  cache, and no cleanup removes it. ADR 059 also adds the install work directory to `work`,
   and two steps to the cleanup at start.
 - Each cache module keeps the name of its subdirectory as a constant and takes the cache
   directory as its root, as the envelope cache of ADR 056 does. The FLV cache does the same with

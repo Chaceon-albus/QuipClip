@@ -1,5 +1,5 @@
 /**
- * Pure rules for the download of FFmpeg in the FFmpeg tab of the Settings window (ADR 058):
+ * Pure rules for the download of FFmpeg in the FFmpeg tab of the Settings window (ADR 059):
  * when the tab asks Rust for the offer, and what the tab shows for the offer and the install.
  *
  * Like the other presenters, it returns catalog keys and never calls the i18n runtime.
@@ -17,7 +17,7 @@ import { formatCacheSize } from "./waveformCachePresenter";
 
 /**
  * True when the tab asks Rust for the offer: the check ended and found no FFmpeg that works.
- * Rust applies the rule of ADR 058 and gives no offer when the download must not run.
+ * Rust applies the rule of ADR 059 and gives no offer when the download must not run.
  */
 export function shouldLoadFfmpegOffer(status: FfmpegStatus): boolean {
   return status === "missing" || status === "failed";
@@ -149,7 +149,7 @@ export type FfmpegLicenseKey =
 
 /**
  * The licence that the consent dialog names. The manifest never pins a non-free build
- * (ADR 058), so the flags give one of four licences.
+ * (ADR 059), so the flags give one of four licences.
  */
 export function ffmpegLicenseKey(
   license: FfmpegDownloadOffer["license"],

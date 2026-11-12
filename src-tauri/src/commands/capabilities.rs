@@ -268,7 +268,7 @@ fn emit_forced(app: &tauri::AppHandle, event: CapabilityProbeForcedEvent) {
 
 /// Resolve the ffmpeg executable pair `start_capability_probe` reports to the frontend: the
 /// configured path from settings, if any, ahead of `PATH`, the application data directory and
-/// the download directory, per the resolution order of ADR 005 and ADR 058.
+/// the download directory, per the resolution order of ADR 005 and ADR 059.
 ///
 /// This is a named function, not two lines inlined into the `spawn_blocking` closure, so the
 /// composition it performs -- reading `settings::configured_ffmpeg_path` and feeding it into

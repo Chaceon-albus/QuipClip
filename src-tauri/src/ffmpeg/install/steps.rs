@@ -1,4 +1,4 @@
-//! The install of the downloaded programs (ADR 058, section "The install").
+//! The install of the downloaded programs (ADR 059, section "The install").
 //!
 //! [`run`] takes one target of the manifest through every step. It downloads each archive into
 //! the install work directory, extracts the two programs and deletes each zip, prepares the
@@ -7,7 +7,7 @@
 //! never reaches `bin`.
 //!
 //! The version check of a pair ([`check_pair`]) also decides whether the offer of a download may
-//! replace a pair that discovery found in `<local_data>/bin` (ADR 058, "When QuipClip offers the
+//! replace a pair that discovery found in `<local_data>/bin` (ADR 059, "When QuipClip offers the
 //! download").
 
 use super::download::{download_archive, Cancel, DownloadError, Fetch};
@@ -183,7 +183,7 @@ pub struct PrintedPair {
     pub ffprobe: PrintedVersion,
 }
 
-/// The version check of a pair (ADR 058): both programs start, end with success within
+/// The version check of a pair (ADR 059): both programs start, end with success within
 /// [`VERSION_CHECK_TIMEOUT`], print a version line, and print the same version. The offer of a
 /// download uses this check alone, so it does not compare the licences.
 ///
@@ -243,7 +243,7 @@ pub fn check_staged(
 
 /// Prepare a staged program to run. On Unix it gets the mode `0755`. On macOS the attribute
 /// `com.apple.quarantine` is also removed, and a failure of that step is ignored, because a file
-/// that this process writes has no such attribute in the first place (ADR 058).
+/// that this process writes has no such attribute in the first place (ADR 059).
 pub fn prepare_program(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -402,7 +402,7 @@ pub struct Install<'a, F: Fetch> {
     pub replace: &'a Replace<'a>,
 }
 
-/// Install `target` into `bin`, in the steps of ADR 058. `report` gets each step, and the
+/// Install `target` into `bin`, in the steps of ADR 059. `report` gets each step, and the
 /// progress of the download after each chunk, which the caller must throttle.
 ///
 /// The download runs with `block_on` on this thread, so call this on an OS thread of its own,
@@ -626,7 +626,7 @@ mod tests {
         let error =
             check_pair(&mixed, Path::new("ffmpeg"), Path::new("ffprobe"), None).unwrap_err();
         assert!(error.contains("9.0.2 and ffprobe 8.1.3"), "{error}");
-        // The check of the offer (ADR 058) has no licence rule, so two licences pass it.
+        // The check of the offer (ADR 059) has no licence rule, so two licences pass it.
         assert!(check_pair(
             &other_licence,
             Path::new("ffmpeg"),
@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn the_error_codes_have_the_names_of_adr_058() {
+    fn the_error_codes_have_the_names_of_adr_059() {
         let names = [
             (InstallErrorCode::UnsupportedTarget, "unsupportedTarget"),
             (InstallErrorCode::Busy, "busy"),

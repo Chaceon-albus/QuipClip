@@ -1,4 +1,4 @@
-//! The extraction of the programs from a downloaded zip (ADR 058).
+//! The extraction of the programs from a downloaded zip (ADR 059).
 //!
 //! The extraction reads only the entries that the manifest names, at their exact paths. It
 //! writes each one to a file whose name QuipClip chooses, never to the path of the entry, so a
@@ -23,7 +23,7 @@ const CHUNK_BYTES: usize = 1 << 16;
 pub enum ExtractError {
     /// The zip, or an entry in it, cannot be read: a damaged zip, an entry that is not a file or
     /// that has a password, another method or size than the manifest, or a wrong CRC. A local
-    /// failure to open or read the zip also gives it, because ADR 058 has no code of its own for
+    /// failure to open or read the zip also gives it, because ADR 059 has no code of its own for
     /// that. The download checked the SHA-256 first, so this is then the likelier cause. The
     /// text is the diagnostic.
     Archive(String),

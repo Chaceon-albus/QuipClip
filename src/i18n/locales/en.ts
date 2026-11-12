@@ -597,7 +597,7 @@ export const en = {
         path: "Found in a folder in PATH.",
         pathMac: "Found in a folder in PATH or in a standard Homebrew folder.",
         // Two folders have this origin: `<app_data>/bin`, and `<local_data>/bin`, where the
-        // download puts FFmpeg (ADR 058). On macOS they are one folder.
+        // download puts FFmpeg (ADR 059). On macOS they are one folder.
         appData: "Found in a bin folder in the QuipClip data folders.",
       },
       fallback:
@@ -621,7 +621,7 @@ export const en = {
           "After the install, quit QuipClip and open it again from the Start menu. QuipClip gets PATH when it starts, and a terminal that was open before the install still has the old PATH.",
       },
     },
-    // The download of the FFmpeg tab (ADR 058). QuipClip downloads a pinned build and checks
+    // The download of the FFmpeg tab (ADR 059). QuipClip downloads a pinned build and checks
     // it. The keys sit outside `ffmpeg`, because a fifth level of keys makes the types of `t`
     // too deep for TypeScript.
     ffmpegDownload: {
@@ -973,7 +973,7 @@ export const en = {
       "QuipClip could not run the FFmpeg capability probe command.",
     unknown: "An unknown error occurred while probing FFmpeg.",
   },
-  // The errors of the FFmpeg download (ADR 058). The keys are the codes of
+  // The errors of the FFmpeg download (ADR 059). The keys are the codes of
   // `FFMPEG_INSTALL_ERROR_CODES`, and `invalidResponse`.
   ffmpegInstallError: {
     unsupportedTarget: "QuipClip cannot download FFmpeg for this system.",

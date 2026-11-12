@@ -1,4 +1,4 @@
-//! The download of one archive of the manifest (ADR 058).
+//! The download of one archive of the manifest (ADR 059).
 //!
 //! The download writes the body of a URL into a file, and computes its SHA-256 while the bytes
 //! arrive. It stops as soon as the body gets longer than the size of the manifest. At the end it
@@ -179,7 +179,7 @@ pub trait Fetch {
 /// be tens of thousands of times for one archive, so a caller that sends it on must throttle it.
 ///
 /// When each URL fails, the result is the SHA-256 failure if one URL gave a wrong SHA-256, else
-/// the size failure if one URL gave a wrong size, else the failure of the last URL (ADR 058).
+/// the size failure if one URL gave a wrong size, else the failure of the last URL (ADR 059).
 ///
 /// The download writes the file with blocking calls. Drive it with `block_on` on an OS thread of
 /// its own, never on a worker of the async runtime.
@@ -280,7 +280,7 @@ pub enum Redirect {
 }
 
 /// The rule for one redirect: at most [`MAX_REDIRECTS`] of them, each to an HTTPS address. No
-/// list of hosts applies, because the SHA-256 of the manifest is what QuipClip trusts (ADR 058).
+/// list of hosts applies, because the SHA-256 of the manifest is what QuipClip trusts (ADR 059).
 /// `previous` is the number of addresses before this one, the first request included.
 #[must_use]
 pub fn redirect_rule(scheme: &str, previous: usize, allow_http: bool) -> Redirect {

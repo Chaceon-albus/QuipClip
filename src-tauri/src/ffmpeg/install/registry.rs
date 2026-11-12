@@ -1,11 +1,11 @@
-//! The one slot of the install of `ffmpeg` (ADR 058).
+//! The one slot of the install of `ffmpeg` (ADR 059).
 //!
 //! One install runs at a time in the application. A request carries the time of the request in
 //! microseconds since the Unix epoch, which rises with each request of a page, as the requests of
 //! the envelope jobs do (ADR 056). A page load of the Settings window sets a floor at its own
 //! time and cancels the running install, so a late request of the old page can neither start an
 //! install nor keep the slot. A close of that window cancels the install too. The exit closes the
-//! registry and does not wait (ADR 058, "Cancel and exit").
+//! registry and does not wait (ADR 059, "Cancel and exit").
 
 use super::download::Cancel;
 use std::sync::atomic::{AtomicU64, Ordering};

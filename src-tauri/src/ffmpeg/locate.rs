@@ -1,7 +1,7 @@
 //! Discovery of a user-owned ffmpeg and ffprobe executable pair.
 //!
 //! The order is the configured path, `PATH` (on macOS, then the Homebrew directories of
-//! ADR 012), `<app_data>/bin`, then `<local_data>/bin`, where the download of ADR 058 installs
+//! ADR 012), `<app_data>/bin`, then `<local_data>/bin`, where the download of ADR 059 installs
 //! the pair. Both `bin` directories have the origin `appData`.
 
 use serde::Serialize;
@@ -17,12 +17,12 @@ use std::sync::OnceLock;
 /// The directory of the programs in a data directory of the application.
 const BIN_DIR_NAME: &str = "bin";
 
-/// `app_local_data_dir()` of Tauri (ADR 058). The application sets it once at its start, and it
+/// `app_local_data_dir()` of Tauri (ADR 059). The application sets it once at its start, and it
 /// does not change while the process runs. It stays unset when Tauri gives no path, and
 /// discovery then skips `<local_data>/bin`.
 static LOCAL_DATA_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
-// The file names of the two programs on this platform. The install of ADR 058 writes these
+// The file names of the two programs on this platform. The install of ADR 059 writes these
 // names, so discovery finds what it installs.
 #[cfg(windows)]
 pub(crate) const FFMPEG_NAME: &str = "ffmpeg.exe";
@@ -100,7 +100,7 @@ pub fn set_local_data_directory(directory: PathBuf) {
     let _ = LOCAL_DATA_DIRECTORY.set(directory);
 }
 
-/// The directory that the download of ADR 058 installs the programs into, `<local_data>/bin`.
+/// The directory that the download of ADR 059 installs the programs into, `<local_data>/bin`.
 ///
 /// `None` before [`set_local_data_directory`] runs, when Tauri gave no path, and always in tests.
 /// The install uses this function and no second call of `app_local_data_dir()`, so discovery and

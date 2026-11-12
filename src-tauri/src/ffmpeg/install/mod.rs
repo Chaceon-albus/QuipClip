@@ -1,4 +1,4 @@
-//! The download and install of `ffmpeg` and `ffprobe` after the consent of the user (ADR 058).
+//! The download and install of `ffmpeg` and `ffprobe` after the consent of the user (ADR 059).
 //!
 //! [`manifest`] holds the pinned files of each target. [`download`] writes one archive to disk
 //! and checks its size and its SHA-256. [`extract`] takes one program out of a zip. [`steps`]
@@ -13,7 +13,7 @@ pub mod steps;
 
 use serde::Serialize;
 
-/// The stable error codes of the install (ADR 058). The frontend mirrors them exactly.
+/// The stable error codes of the install (ADR 059). The frontend mirrors them exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InstallErrorCode {

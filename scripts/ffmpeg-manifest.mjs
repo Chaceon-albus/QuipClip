@@ -1,4 +1,4 @@
-// The manifest of the ffmpeg download (ADR 058).
+// The manifest of the ffmpeg download (ADR 059).
 //
 // The application embeds src-tauri/resources/ffmpeg-manifest.json and downloads only the files
 // that it pins: each URL, its SHA-256, its size, and the exact entries of each zip. This script

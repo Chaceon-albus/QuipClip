@@ -1,5 +1,5 @@
 /**
- * The state of the download of FFmpeg in the Settings window (ADR 058): the offer that Rust
+ * The state of the download of FFmpeg in the Settings window (ADR 059): the offer that Rust
  * gives, and the one install that the window runs.
  *
  * The state goes into no file and no web view storage. A reload or a close of the Settings

@@ -12,7 +12,7 @@
 //! [`crate::ffmpeg::export::graph_file`] and the head of each FLV source of the export,
 //! `h<k>.flv` (ADR 046).
 //!
-//! An install of `ffmpeg` creates `ffmpeg-install-<pid>-<n>` (ADR 058). It holds the downloaded
+//! An install of `ffmpeg` creates `ffmpeg-install-<pid>-<n>` (ADR 059). It holds the downloaded
 //! zips and the extracted programs until they move into `<local_data>/bin`.
 //!
 //! A write never creates the directory. So a write that an abandoned preparation (ADR 050) makes
@@ -61,7 +61,7 @@ pub const EXPORT_WORK_DIRECTORY: WorkDirectoryKind = WorkDirectoryKind {
     log_label: "export",
 };
 
-/// The work directory of an install of `ffmpeg`, `ffmpeg-install-<pid>-<n>` (ADR 058). It holds
+/// The work directory of an install of `ffmpeg`, `ffmpeg-install-<pid>-<n>` (ADR 059). It holds
 /// the downloaded zips and the extracted programs until they move into `<local_data>/bin`.
 pub const FFMPEG_INSTALL_WORK_DIRECTORY: WorkDirectoryKind = WorkDirectoryKind {
     prefix: "ffmpeg-install-",

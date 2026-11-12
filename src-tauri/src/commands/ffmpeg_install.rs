@@ -1,4 +1,4 @@
-//! The commands of the download of `ffmpeg` (ADR 058). Only the Settings window calls them.
+//! The commands of the download of `ffmpeg` (ADR 059). Only the Settings window calls them.
 //!
 //! [`ffmpeg_download_offer`] says whether the FFmpeg tab may offer the download, and with what
 //! version, host, licence, size and directory. [`start_ffmpeg_install`] checks the same rule
@@ -33,7 +33,7 @@ use tauri::{AppHandle, Manager, State};
 /// The shortest time between two progress messages of the download.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The offer of the download for the consent dialog (ADR 058, "The consent").
+/// The offer of the download for the consent dialog (ADR 059, "The consent").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfmpegDownloadOffer {
@@ -142,7 +142,7 @@ impl InstallSink for ChannelSink {
     }
 }
 
-/// What the rule of ADR 058 decides for the download.
+/// What the rule of ADR 059 decides for the download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OfferState {
     /// This build of QuipClip has no download.
@@ -157,7 +157,7 @@ enum OfferState {
     Offer { replaces: bool },
 }
 
-/// The rule of ADR 058, "When QuipClip offers the download". `discovered` is `None` when Tauri
+/// The rule of ADR 059, "When QuipClip offers the download". `discovered` is `None` when Tauri
 /// gives no data directory, so discovery could not run. `works` runs the version check of a pair
 /// that discovery found, and runs only for a pair in `bin`.
 fn offer_state(
@@ -279,7 +279,7 @@ pub async fn start_ffmpeg_install(
 }
 
 /// Cancel install `job_id`. The job ends soon and sends its end through its channel. A cancel
-/// during the last move is not seen, and the install then ends as installed (ADR 058).
+/// during the last move is not seen, and the install then ends as installed (ADR 059).
 #[tauri::command]
 pub fn cancel_ffmpeg_install(jobs: State<'_, Arc<InstallJobs>>, job_id: u64) {
     jobs.cancel(job_id);
@@ -368,7 +368,7 @@ fn start<F: Fetch + Send + 'static>(
         .ok_or_else(|| error(InstallErrorCode::WorkDirectoryUnavailable))?;
     let fetch = make_fetch()?;
 
-    // Steps 5 and 6 of the cleanup at start of ADR 057, which ADR 058 also runs before each
+    // Steps 5 and 6 of the cleanup at start of ADR 057, which ADR 059 also runs before each
     // install.
     let work_parent = app_cache::work_directory(&cache_root);
     remove_stale_work_directories(&work_parent, FFMPEG_INSTALL_WORK_DIRECTORY);
@@ -406,7 +406,7 @@ fn start<F: Fetch + Send + 'static>(
 }
 
 /// The thread of one install: run it, remove its work directory, free the slot, and send the end
-/// last, so a page that starts again at the end finds the slot free and the disk clean (ADR 058,
+/// last, so a page that starts again at the end finds the slot free and the disk clean (ADR 059,
 /// step 6). A panic of the install ends it as failed, and the slot is free in every case.
 #[allow(clippy::too_many_arguments)]
 fn run_job<F: Fetch>(
@@ -444,7 +444,7 @@ fn run_job<F: Fetch>(
         )
     }));
     // The result of the install, not the cancel flag: a cancel during the last move is not seen,
-    // and the programs are then in place (ADR 058).
+    // and the programs are then in place (ADR 059).
     let end = match result {
         Ok(Ok(())) => InstallMessage::End {
             outcome: Outcome::Installed,
@@ -749,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_offers_the_download_only_where_adr_058_allows_it() {
+    fn the_rule_offers_the_download_only_where_adr_059_allows_it() {
         let directory = TestDirectory::new();
         let bin = directory.path.join("bin");
         let (_, target) = one_zip();

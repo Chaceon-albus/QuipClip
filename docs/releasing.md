@@ -66,7 +66,7 @@ A repository administrator does these steps one time.
 
 ## Pin the FFmpeg download
 
-Step 1 of [Steps](#steps) sends you here before each release. ADR 058 gives the reasons.
+Step 1 of [Steps](#steps) sends you here before each release. ADR 059 gives the reasons.
 
 The application embeds `src-tauri/resources/ffmpeg-manifest.json`. That file pins the FFmpeg
 that the FFmpeg tab of Settings downloads. It holds one FFmpeg release for each release target.

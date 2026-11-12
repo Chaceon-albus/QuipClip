@@ -1,9 +1,14 @@
-# 058. Download ffmpeg from pinned release builds into the local data directory
+# 059. Download ffmpeg from pinned release builds into the local data directory
 
 - Status: Accepted
 - Date: 2026-11-05
 - Deciders: capric98
 - Amends: ADR 005, ADR 006, ADR 017, ADR 038, ADR 057
+
+(Changed on 2026-11-12.) This record had the number 058 at first. The record of an FLV that a
+recorder still writes also took 058 on another branch, and that branch was published first. A
+merge joined the two branches. That record keeps 058, and this record has 059. The commits that
+built this download name this record ADR 058.
 
 ## Context
 

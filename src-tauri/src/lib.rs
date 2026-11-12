@@ -98,7 +98,7 @@ pub fn run() {
         // The one slot of the audio envelope jobs (ADR 056). The job threads share it with the
         // commands, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::waveform::registry::WaveformJobs::default()))
-        // The one slot of the install of ffmpeg (ADR 058). The job thread shares it with the
+        // The one slot of the install of ffmpeg (ADR 059). The job thread shares it with the
         // commands, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::install::registry::InstallJobs::default()))
         // The destination of the last published export. The show command reads the path from
@@ -126,7 +126,7 @@ pub fn run() {
         // channel of that page. The windows stop (ADR 046).
         .on_page_load(|webview, payload| {
             // A new page of the Settings window no longer reads the channel of the install of
-            // the page before it, and the install belongs to that page (ADR 058). It stops, and
+            // the page before it, and the install belongs to that page (ADR 059). It stops, and
             // the late requests of the old page are refused.
             if webview.label() == SETTINGS_WINDOW_LABEL
                 && payload.event() == tauri::webview::PageLoadEvent::Started
@@ -162,7 +162,7 @@ pub fn run() {
             {
                 commands::settings_window::report_draft_cleared(window.app_handle());
                 // The install belongs to the Settings window, so its close cancels it, with no
-                // question (ADR 058).
+                // question (ADR 059).
                 cancel_settings_page_install(window.app_handle());
             }
             if window.label() == MAIN_WINDOW_LABEL && matches!(event, tauri::WindowEvent::Destroyed)
@@ -194,7 +194,7 @@ pub fn run() {
     let builder = builder.setup(|app| {
         // Tauri runs this hook on the main thread before the event loop handles any IPC
         // request, also after it builds the configured main window on Windows. So the first
-        // discovery already searches the download directory of ADR 058.
+        // discovery already searches the download directory of ADR 059.
         if let Ok(directory) = app.path().app_local_data_dir() {
             ffmpeg::locate::set_local_data_directory(directory);
         }
@@ -337,7 +337,7 @@ fn stop_waveform_jobs(handle: &tauri::AppHandle) {
     }
 }
 
-/// Cancel the install of ffmpeg and refuse new ones (ADR 058, ADR 017 amendment). The install
+/// Cancel the install of ffmpeg and refuse new ones (ADR 059, ADR 017 amendment). The install
 /// writes into its `bin` directory only by a rename, so the exit waits for nothing more.
 fn stop_ffmpeg_install(handle: &tauri::AppHandle) {
     if let Some(jobs) = handle.try_state::<Arc<ffmpeg::install::registry::InstallJobs>>() {
@@ -346,7 +346,7 @@ fn stop_ffmpeg_install(handle: &tauri::AppHandle) {
 }
 
 /// Cancel the install of ffmpeg of the page of the Settings window, at a reload or a close of
-/// that window, and refuse the late requests of that page (ADR 058).
+/// that window, and refuse the late requests of that page (ADR 059).
 fn cancel_settings_page_install(handle: &tauri::AppHandle) {
     if let Some(jobs) = handle.try_state::<Arc<ffmpeg::install::registry::InstallJobs>>() {
         jobs.cancel_all(page_floor());
@@ -852,7 +852,7 @@ mod tests {
         // The size of the envelope cache and its clear, on the General tab (ADR 056).
         "waveform_cache_usage",
         "clear_waveform_cache",
-        // The download of ffmpeg, on the FFmpeg tab (ADR 058).
+        // The download of ffmpeg, on the FFmpeg tab (ADR 059).
         "ffmpeg_download_offer",
         "start_ffmpeg_install",
         "cancel_ffmpeg_install",

@@ -1,5 +1,5 @@
 /**
- * The page side of the download of FFmpeg (ADR 058): `ffmpeg_download_offer`,
+ * The page side of the download of FFmpeg (ADR 059): `ffmpeg_download_offer`,
  * `start_ffmpeg_install` and its channel, and `cancel_ffmpeg_install`. Only the Settings window
  * may call them.
  *
@@ -57,7 +57,7 @@ let lastSequence = 0;
 /**
  * The next request number: microseconds since the Unix epoch, or one more than the last number
  * when that is higher, so it always rises. A page load of the Settings window sets a floor at
- * its own time, so Rust refuses each late request of the page before (ADR 058, as ADR 056).
+ * its own time, so Rust refuses each late request of the page before (ADR 059, as ADR 056).
  */
 export function nextFfmpegInstallSequence(now: () => number = Date.now): number {
   const next = Math.max(Math.floor(now() * 1000), lastSequence + 1);
@@ -104,7 +104,7 @@ export async function ffmpegDownloadOffer(
 
 /**
  * Starts the install and returns the job at once. The handlers get the progress in order until
- * the end message. Rust can take some seconds before it accepts the request (ADR 058).
+ * the end message. Rust can take some seconds before it accepts the request (ADR 059).
  */
 export function startFfmpegInstall(
   handlers: FfmpegInstallHandlers,

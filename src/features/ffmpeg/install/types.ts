@@ -1,5 +1,5 @@
 /**
- * The wire types of the download of FFmpeg (ADR 058).
+ * The wire types of the download of FFmpeg (ADR 059).
  *
  * The Settings window asks Rust whether it may offer the download, starts the install, and reads
  * its progress and its end from a channel. The download, the checks, and the move into
@@ -28,7 +28,7 @@ export interface FfmpegInstallStarted {
 }
 
 /**
- * The stable error names of the install (ADR 058). They are the `InstallErrorCode` of Rust,
+ * The stable error names of the install (ADR 059). They are the `InstallErrorCode` of Rust,
  * in the same order.
  */
 export const FFMPEG_INSTALL_ERROR_CODES = [

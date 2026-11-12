@@ -212,7 +212,7 @@ describe("presentFfmpegDownload", () => {
     expect(failed("hashMismatch")).toMatchObject({ retry: false });
     expect(failed("alreadyFound")).toMatchObject({ retry: false });
 
-    // The exact set of ADR 058.
+    // The exact set of ADR 059.
     const retried = [...FFMPEG_INSTALL_ERROR_CODES, "invalidResponse" as const].filter(
       (code) => {
         const view = presentFfmpegDownload(

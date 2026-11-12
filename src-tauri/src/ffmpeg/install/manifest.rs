@@ -1,4 +1,4 @@
-//! The manifest of the `ffmpeg` download (ADR 058).
+//! The manifest of the `ffmpeg` download (ADR 059).
 //!
 //! `scripts/ffmpeg-manifest.mjs` writes `src-tauri/resources/ffmpeg-manifest.json` at each
 //! release, and the application embeds it when it compiles. It pins each file of the download:
@@ -25,7 +25,7 @@ pub const MAX_FILE_SIZE: u64 = u32::MAX as u64;
 
 /// The key of the compile target in the manifest, or `None` for a target with no download. The
 /// key names the compile target of QuipClip, not the processor of the computer: Windows on Arm
-/// runs the `x86_64` build, so it gets the `x86_64` download (ADR 058).
+/// runs the `x86_64` build, so it gets the `x86_64` download (ADR 059).
 pub const CURRENT_TARGET: Option<&str> = if cfg!(all(target_os = "windows", target_arch = "x86_64"))
 {
     Some("windows-x86_64")
@@ -124,7 +124,7 @@ pub enum Program {
 }
 
 impl Program {
-    /// Both programs, in the order of the install: `ffprobe` first and `ffmpeg` last (ADR 058).
+    /// Both programs, in the order of the install: `ffprobe` first and `ffmpeg` last (ADR 059).
     pub const INSTALL_ORDER: [Self; 2] = [Self::Ffprobe, Self::Ffmpeg];
 
     /// The name of the program, as `-version` prints it.
