@@ -1849,10 +1849,12 @@ export function PresetLibrarySection({
       ) : null}
 
       {/* One row that is exactly the free height (`minmax(0,1fr)`), so a long list or a long
-          editor scrolls inside its pane and never makes the grid taller than the tab. */}
+          editor scrolls inside its pane and never makes the grid taller than the tab. The list
+          pane is `relative`, so the `sr-only` marks of a row below its visible area stay inside
+          the list (see the body of `SettingsWindow`). */}
       <div className="grid min-h-0 flex-1 grid-cols-[13rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-3">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="relative min-h-0 flex-1 overflow-y-auto">
             <PresetList
               view={view}
               ffmpegState={ffmpegState}

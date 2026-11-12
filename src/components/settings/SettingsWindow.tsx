@@ -383,10 +383,13 @@ export function SettingsWindow() {
 
         {/* Scrollable body keeps the tabs and the footer pinned. It is a flex column, so the
             preset panel can take the free height and scroll inside its own panes. A hidden
-            panel is `display: none` and takes no gap. */}
+            panel is `display: none` and takes no gap. `relative` makes the body the containing
+            block of the `sr-only` elements of the panels. Without it, such an element below the
+            visible area of the body is outside every scroll container, so the document grows
+            and the window shows scroll bars. */}
         <div
           ref={bodyRef}
-          className="-mx-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-1"
+          className="relative -mx-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-1"
         >
           {errorView ? (
             <Notice tone="destructive" role="alert">
