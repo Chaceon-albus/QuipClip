@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { CircleCheck, TriangleAlert } from "lucide-react";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -16,6 +23,7 @@ import { getResolvedLanguage } from "@/i18n";
 import { stripVerbatimPrefix } from "@/lib/fileName";
 import {
   ffmpegLicenseKey,
+  isFfmpegInstallResultStale,
   presentFfmpegDownload,
   shouldLoadFfmpegOffer,
   type FfmpegDownloadView,
@@ -73,6 +81,16 @@ export function FfmpegDownloadBlock({
   useEffect(() => {
     if (shouldLoadFfmpegOffer(status)) {
       void ffmpegInstallStore.getState().loadOffer();
+    }
+  }, [status]);
+
+  // A check that ends can make the result of the last install out of date. The effect runs at
+  // mount and when the status changes, so an install that ends keeps its result until the next
+  // check ends. It runs before the paint, so the old result never shows with the new status.
+  useLayoutEffect(() => {
+    const store = ffmpegInstallStore.getState();
+    if (isFfmpegInstallResultStale(status, store.install)) {
+      store.dismissResult();
     }
   }, [status]);
 
@@ -134,7 +152,9 @@ export function FfmpegDownloadBlock({
     focusedKind.current = view.kind;
     // Only a change from or to the progress removes a control of the block that can hold the
     // focus: Cancel Download, or Try Again. A check of the tab also hides and shows the offer,
-    // and the tab returns the focus to its own control then (`pickFfmpegActionEndFocus`).
+    // and drops a result that it makes out of date. The tab returns the focus to its own control
+    // then (`pickFfmpegActionEndFocus`). After a check that another window starts, no control
+    // takes the focus back.
     if (
       (previous === "running" || view.kind === "running") &&
       isFocusLost(document.activeElement)

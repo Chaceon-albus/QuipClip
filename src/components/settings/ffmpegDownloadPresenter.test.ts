@@ -10,6 +10,7 @@ import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   ffmpegLicenseKey,
+  isFfmpegInstallResultStale,
   presentFfmpegDownload,
   shouldLoadFfmpegOffer,
 } from "./ffmpegDownloadPresenter";
@@ -193,6 +194,25 @@ describe("presentFfmpegDownload", () => {
     expect(
       presentFfmpegDownload("probing", NO_OFFER, { status: "installed" }, "en"),
     ).toEqual({ kind: "installed" });
+    expect(
+      presentFfmpegDownload("ready", NO_OFFER, { status: "installed" }, "en"),
+    ).toEqual({ kind: "installed" });
+  });
+
+  it("shows a failure that ends while FFmpeg works, with no Try Again once Rust gives no offer", () => {
+    expect(
+      presentFfmpegDownload(
+        "ready",
+        NO_OFFER,
+        { status: "failed", code: "networkFailed", detail: null },
+        "en",
+      ),
+    ).toEqual({
+      kind: "failed",
+      messageKey: "ffmpegInstallError.networkFailed",
+      detail: null,
+      retry: false,
+    });
   });
 
   it("offers Try Again only after an error that a new attempt can fix", () => {
@@ -244,6 +264,56 @@ describe("presentFfmpegDownload", () => {
         "en",
       ),
     ).toMatchObject({ retry: false });
+  });
+});
+
+describe("isFfmpegInstallResultStale", () => {
+  const STATUSES = [
+    "idle",
+    "locating",
+    "probing",
+    "ready",
+    "missing",
+    "failed",
+  ] as const;
+  const FOUND_NONE = ["missing", "failed"];
+
+  it("drops each failure but alreadyFound after a check that finds an FFmpeg that works", () => {
+    for (const code of [...FFMPEG_INSTALL_ERROR_CODES, "invalidResponse" as const]) {
+      for (const status of STATUSES) {
+        const stale = isFfmpegInstallResultStale(status, {
+          status: "failed",
+          code,
+          detail: null,
+        });
+        const expected =
+          code === "alreadyFound" ? FOUND_NONE.includes(status) : status === "ready";
+        expect(stale, `${code} in ${status}`).toBe(expected);
+      }
+    }
+  });
+
+  it("drops a cancel after a check that finds an FFmpeg that works", () => {
+    for (const status of STATUSES) {
+      expect(isFfmpegInstallResultStale(status, { status: "canceled" }), status).toBe(
+        status === "ready",
+      );
+    }
+  });
+
+  it("drops a finished install after a check that finds no FFmpeg that works", () => {
+    for (const status of STATUSES) {
+      expect(isFfmpegInstallResultStale(status, { status: "installed" }), status).toBe(
+        FOUND_NONE.includes(status),
+      );
+    }
+  });
+
+  it("never drops an install that runs, or no result", () => {
+    for (const status of STATUSES) {
+      expect(isFfmpegInstallResultStale(status, IDLE)).toBe(false);
+      expect(isFfmpegInstallResultStale(status, running({}))).toBe(false);
+    }
   });
 });
 

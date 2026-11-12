@@ -226,6 +226,13 @@ message of the wrong shape. The tab offers Try Again after `busy`, `networkFaile
 `invalidResponse`, while the tab still shows the offer, because a new attempt with the same files
 can succeed. It offers no Try Again after the other codes.
 
+(Changed on 2026-11-12.) When a check ends, the tab removes the result of the last install if
+the check makes that result out of date. A check that finds an FFmpeg that works removes a
+cancel and each failure other than `alreadyFound`. After that check, Try Again could only give
+`alreadyFound`. `alreadyFound` stays, because its message says why QuipClip downloaded nothing.
+A check that finds no FFmpeg that works removes `alreadyFound` and a finished install, so the
+tab can show the offer again.
+
 ### The commands
 
 | Command                 | Use                                                     |

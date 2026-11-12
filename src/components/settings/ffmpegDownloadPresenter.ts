@@ -76,8 +76,9 @@ export type FfmpegDownloadView =
  * What the tab shows for the download.
  *
  * A running install and its result show whatever the status of the check is, so the user sees
- * how the install ended while the probe that follows it runs. Otherwise the offer shows only
- * while the check found no FFmpeg that works.
+ * how the install ended while the probe that follows it runs. A later check can make the result
+ * out of date, and the tab then drops it (`isFfmpegInstallResultStale`). Otherwise the offer
+ * shows only while the check found no FFmpeg that works.
  */
 export function presentFfmpegDownload(
   status: FfmpegStatus,
@@ -138,6 +139,36 @@ export function presentFfmpegDownload(
       }
       return { kind: "offer", offer: value, canceled: install.status === "canceled" };
     }
+  }
+}
+
+/**
+ * True when the check that just ended with `status` makes the result of the last install out of
+ * date, so the tab drops it (`dismissResult`).
+ *
+ * A failure and a cancel leave FFmpeg missing. A check that finds an FFmpeg that works makes a
+ * cancel and a failure out of date. After a failure, Try Again could then only end in
+ * `alreadyFound`. `alreadyFound` stays after that check, because its message says why QuipClip
+ * downloaded nothing. `alreadyFound` and a finished install say that FFmpeg is there. A check
+ * that finds no FFmpeg that works makes them out of date, and the tab can then show the offer
+ * again.
+ */
+export function isFfmpegInstallResultStale(
+  status: FfmpegStatus,
+  install: FfmpegInstallState,
+): boolean {
+  switch (install.status) {
+    case "failed":
+      return install.code === "alreadyFound"
+        ? shouldLoadFfmpegOffer(status)
+        : status === "ready";
+    case "canceled":
+      return status === "ready";
+    case "installed":
+      return shouldLoadFfmpegOffer(status);
+    case "idle":
+    case "running":
+      return false;
   }
 }
 
