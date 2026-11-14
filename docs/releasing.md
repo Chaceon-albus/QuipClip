@@ -101,7 +101,8 @@ release of each source.
 6. Test the download on Windows and on a Mac with Apple silicon:
    1. Make sure that QuipClip can find no FFmpeg. No FFmpeg must be on `PATH`, in a path in
       Settings, or in the two `bin` folders of the README. On macOS, no FFmpeg must be in
-      `/opt/homebrew/bin` or `/usr/local/bin`. When the `bin` folder in the local data folder
+      `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/homebrew/opt/ffmpeg-full/bin` or
+      `/usr/local/opt/ffmpeg-full/bin`. When the `bin` folder in the local data folder
       holds an earlier download, remove that folder.
    2. Start QuipClip from the commit of step 5. Download FFmpeg from the FFmpeg tab of
       Settings. The status must then show the new version.

@@ -47,7 +47,8 @@ export type FfmpegOriginKey =
  *
  * The backend reports one of three origin classes and nothing finer. On macOS it gives the
  * standard Homebrew folders the same `path` origin as the folders of the process `PATH`
- * (ADR 012), so the macOS sentence names both and never claims which one held the program.
+ * (ADR 012, ADR 060), so the macOS sentence names both and never claims which one held the
+ * program.
  */
 export function automaticOriginKey(
   origin: "path" | "appData",
@@ -413,7 +414,9 @@ export type FfmpegInstallGuide =
  *
  * - macOS: discovery always adds `/opt/homebrew/bin` and `/usr/local/bin` after the `PATH`
  *   folders (ADR 012). A Homebrew install with the standard prefix links `ffmpeg` and
- *   `ffprobe` into one of the two, so Check Again finds them with no restart.
+ *   `ffprobe` into one of the two, so Check Again finds them with no restart. After those two
+ *   folders, discovery adds the `ffmpeg-full` keg under each prefix, because Homebrew does not
+ *   link that formula (ADR 060).
  * - Windows: winget can add a folder to `PATH`. The running process does not see that change,
  *   so QuipClip must start again. A start from the Start menu gets the new `PATH`. A start
  *   from a terminal that was open before the install gets the old one.

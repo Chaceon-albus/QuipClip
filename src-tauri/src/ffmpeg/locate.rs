@@ -1,8 +1,8 @@
 //! Discovery of a user-owned ffmpeg and ffprobe executable pair.
 //!
 //! The order is the configured path, `PATH` (on macOS, then the Homebrew directories of
-//! ADR 012), `<app_data>/bin`, then `<local_data>/bin`, where the download of ADR 059 installs
-//! the pair. Both `bin` directories have the origin `appData`.
+//! ADR 012 and ADR 060), `<app_data>/bin`, then `<local_data>/bin`, where the download of
+//! ADR 059 installs the pair. Both `bin` directories have the origin `appData`.
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -16,6 +16,19 @@ use std::sync::OnceLock;
 
 /// The directory of the programs in a data directory of the application.
 const BIN_DIR_NAME: &str = "bin";
+
+/// The directories that discovery searches on macOS after the directories of the process
+/// `PATH`, in this order. The first two are the directories where Homebrew links its programs
+/// (ADR 012). The last two are the keg of the `ffmpeg-full` formula under each Homebrew prefix
+/// (ADR 060). Homebrew does not link that formula into a `bin` directory, because it is
+/// keg-only.
+#[cfg(target_os = "macos")]
+const MACOS_SEARCH_DIRECTORIES: [&str; 4] = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/opt/ffmpeg-full/bin",
+    "/usr/local/opt/ffmpeg-full/bin",
+];
 
 /// `app_local_data_dir()` of Tauri (ADR 059). The application sets it once at its start, and it
 /// does not change while the process runs. It stays unset when Tauri gives no path, and
@@ -135,16 +148,13 @@ fn search_directories(path: Option<OsString>) -> Vec<PathBuf> {
         .unwrap_or_default();
 
     #[cfg(target_os = "macos")]
-    directories.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ]);
+    directories.extend(MACOS_SEARCH_DIRECTORIES.iter().map(PathBuf::from));
 
     // An empty `PATH` element yields one empty `PathBuf`, on Unix and on Windows. `candidate_in`
     // would join the program name onto nothing, and `accept_candidate` would then canonicalize
     // that relative name against the working directory of the process. A `PATH` that ends in a
-    // separator is common, and the working directory is not one of the locations ADR 005 and
-    // ADR 012 name.
+    // separator is common, and the working directory is not one of the locations ADR 005,
+    // ADR 012 and ADR 060 name.
     directories.retain(|directory| !directory.as_os_str().is_empty());
 
     let mut seen = HashSet::new();
@@ -644,6 +654,52 @@ mod tests {
                 PathBuf::from("/custom/bin"),
                 PathBuf::from("/opt/homebrew/bin"),
                 PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/homebrew/opt/ffmpeg-full/bin"),
+                PathBuf::from("/usr/local/opt/ffmpeg-full/bin"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_searches_the_ffmpeg_full_keg_after_the_linked_homebrew_directories() {
+        // `ffmpeg-full` is keg-only. A Finder launch gets no `PATH` entry for its keg, so
+        // discovery must name the keg itself, and only after the directories that Homebrew links
+        // into, so that a linked `ffmpeg` keeps its place (ADR 060).
+        let directories = search_directories(None);
+
+        assert_eq!(
+            directories,
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/homebrew/opt/ffmpeg-full/bin"),
+                PathBuf::from("/usr/local/opt/ffmpeg-full/bin"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_keg_directory_on_path_keeps_its_path_position() {
+        // A user who put the keg on `PATH` keeps that order. Deduplication keeps the first
+        // occurrence, so the keg is not searched a second time after the linked directories.
+        let inherited = env::join_paths([
+            Path::new("/opt/homebrew/opt/ffmpeg-full/bin"),
+            Path::new("/custom/bin"),
+        ])
+        .unwrap();
+
+        let directories = search_directories(Some(inherited));
+
+        assert_eq!(
+            directories,
+            [
+                PathBuf::from("/opt/homebrew/opt/ffmpeg-full/bin"),
+                PathBuf::from("/custom/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/usr/local/opt/ffmpeg-full/bin"),
             ]
         );
     }

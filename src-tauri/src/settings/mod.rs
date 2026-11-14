@@ -4425,7 +4425,7 @@ mod tests {
     // `configured_ffmpeg_path`, feeding the real `ffmpeg::discover_with_path` with an empty
     // `PATH` slice, so nothing but the configured entry can satisfy the lookup.
     // `discover_with_path`, not `discover`, is what this test calls: `discover` unconditionally
-    // appends `/opt/homebrew/bin` and `/usr/local/bin` on macOS, which would let a real
+    // appends the Homebrew directories of ADR 012 and ADR 060 on macOS, which would let a real
     // Homebrew ffmpeg on this machine satisfy the lookup instead of the configured entry
     // actually being exercised.
 

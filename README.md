@@ -88,6 +88,8 @@ QuipClip searches for the programs in this order:
 
 1. A path you set in Settings.
 2. Your `PATH`. On macOS, QuipClip also searches `/opt/homebrew/bin` and `/usr/local/bin`.
+   Then it searches the folders of the Homebrew `ffmpeg-full` formula:
+   `/opt/homebrew/opt/ffmpeg-full/bin` and `/usr/local/opt/ffmpeg-full/bin`.
 3. The `bin` folder in the application data folder:
    - Windows: `%APPDATA%\io.github.capric98.quipclip\bin`
    - macOS: `~/Library/Application Support/io.github.capric98.quipclip/bin`

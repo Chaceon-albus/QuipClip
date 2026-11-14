@@ -81,6 +81,7 @@ document summarizes them and shows how the parts fit together.
 | [`057-keep-rebuildable-files-in-the-cache-directory.md`](../.agents/decisions/057-keep-rebuildable-files-in-the-cache-directory.md)         | Files that QuipClip can make again go in subdirectories of the cache directory     |
 | [`058-read-a-growing-flv-as-the-revision-of-its-import.md`](../.agents/decisions/058-read-a-growing-flv-as-the-revision-of-its-import.md)   | An FLV that a recorder still writes reads as the bytes that its import read        |
 | [`059-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/059-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
+| [`060-search-the-homebrew-ffmpeg-full-keg-on-macos.md`](../.agents/decisions/060-search-the-homebrew-ffmpeg-full-keg-on-macos.md)           | macOS discovery also searches the keg of the Homebrew `ffmpeg-full` formula        |
 
 ## Shape
 
@@ -444,7 +445,7 @@ source edit points.
 
 ## ffmpeg lifecycle
 
-See ADR 005, ADR 006, ADR 012, and ADR 059.
+See ADR 005, ADR 006, ADR 012, ADR 059, and ADR 060.
 
 Resolution order: the configured path, then `PATH`, then `<app_data>/bin`, then
 `<local_data>/bin`. The last directory holds the programs that the download installs. On
@@ -454,7 +455,9 @@ Windows and the macOS convention, so no code builds those paths by hand.
 
 On macOS, the `PATH` lookup appends `/opt/homebrew/bin` and `/usr/local/bin` after the
 directories from the process `PATH`. This rule lets GUI applications find a standard
-Homebrew installation without starting a login shell.
+Homebrew installation without starting a login shell. After those two directories, it
+appends `/opt/homebrew/opt/ffmpeg-full/bin` and `/usr/local/opt/ffmpeg-full/bin`, because
+Homebrew does not link the keg-only `ffmpeg-full` formula (ADR 060).
 
 The download is the fourth step of ADR 005 (ADR 059). The manifest
 `src-tauri/resources/ffmpeg-manifest.json` pins one FFmpeg release for each release target.

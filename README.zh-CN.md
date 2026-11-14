@@ -69,7 +69,7 @@ QuipClip 未找到 `ffmpeg` 时，设置中的 FFmpeg 选项卡会显示**下载
 QuipClip 按以下顺序搜索这两个程序：
 
 1. 在设置中设定的路径。
-2. 您的 `PATH`。在 macOS 上，QuipClip 还会搜索 `/opt/homebrew/bin` 和 `/usr/local/bin`。
+2. 您的 `PATH`。在 macOS 上，QuipClip 还会搜索 `/opt/homebrew/bin` 和 `/usr/local/bin`，然后搜索 Homebrew 的 `ffmpeg-full` 所在的文件夹：`/opt/homebrew/opt/ffmpeg-full/bin` 和 `/usr/local/opt/ffmpeg-full/bin`。
 3. 应用程序数据文件夹中的 `bin` 文件夹：
    - Windows：`%APPDATA%\io.github.capric98.quipclip\bin`
    - macOS：`~/Library/Application Support/io.github.capric98.quipclip/bin`

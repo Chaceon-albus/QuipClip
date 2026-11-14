@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-30
 - Deciders: capric98
+- Amended by: ADR 060
 
 ## Context
 
@@ -25,6 +26,11 @@ On macOS, the `PATH` lookup uses this directory order:
 
 Stable deduplication keeps the first occurrence of each candidate pair. These two extra
 locations have the same `Path` origin as directories from the process `PATH`.
+
+(Changed on 2026-11-14.) ADR 060 adds two directories after item 3:
+`/opt/homebrew/opt/ffmpeg-full/bin` and `/usr/local/opt/ffmpeg-full/bin`. They hold the
+programs of the keg-only `ffmpeg-full` formula, which Homebrew does not link into a `bin`
+directory.
 
 The configured path remains first in the full resolution order. The application data
 directory remains after all `PATH` locations. QuipClip does not start a login shell and
