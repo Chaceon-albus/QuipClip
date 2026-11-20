@@ -134,6 +134,7 @@ import { PreviewTimecode } from "./PreviewTimecode";
 // subscription for each one.
 const {
   syncReady,
+  primeFirstFrame,
   syncUnready,
   syncPresentedFrame,
   syncPresentationUnavailable,
@@ -156,6 +157,16 @@ const { dismissError: dismissImportError } = mediaStore.getState();
 // The format names in the empty state come from the list the file dialog filters on, so the
 // two cannot disagree.
 const SUPPORTED_VIDEO_FORMATS = formatSupportedVideoFormats(VIDEO_FILE_EXTENSIONS);
+
+/**
+ * True when the preview must play a native source muted to show its first frame (ADR 003).
+ * WKWebView, the web view of macOS, presents no frame of a paused element that loaded only its
+ * metadata, and no frame at position 0 when the first frame starts after 0. The first frame
+ * callback then waits for a play of the user, the status bar says "Preparing the preview…", and
+ * a navigation before that play makes the calibration unavailable. WebView2 presents the first
+ * frame of a paused element.
+ */
+const PRIMES_FIRST_FRAME = isMacOS();
 
 /** The platform of the web view, for the hint of the decode-failure panel. */
 function currentPlatform(): PreviewPlatform {
@@ -1026,6 +1037,15 @@ export function PreviewPane() {
     syncBrowserDuration(sourceRevisionKey, element);
     recordBrowserDuration(element);
     syncBrowserTime(sourceRevisionKey, element);
+    // The store primes only an open first-frame anchor, so a MediaSource source, whose anchor
+    // is known, and a source that cannot calibrate are left alone.
+    if (PRIMES_FIRST_FRAME) {
+      primeFirstFrame(
+        sourceRevisionKey,
+        element,
+        () => previewMutePreferenceStore.getState().muted,
+      );
+    }
   };
 
   // Feeds an element event, or the end of a wait, to the picture check, and performs the

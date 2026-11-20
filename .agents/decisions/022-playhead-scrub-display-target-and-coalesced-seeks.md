@@ -271,7 +271,9 @@ outside `calibrating`.
 
 - **Accepting a request.** A deferred request counts as accepted. It pauses the element as
   a seek does, sets `seekTargetSeconds` as its action would, keeps `presentedFrame` null,
-  and requests no cue. A `seeked` event does not clear its target.
+  and requests no cue. A `seeked` event does not clear its target. (Changed on 2026-11-19.)
+  It does not pause the priming play of ADR 003 on macOS. That play pauses at its first frame,
+  before the anchor runs the request.
 - **The latest seek wins.** `seekApproximate` and `seekToPts` replace the deferred request.
 - **Steps add up.** `seekNominal` adds its frames to the deferred request, counted from the
   deferred seek or from the position of the element, one frame for each press as ADR 021

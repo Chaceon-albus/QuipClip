@@ -70,6 +70,16 @@ export interface PlaybackMediaElement {
     start: (index: number) => number;
     end: (index: number) => number;
   };
+  /**
+   * `HTMLMediaElement.muted`. Only the priming play writes it: it mutes the element for the
+   * play and gives back the mute state of the user at its end (`primeFirstFrame`).
+   */
+  muted?: boolean;
+  /**
+   * `HTMLMediaElement.playbackRate`. Only the priming play writes it, and it gives back the
+   * rate from before the play at its end (`primeFirstFrame`).
+   */
+  playbackRate?: number;
 }
 
 /**
@@ -389,6 +399,38 @@ export interface PlaybackActions {
    * Marks the media element ready once metadata has loaded for the matching source and element.
    */
   syncReady: (sourceRevisionKey: string, element: PlaybackMediaElement) => void;
+
+  /**
+   * Shows the first frame of a native source with a muted play, so the first frame callback can
+   * take the calibration anchor (ADR 003). WKWebView presents no frame of a paused element that
+   * loaded only its metadata, and no frame at position 0 when the first frame starts after 0,
+   * such as after the empty edit at the start of an MP4. The preview calls it on macOS when the
+   * metadata loads.
+   *
+   * The play is muted, at `FIRST_FRAME_PRIMING_RATE`, and does not seek, so the first presented
+   * frame is still the first frame after the load. It is not a playback of the user: its `play`
+   * event changes nothing, and the play button stays at Play. A navigation during the priming is
+   * deferred as during any calibration, but it does not pause the element, and neither does a
+   * seek that fails: a paused element would show no frame, and the anchor would never come. The
+   * first frame callback pauses the element before it takes the anchor and runs the deferred
+   * navigation. The element then gets back its rate and the mute state that `readMuted` reads at
+   * that moment. A `play` during the priming keeps the element playing as the playback of the
+   * user, with its normal rate and sound. The `pause` action, a stall, a loss of readiness, a
+   * detach, a reset, an attach of another source and a report that frame callbacks are
+   * unavailable each pause the element and end the priming, and an end of the media ends it. A
+   * priming that moves the element past `ANCHOR_TOLERANCE_SECONDS` from the anchor baseline with
+   * no frame makes the calibration unavailable, because the anchor guard would refuse the first
+   * frame from there.
+   *
+   * Does nothing unless the element is attached, ready, paused and has no stall, the calibration
+   * is "calibrating" with no anchor and no seek before it, the source has no known anchor (ADR
+   * 046), no priming runs, and the element exposes `muted` and `playbackRate`.
+   */
+  primeFirstFrame: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+    readMuted: () => boolean,
+  ) => void;
 
   /**
    * Marks the media element unready on decode error or readiness loss.

@@ -412,6 +412,17 @@ function playbackStopWindowSeconds(fps: Rational | null): number {
 export const ANCHOR_TOLERANCE_SECONDS = 1.0;
 
 /**
+ * The playback rate of the muted play that shows the first frame (`primeFirstFrame`).
+ *
+ * At a quarter of the normal rate, each frame stays on screen four times as long. A frame callback
+ * that a busy main thread delays is then less likely to report the second frame as the first one,
+ * and the pause in that callback lands on the first frame. A source whose first frame starts one
+ * frame interval after 0 shows it within about 70 ms at 60 fps, and one that starts 0.5 s after 0
+ * within 2 s.
+ */
+export const FIRST_FRAME_PRIMING_RATE = 0.25;
+
+/**
  * Largest distance in seconds between the clamped target of a nominal step and the position the
  * step starts from, at which the step counts as a step that cannot move the source.
  *
@@ -580,6 +591,18 @@ export function createPlaybackStore(
   // while that field is true, the preview bounds the wait for the first frame, and at the
   // bound it reports frame callbacks as unavailable (syncPresentationUnavailable).
   let deferredNavigation: DeferredNavigation | null = null;
+  // The muted play that shows the first frame of a native source (primeFirstFrame), or null.
+  // WKWebView presents no frame of a paused element before a seek or a play, so the first frame
+  // callback that takes the anchor (ADR 003) would wait for a play of the user. The record keeps
+  // what the priming changed on the element, to give it back when the priming ends:
+  // - `rate`: the playback rate before the priming.
+  // - `readMuted`: reads the mute preference of the user at that moment. The preference can
+  //   change while the priming runs, so the value from before the priming can be out of date.
+  let priming: {
+    readonly element: PlaybackMediaElement;
+    readonly rate: number;
+    readonly readMuted: () => boolean;
+  } | null = null;
   // The reload of the preview after a decode stall (decodeStall, reloadGeneration), or null.
   // A media element does not play or seek again after a decode error, so the preview replaces
   // it with a new element for the same source. `request` is the latest navigation request of
@@ -1195,16 +1218,22 @@ export function createPlaybackStore(
      * request is rare. A pause does not move the element, so the anchor keeps its baseline. The
      * display target shows where the request goes (ADR 022). presentedFrame stays null: no frame
      * is confirmed before the anchor (ADR 003).
+     *
+     * The priming play is the exception (primeFirstFrame). It goes on to its first frame, and
+     * that frame pauses it before the anchor runs this request. A pause here would stop it on no
+     * frame, and WKWebView would then present none, so the anchor would never come.
      */
     const deferNavigation = (entry: DeferredNavigation): void => {
       if (!attachedElement) {
         return;
       }
       playSessionId++;
-      try {
-        attachedElement.pause();
-      } catch {
-        // Ignore DOM exception
+      if (priming?.element !== attachedElement) {
+        try {
+          attachedElement.pause();
+        } catch {
+          // Ignore DOM exception
+        }
       }
       // A step back to the position the element holds leaves nothing to do.
       deferredNavigation = entry.seek === null && entry.frames === 0 ? null : entry;
@@ -1905,6 +1934,30 @@ export function createPlaybackStore(
     };
 
     /**
+     * Ends the priming play (primeFirstFrame) and gives the element back its rate and the sound
+     * that the user chose. `pause` first pauses the element, so the sound does not come back on a
+     * playing element. Without `pause`, the element plays on, as the playback of the user. Does
+     * nothing when no priming runs.
+     */
+    const endPriming = (pause: boolean): void => {
+      const current = priming;
+      if (current === null) {
+        return;
+      }
+      priming = null;
+      const element = current.element;
+      try {
+        if (pause) {
+          element.pause();
+        }
+        element.playbackRate = current.rate;
+        element.muted = current.readMuted();
+      } catch {
+        // Ignore DOM exception
+      }
+    };
+
+    /**
      * The ADR 028 index of the frame at a presented PTS on the frame grid, counted from
      * videoStartPts, or -1 for a PTS before it. The index of a real frame is exact on the grid
      * (ADR 022), and this is the rule that End reads for the frame on screen (ADR 026).
@@ -2513,6 +2566,8 @@ export function createPlaybackStore(
           return;
         }
 
+        // The priming belongs to the attachment that this attach replaces.
+        endPriming(true);
         if (attachedElement !== null && attachedElement !== element) {
           try {
             attachedElement.pause();
@@ -2615,6 +2670,7 @@ export function createPlaybackStore(
 
         scrubCue.stop();
         lastScrubAudioTarget = null;
+        endPriming(true);
 
         playSessionId++;
         try {
@@ -2748,6 +2804,57 @@ export function createPlaybackStore(
         }
       },
 
+      primeFirstFrame: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+        readMuted: () => boolean,
+      ) => {
+        const state = get();
+        // Only the open first-frame anchor of a native source waits for a frame. A play of the
+        // user, a seek before the anchor and a known anchor (ADR 046) each leave nothing to show.
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          priming !== null ||
+          !state.isReady ||
+          state.isPlaying ||
+          state.decodeStall !== null ||
+          state.calibrationStatus !== "calibrating" ||
+          calibratedMediaTime !== null ||
+          seekedBeforeCalibration ||
+          knownAnchor(attachedSource) !== null ||
+          element.paused === false ||
+          typeof element.muted !== "boolean" ||
+          typeof element.playbackRate !== "number"
+        ) {
+          return;
+        }
+
+        const record = { element, rate: element.playbackRate, readMuted };
+        priming = record;
+        let result: Promise<void> | void;
+        try {
+          // Muted before the play: a muted play needs no user activation, and the start of the
+          // source is not heard.
+          element.muted = true;
+          element.playbackRate = FIRST_FRAME_PRIMING_RATE;
+          result = element.play();
+        } catch {
+          endPriming(true);
+          return;
+        }
+        if (result && typeof result.then === "function") {
+          result.catch(() => {
+            // A play that fails shows no frame. The pause that ends the priming at its first
+            // frame also rejects the play, and then a newer priming may run.
+            if (priming === record) {
+              endPriming(true);
+            }
+          });
+        }
+      },
+
       syncUnready: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
         if (!attachedSource || !attachedElement) {
           return;
@@ -2769,6 +2876,7 @@ export function createPlaybackStore(
         // reload.
         deferredNavigation = null;
         reload = null;
+        endPriming(true);
         playSessionId++;
         try {
           attachedElement.pause();
@@ -2814,6 +2922,7 @@ export function createPlaybackStore(
         lastAcceptedSeek = null;
         deferredNavigation = null;
         reload = null;
+        endPriming(true);
         playSessionId++;
         try {
           element.pause();
@@ -2879,6 +2988,11 @@ export function createPlaybackStore(
         ) {
           return;
         }
+
+        // A play during the priming play keeps the element playing. It becomes the playback of
+        // the user, with the normal rate and the sound that the user chose, and its first frames
+        // can take the anchor as before (primeFirstFrame).
+        endPriming(false);
 
         // A playing element reports to its frame callback only the latest frame since the last
         // callback, so the first callback can name a later frame than the expected first frame
@@ -2986,6 +3100,7 @@ export function createPlaybackStore(
       pause: () => {
         // Space, the pause button and a second Play Segment end a segment playback (ADR 026).
         dropPlaybackStop();
+        endPriming(true);
         pauseElement();
       },
 
@@ -3087,10 +3202,13 @@ export function createPlaybackStore(
             reload = { ...reload, request: null };
           }
           playSessionId++;
-          try {
-            attachedElement?.pause();
-          } catch {
-            // Ignore DOM exception
+          // The priming play goes on to its first frame, which pauses it, as in deferNavigation.
+          if (priming === null || priming.element !== attachedElement) {
+            try {
+              attachedElement?.pause();
+            } catch {
+              // Ignore DOM exception
+            }
           }
           set({
             isPlaying: false,
@@ -3492,6 +3610,11 @@ export function createPlaybackStore(
           return;
         }
 
+        // The priming play has shown its first frame (primeFirstFrame). The element pauses on
+        // that frame before the anchor below takes it, so a navigation that the anchor runs
+        // finds a paused element and does not keep it playing.
+        endPriming(true);
+
         // A scrub seek (fastSeek) lands on a keyframe rather than the target frame.
         // Clearing seekTargetSeconds when it settles would jump the playhead and timecode
         // from the pointer to that keyframe (possibly seconds away). Therefore, clearing
@@ -3709,6 +3832,8 @@ export function createPlaybackStore(
           return;
         }
 
+        // No frame callback will take the anchor, so the priming play has nothing to wait for.
+        endPriming(true);
         // Read before the status changes: a pending target moves to the axis of the approximate
         // clock only when the calibration held until now.
         const retarget = timelineAxisTargetOnCalibrationLoss();
@@ -3913,6 +4038,18 @@ export function createPlaybackStore(
         if (get().approximateBrowserTimeSeconds !== next) {
           set({ approximateBrowserTimeSeconds: next });
         }
+        // The priming play moved the element further than the anchor guard permits, and no
+        // frame came (primeFirstFrame). The guard would refuse a first frame from here, so the
+        // priming stops and the calibration becomes unavailable for this attachment.
+        if (
+          priming?.element === element &&
+          anchorBaselineTime !== null &&
+          typeof element.currentTime === "number" &&
+          element.currentTime - anchorBaselineTime > ANCHOR_TOLERANCE_SECONDS
+        ) {
+          get().syncPresentationUnavailable(sourceRevisionKey, element);
+          return;
+        }
         // A segment playback on a window that presents no frames stops here (ADR 026).
         applyPlaybackStopBackstop(element);
       },
@@ -4038,6 +4175,12 @@ export function createPlaybackStore(
           return;
         }
 
+        // The `play` event of the priming play is not a playback of the user (primeFirstFrame).
+        // It keeps the deferred navigation, and the play button stays at Play.
+        if (priming?.element === element) {
+          return;
+        }
+
         issuedKeepsPlaying = true;
 
         // A play that the store did not start, such as from a media key, can also make the first
@@ -4124,6 +4267,9 @@ export function createPlaybackStore(
           return;
         }
 
+        // A priming play that reached the end of the media shows no frame any more.
+        endPriming(false);
+
         // A late `ended` event of an earlier end finds the element away from its end, and it
         // does not end a segment playback that started after that end.
         if (element.ended === true) {
@@ -4150,6 +4296,7 @@ export function createPlaybackStore(
         issuedKeepsPlaying = false;
         scrubCue.stop();
         lastScrubAudioTarget = null;
+        endPriming(true);
         playSessionId++;
         if (attachedElement) {
           try {

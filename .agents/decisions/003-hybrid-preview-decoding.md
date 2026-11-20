@@ -128,6 +128,34 @@ attachment, and the deferred request runs on the approximate clock. With nothing
 calibration waits for its first frame with no limit, so a slow first frame or the first
 frame of playback can still take the anchor.
 
+(Changed on 2026-11-19.) WKWebView, the web view of macOS, presents no frame of a paused
+element that loaded only its metadata. It also presents no frame at position 0 when the first
+frame of the source starts after 0. An MP4 that a recorder writes with B-frames can start with
+an empty edit of one frame interval, so its first frame shows at 1/60 s. In both cases the
+first frame callback comes only with a play. The status bar then said "Preparing the preview…"
+until the user played, and a navigation before that play ran out its wait and made calibration
+`unavailable`.
+
+On macOS, the preview therefore primes the first frame of a native source when its metadata
+loads. While calibration is `calibrating`, the store plays the element muted, at a quarter of
+the normal rate. The priming is the one action of the store that moves the element while
+calibration is `calibrating`, which the rule of 2026-09-24 above otherwise forbids. A play does
+not seek, so the first presented frame is still the first frame after the load, as for a play
+of the user. A navigation during the priming is deferred, but it does not pause the element,
+and neither does a seek that fails, because a paused element would show no frame. The first
+frame callback pauses the element, takes the anchor, and runs a deferred navigation, in that
+order. The element then gets back its rate
+and the mute state that the user chose. The priming is not a playback of the user: its `play`
+event changes nothing, a deferred navigation stays deferred, and the play button stays at
+Play. A play of the user during the priming continues it as the playback of the user. When the
+priming moves the element further than the anchor tolerance of 1 second with no frame, it
+stops, and calibration becomes `unavailable`, because the anchor guard would refuse the first
+frame from there.
+
+At a quarter of the rate, each frame stays on screen four times as long. A frame callback that
+the main thread delays is then less likely to report the second frame as the first one. A play
+of the user has the same risk at the normal rate. Windows does not prime.
+
 ### Seeking and nominal navigation
 
 To seek to a stored PTS, QuipClip applies the inverse calibrated mapping. It requests the

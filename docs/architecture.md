@@ -215,7 +215,10 @@ fMP4 parser, the window client, the MediaSource controller, and the Web Audio cu
 For every other source, the first `requestVideoFrameCallback` after source load supplies a
 browser `mediaTime` anchor. QuipClip associates that value with `videoStartPts`. Later callbacks confirm the
 browser-presented frame and its `mediaTime`. QuipClip infers source PTS through the
-calibrated mapping. RVFC does not report raw FFmpeg PTS.
+calibrated mapping. RVFC does not report raw FFmpeg PTS. WKWebView presents no frame of a
+paused element before a seek or a play, so on macOS the store plays the element muted, at a
+quarter of the normal rate, until its first frame callback, and pauses it there
+(`primeFirstFrame`, ADR 003).
 
 Version 1 precise editing assumes a continuous, linear, slope-one mapping between the
 browser timeline and source PTS. It also assumes that separately editable presented frames

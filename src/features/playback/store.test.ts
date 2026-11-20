@@ -28,8 +28,10 @@ import { setScrubCue } from "./cue";
 import { getDisplayedElapsedSeconds } from "./presentation";
 import { scrubAudioController } from "./scrubAudio";
 import {
+  ANCHOR_TOLERANCE_SECONDS,
   canPlaySegment,
   createPlaybackStore,
+  FIRST_FRAME_PRIMING_RATE,
   getNominalFrameRate,
   hasNominalFrameRate,
   hasVariableFrameRate,
@@ -11842,5 +11844,320 @@ describe("Decode Stall and Reload (decodeStall)", () => {
       store.getState().reloadStalledPreview(joinedKey);
       expect(store.getState().reloadGeneration).toBe(0);
     });
+  });
+});
+
+describe("primeFirstFrame (ADR 003, WKWebView)", () => {
+  // The shape of an MP4 that a recorder writes with B-frames: an empty edit of one frame interval
+  // at the start, so the first frame shows at 1/60 s and no frame shows at position 0.
+  const tb = { n: 1, d: 15360 };
+  const fps60 = { n: 60, d: 1 };
+  const source: PlaybackSource = {
+    path: "/media/recording.mp4",
+    size: 135394884,
+    mtime: 1795151828,
+    videoTimeBase: tb,
+    videoStartPts: "256" as Pts,
+    avgFrameRate: fps60,
+    rFrameRate: fps60,
+    approximateDurationSeconds: 10,
+  };
+  const key = getSourceRevisionKey(source);
+  const FIRST_FRAME = 256 / 15360;
+  const SECOND_FRAME = 512 / 15360;
+
+  /** A loaded element of `source` with the mute and rate of a real element. */
+  function setup(options?: {
+    playImpl?: () => Promise<void> | void;
+    autoSeeking?: boolean;
+  }) {
+    const store = createPlaybackStore();
+    const video = Object.assign(
+      createFakeVideo({
+        duration: 10,
+        playImpl: options?.playImpl,
+        autoSeeking: options?.autoSeeking,
+      }),
+      { muted: false, playbackRate: 1 },
+    );
+    store.getState().attach(source, video);
+    video.readyState = 1;
+    store.getState().syncReady(key, video);
+    let userMuted = false;
+    const readMuted = vi.fn(() => userMuted);
+    const setUserMuted = (value: boolean) => {
+      userMuted = value;
+    };
+    return { store, video, readMuted, setUserMuted };
+  }
+
+  it("plays the element muted at the priming rate, as no playback of the user", () => {
+    const { store, video, readMuted } = setup();
+
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    expect(video.playCalls).toBe(1);
+    expect(video.muted).toBe(true);
+    expect(video.playbackRate).toBe(FIRST_FRAME_PRIMING_RATE);
+    store.getState().syncPlay(key, video);
+    expect(store.getState().isPlaying).toBe(false);
+    expect(store.getState().calibrationStatus).toBe("calibrating");
+  });
+
+  it("pauses on the first frame, anchors it, and gives back the rate and the current mute state", () => {
+    const { store, video, readMuted, setUserMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+    store.getState().syncPlay(key, video);
+    // The user mutes while the priming runs, so the state from before the priming is out of date.
+    setUserMuted(true);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+
+    expect(video.pauseCalls).toBe(1);
+    expect(video.paused).toBe(true);
+    expect(video.playbackRate).toBe(1);
+    expect(video.muted).toBe(true);
+    expect(store.getState().calibrationStatus).toBe("ready");
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("256");
+    expect(store.getState().isPlaying).toBe(false);
+
+    // The next frame of the source maps on the anchor of the first frame.
+    store.getState().syncPause(key, video);
+    store.getState().play();
+    store.getState().syncPresentedFrame(key, SECOND_FRAME, 2, video);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("512");
+  });
+
+  it("gives back the sound when the user unmutes during the priming", () => {
+    const { store, video, readMuted, setUserMuted } = setup();
+    setUserMuted(true);
+    video.muted = true;
+    store.getState().primeFirstFrame(key, video, readMuted);
+    setUserMuted(false);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+
+    expect(video.muted).toBe(false);
+    expect(readMuted).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a navigation deferred during the priming and runs it on a paused element", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+    store.getState().syncPlay(key, video);
+
+    store.getState().seekToPts("1024" as Pts);
+    expect(video.currentTimeSets).toBe(0);
+    expect(store.getState().hasDeferredNavigation).toBe(true);
+    // The request does not pause the priming: a paused WKWebView element shows no frame, and
+    // the anchor would never come.
+    expect(video.paused).toBe(false);
+    expect(video.pauseCalls).toBe(0);
+    // The `play` event of the priming does not drop it.
+    store.getState().syncPlay(key, video);
+    expect(store.getState().hasDeferredNavigation).toBe(true);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+
+    // The first frame pauses the element, and the deferred seek that runs then pauses it again.
+    expect(video.pauseCalls).toBeGreaterThanOrEqual(1);
+    expect(video.paused).toBe(true);
+    expect(video.currentTimeSets).toBe(1);
+    expect(video.currentTime).toBeCloseTo(1024 / 15360, 3);
+    expect(store.getState().isPlaying).toBe(false);
+    expect(store.getState().hasDeferredNavigation).toBe(false);
+  });
+
+  it("keeps a frame step deferred during the priming and steps from the anchor", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    store.getState().seekNominal(1);
+    expect(video.paused).toBe(false);
+    expect(store.getState().hasDeferredNavigation).toBe(true);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+
+    expect(video.paused).toBe(true);
+    expect(video.currentTimeSets).toBe(1);
+    // The step aims inside the second frame, away from its boundaries.
+    expect(video.currentTime).toBeGreaterThan(SECOND_FRAME);
+    expect(video.currentTime).toBeLessThan(SECOND_FRAME + 1 / 60);
+  });
+
+  it("reaches the anchor when a step forward and a step back leave nothing deferred", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    store.getState().seekNominal(1);
+    store.getState().seekNominal(-1);
+    expect(store.getState().hasDeferredNavigation).toBe(false);
+    expect(video.paused).toBe(false);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+
+    expect(video.paused).toBe(true);
+    expect(video.currentTimeSets).toBe(0);
+    expect(store.getState().calibrationStatus).toBe("ready");
+  });
+
+  it("does not pause the priming at a seek that fails", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    store.getState().seekToPts("invalid" as Pts);
+    expect(store.getState().error).toBe("seekFailed");
+    expect(video.paused).toBe(false);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+    expect(video.paused).toBe(true);
+    expect(store.getState().calibrationStatus).toBe("ready");
+  });
+
+  it("makes a play during the priming the playback of the user, with its sound and rate", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    store.getState().play();
+
+    expect(store.getState().isPlaying).toBe(true);
+    expect(video.muted).toBe(false);
+    expect(video.playbackRate).toBe(1);
+    expect(video.pauseCalls).toBe(0);
+
+    store.getState().syncPresentedFrame(key, FIRST_FRAME, 1, video);
+    expect(video.pauseCalls).toBe(0);
+    expect(store.getState().isPlaying).toBe(true);
+    expect(store.getState().calibrationStatus).toBe("ready");
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("256");
+  });
+
+  it("pauses the element and gives it back when the user pauses during the priming", () => {
+    const { store, video, readMuted } = setup();
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    store.getState().pause();
+
+    expect(video.paused).toBe(true);
+    expect(video.muted).toBe(false);
+    expect(video.playbackRate).toBe(1);
+    expect(store.getState().calibrationStatus).toBe("calibrating");
+  });
+
+  it("does nothing for a calibrated source, a playing element, or an element without mute", () => {
+    const calibrated = setup();
+    calibrated.store
+      .getState()
+      .syncPresentedFrame(key, FIRST_FRAME, 1, calibrated.video);
+    calibrated.store
+      .getState()
+      .primeFirstFrame(key, calibrated.video, calibrated.readMuted);
+    expect(calibrated.video.playCalls).toBe(0);
+
+    const playing = setup();
+    playing.store.getState().play();
+    playing.store.getState().primeFirstFrame(key, playing.video, playing.readMuted);
+    expect(playing.video.playCalls).toBe(1);
+    expect(playing.video.playbackRate).toBe(1);
+
+    const store = createPlaybackStore();
+    const bare = createFakeVideo({ duration: 10 });
+    store.getState().attach(source, bare);
+    store.getState().syncReady(key, bare);
+    store.getState().primeFirstFrame(key, bare, () => false);
+    expect(bare.playCalls).toBe(0);
+  });
+
+  it("does nothing for a source whose anchor is known (ADR 046)", () => {
+    const store = createPlaybackStore();
+    const video = Object.assign(createFakeVideo({ duration: 10 }), {
+      muted: false,
+      playbackRate: 1,
+    });
+    const known: PlaybackSource = { ...source, anchorMediaTime: 0 };
+    const knownKey = getSourceRevisionKey(known);
+    store.getState().attach(known, video);
+    store.getState().syncReady(knownKey, video);
+
+    store.getState().primeFirstFrame(knownKey, video, () => false);
+
+    expect(video.playCalls).toBe(0);
+    expect(video.muted).toBe(false);
+  });
+
+  it("stops at the anchor tolerance with no frame and makes the calibration unavailable", () => {
+    const { store, video, readMuted } = setup({ autoSeeking: false });
+    store.getState().primeFirstFrame(key, video, readMuted);
+
+    video.currentTime = ANCHOR_TOLERANCE_SECONDS / 2;
+    store.getState().syncBrowserTime(key, video);
+    expect(store.getState().calibrationStatus).toBe("calibrating");
+    expect(video.pauseCalls).toBe(0);
+
+    video.currentTime = ANCHOR_TOLERANCE_SECONDS + 0.1;
+    store.getState().syncBrowserTime(key, video);
+
+    expect(video.pauseCalls).toBe(1);
+    expect(video.muted).toBe(false);
+    expect(video.playbackRate).toBe(1);
+    expect(store.getState().calibrationStatus).toBe("unavailable");
+  });
+
+  it("gives the element back when the priming play fails, and can prime again", async () => {
+    let fail = true;
+    const { store, video, readMuted } = setup({
+      playImpl: () =>
+        fail
+          ? Promise.reject(new DOMException("denied", "NotAllowedError"))
+          : undefined,
+    });
+    store.getState().primeFirstFrame(key, video, readMuted);
+    await flushAsync();
+
+    expect(video.muted).toBe(false);
+    expect(video.playbackRate).toBe(1);
+
+    fail = false;
+    store.getState().primeFirstFrame(key, video, readMuted);
+    expect(video.playCalls).toBe(2);
+    expect(video.muted).toBe(true);
+  });
+
+  it("ignores the late rejection of an earlier priming play while a newer priming runs", async () => {
+    const rejects: Array<(error: unknown) => void> = [];
+    const { store, video, readMuted } = setup({
+      playImpl: () =>
+        new Promise<void>((_resolve, reject) => {
+          rejects.push(reject);
+        }),
+    });
+    store.getState().primeFirstFrame(key, video, readMuted);
+    store.getState().pause();
+    store.getState().primeFirstFrame(key, video, readMuted);
+    expect(video.playCalls).toBe(2);
+
+    // The pause rejects the first play only now, while the second priming runs.
+    rejects[0]?.(new DOMException("aborted", "AbortError"));
+    await flushAsync();
+
+    expect(video.paused).toBe(false);
+    expect(video.muted).toBe(true);
+    expect(video.playbackRate).toBe(FIRST_FRAME_PRIMING_RATE);
+  });
+
+  it("ends the priming at a detach and at a stall", () => {
+    const detached = setup();
+    detached.store.getState().primeFirstFrame(key, detached.video, detached.readMuted);
+    detached.store.getState().detach(key, detached.video);
+    expect(detached.video.paused).toBe(true);
+    expect(detached.video.muted).toBe(false);
+    expect(detached.video.playbackRate).toBe(1);
+
+    const stalled = setup();
+    stalled.store.getState().primeFirstFrame(key, stalled.video, stalled.readMuted);
+    stalled.store.getState().syncDecodeStall(key, stalled.video);
+    expect(stalled.video.paused).toBe(true);
+    expect(stalled.video.muted).toBe(false);
+    expect(stalled.video.playbackRate).toBe(1);
   });
 });

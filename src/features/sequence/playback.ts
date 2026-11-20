@@ -739,6 +739,7 @@ export function createSequencePlayback(
     detach: (...args) => playback.getState().detach(...args),
     syncReady: (...args) => playback.getState().syncReady(...args),
     syncUnready: (...args) => playback.getState().syncUnready(...args),
+    primeFirstFrame: (...args) => playback.getState().primeFirstFrame(...args),
     syncDecodeStall: (...args) => playback.getState().syncDecodeStall(...args),
     reloadStalledPreview: (sourceRevisionKey) => {
       // With one clip the key passes through, so the playback store refuses an old one. On a
