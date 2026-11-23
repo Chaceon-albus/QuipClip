@@ -4,7 +4,7 @@
 - Date: 2026-10-27
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 020, ADR 024, ADR 025, ADR 027, ADR 029, ADR 031, ADR 041
-- Amended by: ADR 050, ADR 051, ADR 053
+- Amended by: ADR 050, ADR 051, ADR 053, ADR 061
 
 ## Context
 

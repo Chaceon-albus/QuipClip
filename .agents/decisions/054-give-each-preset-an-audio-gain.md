@@ -4,7 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 013, ADR 014, ADR 023, ADR 040, ADR 041
-- Amended by: ADR 055
+- Amended by: ADR 055, ADR 061
 
 ## Context
 
@@ -132,6 +132,11 @@ fingerprint of the interface includes the gain.
 - A blank value, or a value with more than one decimal place, cannot be saved.
 - The setup step of the export dialog shows a Volume row in the Audio group: "No Change" for 0,
   otherwise the gain with its sign and one decimal place, such as "-1.0 dB".
+
+(Changed on 2026-11-22.) ADR 061 gives the row and the field of the preset editor the label
+"Gain". The row always shows a number, "0.0 dB" for 0. While an Adjust switch at the end of the
+row is on, the gain of the row replaces the gain of the preset for one export. The After gain line
+of that switch is the clipping warning of the setup step.
 
 ### Two-pass loudnorm: later
 

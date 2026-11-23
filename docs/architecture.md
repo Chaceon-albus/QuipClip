@@ -82,6 +82,7 @@ document summarizes them and shows how the parts fit together.
 | [`058-read-a-growing-flv-as-the-revision-of-its-import.md`](../.agents/decisions/058-read-a-growing-flv-as-the-revision-of-its-import.md)   | An FLV that a recorder still writes reads as the bytes that its import read        |
 | [`059-download-ffmpeg-from-pinned-release-builds.md`](../.agents/decisions/059-download-ffmpeg-from-pinned-release-builds.md)               | QuipClip downloads a pinned ffmpeg into the local data directory after consent     |
 | [`060-search-the-homebrew-ffmpeg-full-keg-on-macos.md`](../.agents/decisions/060-search-the-homebrew-ffmpeg-full-keg-on-macos.md)           | macOS discovery also searches the keg of the Homebrew `ffmpeg-full` formula        |
+| [`061-adjust-the-gain-of-an-export-by-its-true-peak.md`](../.agents/decisions/061-adjust-the-gain-of-an-export-by-its-true-peak.md)         | The Adjust switch measures an export and fills a gain for a true peak of -1 dBTP   |
 
 ## Shape
 
@@ -383,6 +384,13 @@ A preset with a gain (ADR 054) adds one `volume` chain behind `concat`, in the p
 the audio: the audio process of ADR 043, or the one process of an export without video. `concat`
 writes `[ac]`, and `[ac]volume=-1.0dB[a]` writes the label that the command maps. The encoder of
 ADR 043 and a plan of silence get no gain, and a copy of the audio applies none.
+
+The setup step can replace that gain for one export (ADR 061). The Adjust switch at the end of the
+Gain row measures the audio that the export writes, with a gain of 0. A Rust meter of BS.1770-4
+reads the WAV output of the audio process and gives the integrated loudness and the true peak. The
+step then fills the field with the gain that brings the true peak to -1 dBTP or lower. That gain
+only cuts. The request carries it in `adjustedAudioGainTenthsDb`. An export with that field
+encodes its audio, so the Copy audio switch is locked while Adjust is on.
 
 The export action opens the export dialog at a setup step (ADR 024). The flow controller
 first examines the running export, the media, the segments, and the source revision. The

@@ -4,7 +4,7 @@
 - Date: 2026-10-23
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 023, ADR 024, ADR 036, ADR 043, ADR 046
-- Amended by: ADR 052, ADR 053, ADR 055
+- Amended by: ADR 052, ADR 053, ADR 055, ADR 061
 
 ## Context
 
@@ -126,6 +126,9 @@ sets it to off when the open media changes. While the save panel is open, it doe
 (Changed on 2026-10-23.) The switch first showed in front of the switch of the Audio heading.
 The user asked for the two switches one above the other, and for no new row. The switch is now
 in the Encoder row, which is the first row of the Audio group with and without the copy.
+
+(Changed on 2026-11-22.) While the Adjust switch of ADR 061 is on, the export encodes its audio.
+This switch then stays off and locked, and a tooltip gives the reason on hover and on focus.
 
 The step shows the switch only where the facts of the import probe allow a copy
 (`canCopyAudio` in `src/features/export/audioCopy.ts`):
