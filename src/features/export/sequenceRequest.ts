@@ -138,6 +138,11 @@ export interface SequenceExportRequestOptions {
   readonly streams: ExportStreams;
   readonly audioMode: ExportAudioMode;
   /**
+   * The gain that the user adjusted in the setup step, in tenths of a decibel (ADR 061), or
+   * undefined while the Adjust switch is off. The request carries it only when it is defined.
+   */
+  readonly adjustedAudioGainTenthsDb?: number;
+  /**
    * True to send the revision of each source, so the backend refuses a file that changed while
    * the export waited. False after "Export anyway", which checks nothing (ADR 024).
    */
@@ -224,7 +229,7 @@ export function buildSequenceExportRequest(
     }
     sources.push(source);
   }
-  return {
+  const request: ExportRequest = {
     sources,
     pieces,
     segmentCount,
@@ -233,4 +238,8 @@ export function buildSequenceExportRequest(
     streams: options.streams,
     audioMode: options.audioMode,
   };
+  if (options.adjustedAudioGainTenthsDb !== undefined) {
+    request.adjustedAudioGainTenthsDb = options.adjustedAudioGainTenthsDb;
+  }
+  return request;
 }

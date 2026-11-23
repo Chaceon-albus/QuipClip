@@ -896,6 +896,7 @@ export const zhCN: TranslationCatalog = {
   exportError: {
     appDataUnavailable: "应用程序数据目录不可用。",
     invalidPreset: "所选导出预设中有无效的设置。",
+    invalidAudioGain: "本次导出设置的增益无效。",
     presetNotFound: "未找到所选的导出预设。",
     outputAlreadyQueued:
       "另一个正在运行或等待的导出会写入此文件。请选择其他名称或文件夹。",

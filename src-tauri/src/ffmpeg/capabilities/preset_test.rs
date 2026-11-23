@@ -957,6 +957,7 @@ mod tests {
                 preset,
                 streams: ExportStreams::VideoAndAudio,
                 audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             },
             |path: &Path| {
                 if path == source {

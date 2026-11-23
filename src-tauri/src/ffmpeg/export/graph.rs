@@ -65,8 +65,9 @@
 //! Two filters stand outside every chain, and each reads an output of `concat` once. The `format`
 //! that sets the output pixel format reads the video, where ADR 014's chain template first ended
 //! each chain with it. Its chain comes **first** in the graph text, and that position is what
-//! keeps the output the same; see [`video_output_format`]. The `volume` of a preset gain reads the
-//! audio (ADR 054); see [`audio_gain_chain`]. The reason for both is the command-line budget.
+//! keeps the output the same; see [`video_output_format`]. The `volume` of the planned gain, the
+//! gain of the preset or the gain that the request adjusted (ADR 054, ADR 061), reads the audio;
+//! see [`audio_gain_chain`]. The reason for both is the command-line budget.
 //!
 //! No step here uses floating point. A frame rate renders as `num/den` (ADR 002), so an NTSC
 //! rate reaches ffmpeg as the exact `30000/1001`, never a rounded decimal.
@@ -206,10 +207,11 @@ fn concat_audio_label(gain: Option<&String>) -> &'static str {
 /// Render the chain that applies the gain of the plan to the joined audio: `[ac]volume=<g>dB[a]`,
 /// or `None` when the plan has no gain to apply (ADR 054).
 ///
-/// There is no chain when the gain is 0, so the graph of a preset without a gain stays the same
-/// byte for byte. There is none either when no piece reads an audio stream: silence has no level
-/// to change, and those plans have the longest commands of the encoder (ADR 014), which this keeps
-/// as they were.
+/// The gain is [`PlannedAudio::gain_tenths_db`]: the gain of the preset, or the gain that the
+/// request adjusted in its place (ADR 061). There is no chain when that planned gain is 0, so the
+/// graph of an export with no gain stays the same byte for byte. There is none either when no
+/// piece reads an audio stream: silence has no level to change, and those plans have the longest
+/// commands of the encoder (ADR 014), which this keeps as they were.
 ///
 /// The gain is one chain behind `concat` and not a filter in each audio chain, for the reason
 /// [`video_output_format`] gives: a filter in each chain costs its bytes once for each piece. As
@@ -2165,6 +2167,7 @@ mod tests {
                 preset: &preset,
                 streams,
                 audio_mode: crate::ffmpeg::ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             },
             move |path: &Path| {
                 if path == Path::new(PLANNED_SOURCE) {

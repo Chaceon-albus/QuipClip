@@ -198,6 +198,28 @@ pub struct ExportRequestWire {
     /// `false`: the run joins the batch that the interface shows.
     #[serde(default)]
     pub new_batch: bool,
+    /// The gain in tenths of a decibel that the user adjusted in the setup step (ADR 061), which
+    /// replaces the gain of [`Self::preset`] for this export. Absent while the Adjust switch is
+    /// off: the export then applies the gain of the preset (ADR 054). The preset itself stays
+    /// the preset of the settings file (ADR 049).
+    ///
+    /// [`start_export`] refuses a value outside the range of the gain of a preset, and a value
+    /// with a copy of the audio, with `invalidAudioGain` ([`validate_adjusted_audio_gain`]).
+    ///
+    /// Only an absent key means no gain. A present key must hold a whole number: `null` is
+    /// refused, as every other value that is not a gain, so a frontend that sent a broken value
+    /// does not export with the gain of the preset in silence.
+    #[serde(default, deserialize_with = "present_gain")]
+    pub adjusted_audio_gain_tenths_db: Option<i32>,
+}
+
+/// Deserialize a key that is present as a whole number of tenths of a decibel. `null` and every
+/// other value that is not an `i32` are refused. `#[serde(default)]` gives `None` to an absent key.
+fn present_gain<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    i32::deserialize(deserializer).map(Some)
 }
 
 impl ExportRequestWire {
@@ -210,6 +232,7 @@ impl ExportRequestWire {
             preset: &self.preset,
             streams: self.streams,
             audio_mode: self.audio_mode,
+            adjusted_audio_gain_tenths_db: self.adjusted_audio_gain_tenths_db,
         }
     }
 }
@@ -231,6 +254,10 @@ struct PlanScope<'a> {
     streams: ExportStreams,
     /// See [`ExportRequestWire::audio_mode`].
     audio_mode: ExportAudioMode,
+    /// The gain that replaces the gain of the preset in the plan, or `None` for the gain of the
+    /// preset ([`PlanRequest::audio_gain_tenths_db`]). See
+    /// [`ExportRequestWire::adjusted_audio_gain_tenths_db`].
+    adjusted_audio_gain_tenths_db: Option<i32>,
 }
 
 /// A request whose sources and pieces [`resolve_request`] checked.
@@ -573,9 +600,9 @@ pub async fn start_export(
     if request.new_batch {
         journal.begin_batch();
     }
-    // Checked before the slot is claimed, so a request with an invalid preset is refused at
-    // once and holds no slot.
-    validate_request_preset(&request.preset)?;
+    // Checked before the slot is claimed, so a request with an invalid preset or an invalid
+    // adjusted gain is refused at once and holds no slot.
+    check_request_at_once(&request)?;
 
     let app_data_directory = app
         .path()
@@ -975,6 +1002,7 @@ where
             preset,
             streams: scope.streams,
             audio_mode: scope.audio_mode,
+            audio_gain_tenths_db: scope.adjusted_audio_gain_tenths_db,
         },
         inspect_path,
     )
@@ -1728,6 +1756,36 @@ fn validate_request_preset(preset: &Preset) -> Result<(), ExportCommandError> {
     settings::validate_preset(preset).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::InvalidPreset, error.to_string())
     })
+}
+
+/// The checks that [`start_export`] makes before it changes any state: before it records the run
+/// in the journal and before it submits the run to the registry. A request that fails one is
+/// refused at once, and holds no slot and no place in the queue.
+fn check_request_at_once(request: &ExportRequestWire) -> Result<(), ExportCommandError> {
+    validate_request_preset(&request.preset)?;
+    validate_adjusted_audio_gain(request)
+}
+
+/// Check the gain that the setup step adjusted (ADR 061), when the request has one.
+///
+/// The value must be in the range of the gain of a preset (ADR 054), the range that the setup
+/// step checks too. A request that asks for a copy of the audio must not carry one: a copy applies
+/// no gain, and the setup step offers no copy while Adjust is on, so such a request is a fault of
+/// the frontend. The plan can still refuse the copy and encode (ADR 048), but the request is
+/// refused whatever the plan would do.
+///
+/// Each refusal is `invalidAudioGain`, with no detail. QuipClip decides the refusal itself, so the
+/// code is the whole account (ADR 011).
+fn validate_adjusted_audio_gain(request: &ExportRequestWire) -> Result<(), ExportCommandError> {
+    let Some(gain) = request.adjusted_audio_gain_tenths_db else {
+        return Ok(());
+    };
+    let in_range =
+        (settings::MIN_AUDIO_GAIN_TENTHS_DB..=settings::MAX_AUDIO_GAIN_TENTHS_DB).contains(&gain);
+    if !in_range || request.audio_mode == ExportAudioMode::Copy {
+        return Err(ExportCommandError::new(ExportErrorCode::InvalidAudioGain));
+    }
+    Ok(())
 }
 
 /// Build the facts of a prepared run, which the `started` event reports.
@@ -3300,6 +3358,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let cache_root = directory.path.join("cache");
         let work = WorkDirectory::create(
@@ -3721,6 +3780,89 @@ mod tests {
     }
 
     #[test]
+    fn the_request_carries_an_adjusted_gain_and_reads_an_absent_one_as_none() {
+        // ADR 061: the field is optional. A request without it, as every request before the
+        // Adjust switch, applies the gain of the preset.
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        let absent: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(absent.adjusted_audio_gain_tenths_db, None);
+        value["adjustedAudioGainTenthsDb"] = serde_json::json!(-37);
+        let present: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(present.adjusted_audio_gain_tenths_db, Some(-37));
+        assert_eq!(
+            present.plan_scope().adjusted_audio_gain_tenths_db,
+            Some(-37)
+        );
+        // A gain is a whole number of tenths of a decibel, as in the preset (ADR 054). A present
+        // key with `null` is refused too: only an absent key means no gain.
+        for refused in [
+            serde_json::json!(null),
+            serde_json::json!(-3.5),
+            serde_json::json!(2_147_483_648_i64),
+            serde_json::json!("-10"),
+            serde_json::json!(true),
+        ] {
+            value["adjustedAudioGainTenthsDb"] = refused.clone();
+            assert!(
+                serde_json::from_value::<ExportRequestWire>(value.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_adjusted_gain_out_of_range_or_with_a_copy_is_refused_as_invalid_audio_gain() {
+        let request = |gain: Option<i32>, audio_mode: ExportAudioMode| {
+            let mut request: ExportRequestWire =
+                serde_json::from_value(request_json(Some(serde_json::json!("videoAndAudio"))))
+                    .unwrap();
+            request.adjusted_audio_gain_tenths_db = gain;
+            request.audio_mode = audio_mode;
+            request
+        };
+        for gain in [None, Some(-200), Some(-10), Some(0), Some(200)] {
+            assert!(
+                validate_adjusted_audio_gain(&request(gain, ExportAudioMode::Encode)).is_ok(),
+                "{gain:?}"
+            );
+        }
+        // A copy with no adjusted gain is the copy of ADR 048.
+        assert!(validate_adjusted_audio_gain(&request(None, ExportAudioMode::Copy)).is_ok());
+        for (gain, audio_mode) in [
+            (Some(-201), ExportAudioMode::Encode),
+            (Some(201), ExportAudioMode::Encode),
+            (Some(i32::MIN), ExportAudioMode::Encode),
+            (Some(0), ExportAudioMode::Copy),
+            (Some(-10), ExportAudioMode::Copy),
+        ] {
+            let error = validate_adjusted_audio_gain(&request(gain, audio_mode)).unwrap_err();
+            assert_eq!(error.code, ExportErrorCode::InvalidAudioGain, "{gain:?}");
+            // QuipClip decides the refusal, so the code is the whole account (ADR 011).
+            assert_eq!(error.detail, None, "{gain:?}");
+        }
+    }
+
+    #[test]
+    fn the_checks_at_once_refuse_an_invalid_preset_and_then_an_invalid_adjusted_gain() {
+        // `start_export` runs these checks before it records or submits the run, so each refusal
+        // here is a refusal of the command, with no run.
+        let mut request: ExportRequestWire =
+            serde_json::from_value(request_json(Some(serde_json::json!("videoAndAudio")))).unwrap();
+        assert!(check_request_at_once(&request).is_ok());
+        request.adjusted_audio_gain_tenths_db = Some(-201);
+        assert_eq!(
+            check_request_at_once(&request).unwrap_err().code,
+            ExportErrorCode::InvalidAudioGain
+        );
+        // The preset is checked first.
+        request.preset.audio_gain_tenths_db = 1_000;
+        assert_eq!(
+            check_request_at_once(&request).unwrap_err().code,
+            ExportErrorCode::InvalidPreset
+        );
+    }
+
+    #[test]
     fn the_request_carries_each_stream_choice_by_its_wire_string() {
         for (wire, streams) in [
             ("videoAndAudio", ExportStreams::VideoAndAudio),
@@ -3869,6 +4011,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         }
     }
 
@@ -4272,6 +4415,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let executables = FfmpegPaths {
             ffmpeg: directory.path.join("ffmpeg"),
@@ -4352,6 +4496,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let prepared = prepare_export_with(
@@ -4439,6 +4584,7 @@ mod tests {
                 streams: ExportStreams::VideoAndAudio,
                 audio_mode: ExportAudioMode::Encode,
                 new_batch: false,
+                adjusted_audio_gain_tenths_db: None,
             };
             let prepared = prepare_export_with(
                 PrepareRequest {
@@ -4532,6 +4678,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepare = || {
             let request = request();
@@ -4669,6 +4816,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -4725,6 +4873,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -4799,6 +4948,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let result = prepare_export_with(
@@ -4897,6 +5047,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -4961,6 +5112,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -5025,6 +5177,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -5126,6 +5279,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
 
         let error = prepare_export_with(
@@ -5462,6 +5616,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         prepare_export_with(
             PrepareRequest {
@@ -5683,6 +5838,81 @@ mod tests {
             )
             .unwrap();
             assert_eq!(uncorrected.plan.segments[0].audio_prefix, None);
+        }
+    }
+
+    #[test]
+    fn an_export_with_an_adjusted_gain_applies_it_in_place_of_the_gain_of_the_preset() {
+        // ADR 061: the request keeps the preset of the settings file, with its gain of -1.0 dB.
+        // The plan and the graph of the audio process carry the adjusted gain instead. An
+        // adjusted gain of 0 adds no chain (ADR 054).
+        for (adjusted, planned, filter) in [
+            (None, -10, Some("volume=-1.0dB")),
+            (Some(-37), -37, Some("volume=-3.7dB")),
+            (Some(15), 15, Some("volume=1.5dB")),
+            (Some(0), 0, None),
+        ] {
+            let directory = TestDirectory::new();
+            let source = directory.path.join("source.mp4");
+            fs::write(&source, b"media").unwrap();
+            let mut preset = sample_preset("active");
+            preset.audio_gain_tenths_db = -10;
+            let request = ExportRequestWire {
+                sources: vec![ExportSourceWire {
+                    id: "source".to_owned(),
+                    path: source.to_string_lossy().into_owned(),
+                    expected_revision: None,
+                }],
+                pieces: vec![ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: Pts::new(0),
+                    out_pts: Pts::new(90_000),
+                }],
+                segment_count: 1,
+                output_path: directory
+                    .path
+                    .join("out.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                preset,
+                streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Encode,
+                new_batch: false,
+                adjusted_audio_gain_tenths_db: adjusted,
+            };
+            let prepared = prepare_export_with(
+                PrepareRequest {
+                    request: &request,
+                    app_data_directory: &directory.path,
+                    cache_directory: &directory.path.join("cache"),
+                    cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
+                    stage: &PreparationStageCell::default(),
+                    graph_file: &slash_graph_file,
+                },
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: directory.path.join("ffmpeg"),
+                        ffprobe: directory.path.join("ffprobe"),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                |_, _, _| Ok(sample_probe_with_a_missed_audio_start()),
+                first_packet_unread,
+                sample_rate_not_read,
+                no_audio_gaps,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.plan.audio.as_ref().unwrap().gain_tenths_db,
+                planned,
+                "{adjusted:?}"
+            );
+            let graph = audio_graph_of(&prepared);
+            match filter {
+                Some(filter) => assert!(graph.contains(filter), "{adjusted:?}: {graph}"),
+                None => assert!(!graph.contains("volume="), "{graph}"),
+            }
         }
     }
 
@@ -6457,6 +6687,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let error = prepare_export_with(
             PrepareRequest {
@@ -7921,6 +8152,7 @@ mod tests {
             streams,
             audio_mode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         prepare_export_with(
             PrepareRequest {
@@ -8287,6 +8519,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Copy,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -8439,6 +8672,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -8955,6 +9189,7 @@ mod tests {
             streams,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -9180,6 +9415,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -9394,6 +9630,7 @@ mod tests {
             streams: ExportStreams::VideoOnly,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         };
         let prepared = prepare_export_with(
             PrepareRequest {
@@ -9475,6 +9712,7 @@ mod tests {
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
             new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
         }
     }
 

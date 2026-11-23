@@ -391,6 +391,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   appDataUnavailable: null,
   invalidPreset: OPEN_PRESETS,
   presetNotFound: OPEN_PRESETS,
+  // Another gain, or the Adjust switch off, can succeed (ADR 061).
+  invalidAudioGain: BACK,
   ffmpegPairMissing: OPEN_FFMPEG,
   ffprobeSpawnFailed: OPEN_FFMPEG,
   ffprobeProcessFailed: null,

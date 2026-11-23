@@ -59,6 +59,11 @@ export interface BuildExportRequestOptions {
    */
   audioMode: ExportAudioMode;
   /**
+   * The gain that the user adjusted in the setup step, in tenths of a decibel (ADR 061), or
+   * undefined while the Adjust switch is off. The request carries it only when it is defined.
+   */
+  adjustedAudioGainTenthsDb?: number;
+  /**
    * The revision of the source that the segments were marked against, or null to send none:
    * the user chose to export a changed file anyway (ADR 024).
    */
@@ -76,7 +81,8 @@ export interface BuildExportRequestOptions {
  *   and its `expectedRevision` the `expectedSourceRevision` of the caller, when it gives one.
  * - Maps each Segment to the piece `{ sourceId, inPts, outPts }` of that source, dropping its
  *   `id`, and counts one segment for each piece.
- * - Forwards `preset`, `streams` and `audioMode` unchanged.
+ * - Forwards `preset`, `streams` and `audioMode` unchanged, and `adjustedAudioGainTenthsDb` when
+ *   it is defined.
  * - Returns `null` when there is no media, no output path, or no segments for the active source.
  *
  * @param options Export assembly parameters.
@@ -131,7 +137,7 @@ export function buildExportRequest(
     };
   }
 
-  return {
+  const request: ExportRequest = {
     sources: [source],
     pieces,
     segmentCount: pieces.length,
@@ -140,4 +146,8 @@ export function buildExportRequest(
     streams: options.streams,
     audioMode: options.audioMode,
   };
+  if (options.adjustedAudioGainTenthsDb !== undefined) {
+    request.adjustedAudioGainTenthsDb = options.adjustedAudioGainTenthsDb;
+  }
+  return request;
 }

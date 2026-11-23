@@ -206,6 +206,32 @@ describe("Export Request Builder", () => {
     ).not.toHaveProperty("expectedRevision");
   });
 
+  it("forwards an adjusted gain, and sends none while the Adjust switch is off (ADR 061)", () => {
+    const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+    // A preset with a gain of its own, which the adjusted gain must not change (ADR 049).
+    const withGain = { ...preset, audioGainTenthsDb: -10 };
+    const snapshot = structuredClone(withGain);
+    const base = {
+      preset: withGain,
+      sourcePath,
+      outputPath,
+      activeSourceId,
+      segments,
+      streams: "videoAndAudio" as const,
+      audioMode: "encode" as const,
+    };
+
+    for (const gain of [-37, 0, 200]) {
+      const request = buildExportRequest({ ...base, adjustedAudioGainTenthsDb: gain });
+      expect(request?.adjustedAudioGainTenthsDb).toBe(gain);
+      expect(request?.preset).toStrictEqual(snapshot);
+    }
+    expect(withGain).toStrictEqual(snapshot);
+    // The key is absent, not undefined, so the request is the request of an export before
+    // the switch existed.
+    expect(buildExportRequest(base)).not.toHaveProperty("adjustedAudioGainTenthsDb");
+  });
+
   it.each(EXPORT_STREAMS)("forwards the stream choice '%s' unchanged", (streams) => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
 

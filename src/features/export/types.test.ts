@@ -208,6 +208,7 @@ describe("Export Types & Wire Constants", () => {
       expect(BACKEND_EXPORT_ERROR_CODES).toEqual([
         "appDataUnavailable",
         "invalidPreset",
+        "invalidAudioGain",
         "ffmpegPairMissing",
         "ffprobeSpawnFailed",
         "ffprobeProcessFailed",

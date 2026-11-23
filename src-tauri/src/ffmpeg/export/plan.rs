@@ -82,6 +82,12 @@ pub struct PlanRequest<'a> {
     pub streams: ExportStreams,
     /// Whether the request asks to copy the audio rather than encode it (ADR 048, step 13a).
     pub audio_mode: ExportAudioMode,
+    /// The gain in tenths of a decibel that replaces the gain of the preset in
+    /// [`PlannedAudio::gain_tenths_db`], or `None` for the gain of the preset (ADR 054). An
+    /// export carries the gain that the user adjusted in the setup step (ADR 061). The
+    /// measurement of ADR 061 asks for 0. The caller checks the range: this function writes the
+    /// value as it is.
+    pub audio_gain_tenths_db: Option<i32>,
 }
 
 /// An opaque, comparable identity for one file on disk, used only to detect that two
@@ -417,7 +423,11 @@ pub fn build_plan(
         && copied_audio.is_none()
         && sources.iter().any(|source| source.probe.audio.is_some());
     let (audio, source_audio) = if writes_audio {
-        let (audio, source_audio) = plan_audio(sources, preset)?;
+        let (mut audio, source_audio) = plan_audio(sources, preset)?;
+        // ADR 061: the gain of the request replaces the gain of the preset.
+        if let Some(gain) = request.audio_gain_tenths_db {
+            audio.gain_tenths_db = gain;
+        }
         (Some(audio), source_audio)
     } else {
         (None, vec![None; sources.len()])
@@ -1558,6 +1568,7 @@ mod tests {
             preset,
             streams,
             audio_mode,
+            audio_gain_tenths_db: None,
         };
         build_plan(&request, inspect_from(facts))
     }
@@ -1651,6 +1662,7 @@ mod tests {
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
                 audio_mode: ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1710,6 +1722,7 @@ mod tests {
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
                 audio_mode: ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             };
             let error = build_plan(&request, inspect_from(valid_path_facts())).unwrap_err();
             assert_eq!(
@@ -1789,6 +1802,7 @@ mod tests {
             preset: &sample_preset(),
             streams: ExportStreams::VideoAndAudio,
             audio_mode: ExportAudioMode::Encode,
+            audio_gain_tenths_db: None,
         };
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(SOURCE), present_file(1));
@@ -1906,6 +1920,7 @@ mod tests {
             preset: &sample_preset(),
             streams,
             audio_mode: ExportAudioMode::Encode,
+            audio_gain_tenths_db: None,
         };
         build_plan(&request, inspect)
     }
@@ -3704,6 +3719,41 @@ mod tests {
     }
 
     #[test]
+    fn the_gain_of_the_request_replaces_the_gain_of_the_preset() {
+        // ADR 061: the gain that the user adjusted, and the gain 0 of the measurement, replace
+        // the gain of the preset. `None` keeps the gain of the preset.
+        let preset = Preset {
+            audio_gain_tenths_db: -10,
+            ..sample_preset()
+        };
+        let segments = [seconds_boundary("0", "1")];
+        let probe = probe_with_audio();
+        let frames = AudioFrames::default();
+        for (gain, planned) in [
+            (None, -10),
+            (Some(-37), -37),
+            (Some(0), 0),
+            (Some(200), 200),
+        ] {
+            let request = PlanRequest {
+                sources: &[PlanSource {
+                    path: Path::new(SOURCE),
+                    probe: &probe,
+                    audio_frames: &frames,
+                }],
+                destination: Some(Path::new(DESTINATION)),
+                segments: &segments,
+                preset: &preset,
+                streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Encode,
+                audio_gain_tenths_db: gain,
+            };
+            let plan = build_plan(&request, inspect_from(valid_path_facts())).unwrap();
+            assert_eq!(plan.audio.unwrap().gain_tenths_db, planned, "{gain:?}");
+        }
+    }
+
+    #[test]
     fn the_silence_takes_the_layout_of_the_preset_or_a_plain_layout_of_the_stream() {
         let layout_of = |channels: AudioChannels, layout: Option<&str>, count: Option<u32>| {
             let mut probe = probe_with_empty_audio();
@@ -4453,6 +4503,7 @@ mod tests {
                 preset,
                 streams,
                 audio_mode: ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             },
             inspect_from(several_path_facts()),
         )
@@ -5021,6 +5072,7 @@ mod tests {
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
                 audio_mode: ExportAudioMode::Copy,
+                audio_gain_tenths_db: None,
             },
             inspect_from(several_path_facts()),
         )
@@ -5069,6 +5121,7 @@ mod tests {
             preset: &preset,
             streams: ExportStreams::VideoOnly,
             audio_mode: ExportAudioMode::Encode,
+            audio_gain_tenths_db: None,
         };
         let mut facts = several_path_facts();
         facts.insert(PathBuf::from(SOURCES[1]), absent());
@@ -5170,6 +5223,7 @@ mod tests {
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoOnly,
                 audio_mode: ExportAudioMode::Encode,
+                audio_gain_tenths_db: None,
             },
             inspect_from(several_path_facts()),
         )

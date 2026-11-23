@@ -434,7 +434,9 @@ pub struct PlannedAudio {
     /// The encoder options of the audio stream, verbatim from the preset, in the order the
     /// argument builder writes them: each one as `-<name>:a <value>`, after `-b:a`.
     pub options: Vec<PresetOption>,
-    /// The gain of the joined audio in tenths of a decibel, verbatim from the preset (ADR 054).
+    /// The gain of the joined audio in tenths of a decibel: the gain of the preset (ADR 054), or
+    /// the gain of the request that replaces it ([`plan::PlanRequest::audio_gain_tenths_db`],
+    /// ADR 061).
     ///
     /// The graph writes it as one `volume` filter behind `concat` (`graph::audio_gain_chain`),
     /// and only when it is not 0 and a piece reads an audio stream. An export that copies the
@@ -799,6 +801,11 @@ export_error_codes! {
     /// reason. The request carries the whole preset (ADR 049), so the export reads no settings
     /// file.
     InvalidPreset => "invalidPreset",
+    /// Produced by `commands::export::start_export`: the gain that the setup step adjusted
+    /// (`adjustedAudioGainTenthsDb`, ADR 061) is outside the range of the gain of a preset, or
+    /// the request also asks for a copy of the audio, which applies no gain. The code has no
+    /// detail (ADR 011). The command refuses the request before it accepts the run.
+    InvalidAudioGain => "invalidAudioGain",
     /// Produced by `commands::export::prepare_plan_with`: `ffmpeg` and `ffprobe` could not
     /// both be located, mirroring `CapabilityProbeErrorCode::FfmpegPairMissing`.
     FfmpegPairMissing => "ffmpegPairMissing",
@@ -1041,6 +1048,7 @@ mod tests {
                 "ffprobeTimedOut",
                 "frameCountMismatch",
                 "graphFileUnsupported",
+                "invalidAudioGain",
                 "invalidPreset",
                 "invalidSegment",
                 "invalidSegmentCount",

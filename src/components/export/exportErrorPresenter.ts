@@ -77,6 +77,9 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
 
   // The stream choice: an export that writes the video can succeed from the same source.
   sourceHasNoAudio: BACK_TO_SETUP,
+  // The gain of the Adjust switch (ADR 061): the setup step can take another gain, or the
+  // switch can go off, and the export then applies the gain of the preset.
+  invalidAudioGain: BACK_TO_SETUP,
   // An export of the video only can succeed, and so can In points nearer to the audio.
   audioGapTooLong: BACK_TO_SETUP,
 

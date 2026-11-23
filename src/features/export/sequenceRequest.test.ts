@@ -176,6 +176,22 @@ describe("sequence export request (ADR 052, ADR 053)", () => {
       { id: "A", path: "/a.mp4" },
       { id: "B", path: "/b.mp4" },
     ]);
+    // An adjusted gain (ADR 061) travels in the request. Without one the key is absent.
+    // The preset keeps its own gain (ADR 049).
+    const withGain = { ...preset, audioGainTenthsDb: -10 };
+    const snapshot = structuredClone(withGain);
+    const adjusted = buildSequenceExportRequest({
+      ...options,
+      preset: withGain,
+      checkRevisions: true,
+      adjustedAudioGainTenthsDb: -15,
+    });
+    expect(adjusted?.adjustedAudioGainTenthsDb).toBe(-15);
+    expect(adjusted?.preset).toStrictEqual(snapshot);
+    expect(withGain).toStrictEqual(snapshot);
+    expect(
+      buildSequenceExportRequest({ ...options, checkRevisions: true }),
+    ).not.toHaveProperty("adjustedAudioGainTenthsDb");
     expect(
       buildSequenceExportRequest({ ...options, checkRevisions: true, outputPath: " " }),
     ).toBeNull();

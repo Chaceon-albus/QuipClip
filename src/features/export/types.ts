@@ -96,6 +96,13 @@ export type ExportRequest = {
   /** Required, as `streams` is. No report of the run repeats it. */
   audioMode: ExportAudioMode;
   /**
+   * The gain that the user adjusted in the setup step, in tenths of a decibel (ADR 061). It
+   * replaces the gain of `preset` for this export, and `preset` stays the preset of the settings
+   * file. Absent while the Adjust switch is off. The backend refuses a value outside -200 to 200,
+   * or a value with `audioMode` `copy`, with `invalidAudioGain`.
+   */
+  adjustedAudioGainTenthsDb?: number;
+  /**
    * True when the queue store starts a new batch with this run. The backend journal then drops
    * the runs of the earlier batch that ended, so that the list of the queue for a page that
    * loads again shows only this batch. Absent or false for a run that joins the batch.
@@ -132,6 +139,7 @@ export type ExportSubmission = {
 export const BACKEND_EXPORT_ERROR_CODES = [
   "appDataUnavailable",
   "invalidPreset",
+  "invalidAudioGain",
   "ffmpegPairMissing",
   "ffprobeSpawnFailed",
   "ffprobeProcessFailed",

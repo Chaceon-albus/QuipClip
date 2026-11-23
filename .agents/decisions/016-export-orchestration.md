@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050, ADR 051, ADR 055
+- Amended by: ADR 036, ADR 041, ADR 043, ADR 048, ADR 049, ADR 050, ADR 051, ADR 055, ADR 061
 
 ## Context
 
@@ -233,6 +233,11 @@ reach the interface as a rejection.
 - A dismissal hides the dialog and does not cancel (ADR 025).
 - The thread reports a failure of preparation before it releases the slot. A free slot
   therefore still means that the guards of the run have finished (ADR 017).
+
+(Changed on 2026-11-22.) ADR 061 adds one refusal of the command. A request whose adjusted gain
+is outside the range of the gain of a preset, or that also asks for a copy of the audio, is
+refused at once with `invalidAudioGain`. The command checks it after the preset, before it records
+or submits the run.
 
 ## Consequences
 

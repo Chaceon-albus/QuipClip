@@ -1176,6 +1176,7 @@ export const en = {
   exportError: {
     appDataUnavailable: "The application data directory is unavailable.",
     invalidPreset: "The selected export preset has a setting that is not valid.",
+    invalidAudioGain: "The gain set for this export is not valid.",
     presetNotFound: "The selected export preset was not found.",
     outputAlreadyQueued:
       "Another export that runs or waits writes to this file. Choose another name or folder.",
