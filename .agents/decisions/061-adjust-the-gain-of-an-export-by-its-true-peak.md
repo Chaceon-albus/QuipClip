@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-11-22
 - Deciders: capric98
-- Amends: ADR 016, ADR 017, ADR 024, ADR 036, ADR 048, ADR 049, ADR 054
+- Amends: ADR 016, ADR 017, ADR 024, ADR 036, ADR 043, ADR 048, ADR 049, ADR 054
 
 ## Context
 
@@ -104,7 +104,8 @@ Gain row.
   switches do not.
 
 While the switch is off, the Gain row shows the gain of the preset, read-only. The request then
-carries no gain of its own, and the export does what ADR 054 states. Its commands do not change.
+carries no gain of its own, and the export does what ADR 054 states. The switch does not change
+its commands.
 
 ### The switch and the copy
 
@@ -386,7 +387,10 @@ then becomes slower.
 
 ## Consequences
 
-- With Adjust off, nothing changes. The commands of an export stay the same, byte for byte.
+- With Adjust off, the switch changes nothing. The commands of an export stay the same, byte for
+  byte, except for one change that is not about the gain: the audio process of ADR 043 now writes
+  no metadata of the source (`-map_metadata -1`), because the meter and the encoder must read its
+  WAV header (ADR 043, note of 2026-11-22).
 - The preset editor shows "Gain" in place of "Volume".
 - An export with Adjust on reads the audio of its sources twice: once to measure and once to
   export. For an FLV source, each read also reads the video bytes of the segments.

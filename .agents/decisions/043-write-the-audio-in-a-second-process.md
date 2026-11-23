@@ -4,7 +4,7 @@
 - Date: 2026-10-03
 - Deciders: capric98
 - Amends: ADR 014, ADR 016, ADR 017, ADR 018, ADR 036
-- Amended by: ADR 046, ADR 048, ADR 053, ADR 055
+- Amended by: ADR 046, ADR 048, ADR 053, ADR 055, ADR 061
 
 ## Context
 
@@ -158,6 +158,16 @@ directory of the head. That input is longer than a seeked input, so the command 
 budget of ADR 014 with fewer segments. On the long Windows path of the tests, the audio process
 keeps one input for each segment up to 69 segments, against 77 with `-ss`. ADR 046 gives all the
 counts.
+
+(Changed on 2026-11-22.) The audio output has `-map_metadata -1` before `-c:a`, so the WAV header
+holds no metadata of the source. FFmpeg writes that metadata in a `LIST` chunk before `data`. On a
+pipe, FFmpeg 9.0.2 writes the size of that chunk only when the whole chunk fits in its output
+buffer. A title of 32,700 bytes left the size at `0xFFFFFFFF`, and the WAV demuxer of the encoder
+refused the stream with "no 'data' tag found". The export then failed with `ffmpegProcessFailed`.
+The meter of ADR 061 reads the same stream and has the same need. The test
+`a_real_export_with_video_of_a_source_with_a_long_title_reads_its_audio_pipe` exports such a
+source. The command above shows the audio process as this record first decided it, without
+the option.
 
 ### The encoder
 

@@ -8780,6 +8780,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_real_export_with_video_of_a_source_with_a_long_title_reads_its_audio_pipe() {
+        // ADR 043, as amended by ADR 061. FFmpeg writes the metadata of the source in the `LIST`
+        // chunk of the WAV header of the audio process. On a pipe, a title of 32,700 bytes left
+        // the size of that chunk at 0xFFFFFFFF, and the WAV demuxer of the encoder refused the
+        // stream. The audio process now writes no metadata. The title comes from a metadata file,
+        // because a command line on Windows holds at most 32,767 characters.
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let metadata = directory.path.join("title.txt");
+        fs::write(
+            &metadata,
+            format!(";FFMETADATA1\ntitle={}\n", "x".repeat(32_700)),
+        )
+        .unwrap();
+        let source = directory.path.join("source.mkv");
+        let status = crate::procutil::command_without_console(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=size=160x90:rate=30")
+            .args(["-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000")
+            .arg("-i")
+            .arg(&metadata)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map_metadata",
+                "2",
+                "-t",
+                "4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-c:a",
+                "flac",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let title = |path: &Path| {
+            let answer = crate::procutil::command_without_console(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format_tags=title",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                ])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8(answer.stdout).unwrap().trim().to_owned()
+        };
+        // The source holds the whole title, so the test exercises the long `LIST` chunk.
+        assert_eq!(title(&source), "x".repeat(32_700));
+
+        let output = directory.path.join("out.mkv");
+        let (_, _, samples) = real_gained_export(
+            &ffmpeg,
+            &ffprobe,
+            &directory,
+            &source,
+            ExportStreams::VideoAndAudio,
+            &output,
+            0,
+        );
+        // The segment runs from 1.0 s to 2.5 s.
+        assert_eq!(samples, 72_000);
+        // The output keeps the title: the encoder takes the metadata from the source, not from
+        // the pipe of the audio process.
+        assert_eq!(title(&output), "x".repeat(32_700));
+    }
+
     // -- the copy of the audio: the stream check of an export with video (ADR 048) ---------
 
     /// A run of the one-second sample plan with video that copies its audio, ready for

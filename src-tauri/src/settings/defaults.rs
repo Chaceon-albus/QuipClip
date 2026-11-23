@@ -725,6 +725,8 @@ mod tests {
             "audio.graph",
             "-map",
             "[a]",
+            "-map_metadata",
+            "-1",
             "-c:a",
             "pcm_f32le",
             "-f",

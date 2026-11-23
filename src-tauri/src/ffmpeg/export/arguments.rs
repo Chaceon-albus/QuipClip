@@ -389,6 +389,12 @@ pub fn build_audio_arguments(
     push_inputs(&mut arguments, plan, inputs, false);
     push_pair(&mut arguments, graph.option.flag(), graph.name);
     push_pair(&mut arguments, "-map", "[a]");
+    // No metadata of the source in the WAV header. FFmpeg writes the metadata of the first input,
+    // with its own `ISFT` tag, in a `LIST` chunk. On a pipe it writes the size of that chunk only
+    // when the whole chunk fits in its output buffer. A long title then leaves the size
+    // `0xFFFFFFFF`, and the WAV demuxer of the encoder refuses the stream (ADR 043, as amended by
+    // ADR 061). The `ISFT` tag alone is short.
+    push_pair(&mut arguments, "-map_metadata", "-1");
     push_pair(&mut arguments, "-c:a", AUDIO_PIPE_CODEC);
     push_pair(&mut arguments, "-f", AUDIO_PIPE_FORMAT);
     arguments.push("pipe:1".to_owned());
@@ -1165,6 +1171,8 @@ mod tests {
                 "audio.graph",
                 "-map",
                 "[a]",
+                "-map_metadata",
+                "-1",
                 "-c:a",
                 "pcm_f32le",
                 "-f",
@@ -1192,7 +1200,8 @@ mod tests {
     #[test]
     fn the_audio_process_writes_its_audio_as_wav_to_its_stdout_and_no_progress() {
         // The same inputs as the encoder, the `[a]` of its graph, and 32-bit float PCM in WAV on
-        // stdout. No `-progress pipe:1`, which would write text into that stdout, and no `-y`.
+        // stdout, with no metadata in its header. No `-progress pipe:1`, which would write text
+        // into that stdout, and no `-y`.
         // The stand-in video goes to the `null` muxer, which opens no file.
         let plan = fixture_plan(3);
         let tail = [
@@ -1200,6 +1209,8 @@ mod tests {
             "audio.graph",
             "-map",
             "[a]",
+            "-map_metadata",
+            "-1",
             "-c:a",
             "pcm_f32le",
             "-f",
