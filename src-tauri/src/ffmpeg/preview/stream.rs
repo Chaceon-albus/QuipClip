@@ -14,8 +14,8 @@
 //! credit of the page, so a page that does not append stops the whole chain down to the reads of
 //! the share.
 
-use super::registry::{WindowHandle, CREDIT_LIMIT};
-use crate::ffmpeg::capabilities::smoke::read_capped_tail;
+use super::registry::{reap_by, WindowHandle, CREDIT_LIMIT};
+use crate::ffmpeg::capabilities::smoke::{read_capped_tail, start_thread};
 use crate::flv::locate::DECREASE_LIMIT_MS;
 use crate::flv::scan::TagStream;
 use crate::flv::table::{ConfigTag, KeyframeEntry};
@@ -187,19 +187,56 @@ fn spawn(ffmpeg: &Path, arguments: &[String], piped_stdin: bool) -> io::Result<S
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was requested as piped");
     let stderr = child.stderr.take().expect("stderr was requested as piped");
-    let stderr = thread::spawn(move || read_capped_tail(stderr, STDERR_TAIL));
+    let child = Arc::new(Mutex::new(child));
+    let stderr = match start_thread("preview-stderr", move || {
+        read_capped_tail(stderr, STDERR_TAIL)
+    }) {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            // No reader will reap the process, so it ends here, as in `start_window_thread`. Its
+            // pipes close first, so a process that the kill does not end cannot wait on them.
+            let deadline = Instant::now() + EXIT_WAIT;
+            drop(stdin);
+            drop(stdout);
+            let killed = child
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .kill();
+            if let Err(kill) = killed {
+                eprintln!("preview: the kill of a window process failed: {kill}");
+            }
+            report_unended(reap_by(vec![child], deadline, EXIT_POLL));
+            return Err(error);
+        }
+    };
     Ok(Spawned {
-        child: Arc::new(Mutex::new(child)),
+        child,
         stdin,
         stdout,
         stderr,
     })
 }
 
+/// Report the processes of a window that were not reaped in [`EXIT_WAIT`] on an error path. A
+/// thread of their own reaps them later ([`reap_by`]).
+fn report_unended(count: usize) {
+    if count > 0 {
+        eprintln!(
+            "preview: {count} window processes were not reaped in time; a thread reaps them later"
+        );
+    }
+}
+
 /// Start an FLV window. The remux process takes `remux_arguments`, and the PCM process, when
 /// `pcm` is given, takes its arguments and sends to its own sink. `release` runs after the end
 /// message of the remux output, and `on_finish` runs once, after the writer and both processes
 /// ended.
+///
+/// When this returns an error because a thread of the window did not start, the window ended its
+/// processes first (`start_window_thread`). `release` and `on_finish` then do not run, so the
+/// keyframe sidecar is not saved, and the caller closes the window. A PCM process whose own
+/// reader of stderr does not start only disables the cue, as any PCM process that does not
+/// start.
 #[allow(clippy::too_many_arguments)]
 pub fn start_flv_window(
     ffmpeg: &Path,
@@ -243,38 +280,58 @@ pub fn start_flv_window(
     let draining = Arc::new(AtomicBool::new(false));
     let writer_draining = draining.clone();
     let writer_finisher = finisher.clone();
-    thread::Builder::new()
-        .name("preview-writer".to_owned())
-        .spawn(move || {
-            let outcome = write_slice(&slice, video_stdin, pcm_stdin, &cancel, &writer_draining);
-            let _ = outcome_sender.send(outcome);
-            writer_finisher.part_done();
-        })?;
+    start_window_thread(&handle, "preview-writer", move || {
+        let outcome = write_slice(&slice, video_stdin, pcm_stdin, &cancel, &writer_draining);
+        let _ = outcome_sender.send(outcome);
+        writer_finisher.part_done();
+    })?;
 
     if let Some((spawned, pcm_sink)) = pcm_reader {
-        let handle = handle.clone();
+        let reader_handle = handle.clone();
         let finisher = finisher.clone();
-        thread::Builder::new()
-            .name("preview-pcm".to_owned())
-            .spawn(move || {
-                drain(spawned.stdout, &*pcm_sink, None, &handle);
-                let message = finish_process(spawned.child, spawned.stderr, &handle, None);
-                pcm_sink.end(&message);
-                finisher.part_done();
-            })?;
-    }
-
-    thread::Builder::new()
-        .name("preview-remux".to_owned())
-        .spawn(move || {
-            drain(remux.stdout, &*sink, Some(&handle.credit), &handle);
-            let outcome = wait_for_writer(&outcome_receiver, &draining, &handle);
-            let message = finish_process(remux.child, remux.stderr, &handle, outcome);
-            sink.end(&message);
-            release();
+        start_window_thread(&handle, "preview-pcm", move || {
+            drain(spawned.stdout, &*pcm_sink, None, &reader_handle);
+            let message = finish_process(spawned.child, spawned.stderr, &reader_handle, None);
+            pcm_sink.end(&message);
             finisher.part_done();
         })?;
-    Ok(())
+    }
+
+    let reader_handle = handle.clone();
+    start_window_thread(&handle, "preview-remux", move || {
+        drain(
+            remux.stdout,
+            &*sink,
+            Some(&reader_handle.credit),
+            &reader_handle,
+        );
+        let outcome = wait_for_writer(&outcome_receiver, &draining, &reader_handle);
+        let message = finish_process(remux.child, remux.stderr, &reader_handle, outcome);
+        sink.end(&message);
+        release();
+        finisher.part_done();
+    })
+}
+
+/// Start the thread `name` of the window of `handle`. When the thread does not start, end the
+/// processes of the window before the error returns: send the kill to each, and reap each one
+/// that ends within [`EXIT_WAIT`] ([`WindowHandle::end_within`]).
+///
+/// The readers of a window reap its processes, and a reader that does not start reaps nothing.
+/// The caller closes the window after the error, and that close only sends the kill
+/// ([`WindowHandle::signal`]), so without this reap a process would stay as a zombie. The reap
+/// polls and holds no lock while it waits, so a process that waits for a share delays the error
+/// by about [`EXIT_WAIT`] at most. Such a process goes to a thread that reaps it later, and the
+/// log names it. A thread of the window that already started ends on its own: a reader at the
+/// end of its closed pipe, the writer at its next write or its next check of the cancel flag.
+fn start_window_thread(
+    handle: &WindowHandle,
+    name: &str,
+    body: impl FnOnce() + Send + 'static,
+) -> io::Result<()> {
+    start_thread(name, body)
+        .map(|_| ())
+        .inspect_err(|_| report_unended(handle.end_within(EXIT_WAIT, EXIT_POLL)))
 }
 
 /// The outcome of the writer of a window: within [`EXIT_WAIT`] after the remux output closed,
@@ -311,15 +368,18 @@ pub fn start_seek_window(
 ) -> io::Result<()> {
     let spawned = spawn(ffmpeg, arguments, false)?;
     handle.adopt(spawned.child.clone());
-    thread::Builder::new()
-        .name("preview-seek".to_owned())
-        .spawn(move || {
-            drain(spawned.stdout, &*sink, Some(&handle.credit), &handle);
-            let message = finish_process(spawned.child, spawned.stderr, &handle, None);
-            sink.end(&message);
-            on_finish();
-        })?;
-    Ok(())
+    let reader_handle = handle.clone();
+    start_window_thread(&handle, "preview-seek", move || {
+        drain(
+            spawned.stdout,
+            &*sink,
+            Some(&reader_handle.credit),
+            &reader_handle,
+        );
+        let message = finish_process(spawned.child, spawned.stderr, &reader_handle, None);
+        sink.end(&message);
+        on_finish();
+    })
 }
 
 /// Send the output of a process to `sink` until its stdout closes, under `credit` when one is
@@ -876,6 +936,115 @@ mod tests {
             (seconds - expected).abs() < 0.2,
             "{seconds} s of PCM, {expected} s of video"
         );
+    }
+
+    /// Refuse the start of the thread `name` once both pid files exist, so each process is known
+    /// before the error path ends it.
+    #[cfg(unix)]
+    fn refuse_after_pids(
+        name: &str,
+        pids: &[PathBuf],
+    ) -> crate::ffmpeg::capabilities::smoke::refused::Refusal {
+        use crate::ffmpeg::capabilities::smoke::{pid_child, refused};
+        let pids = pids.to_vec();
+        refused::refuse(name, move || {
+            for pid in &pids {
+                let _ = pid_child::await_pid(pid);
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    fn assert_reaped(pid: &Path, what: &str) {
+        use crate::ffmpeg::capabilities::smoke::pid_child;
+        let pid = pid_child::wait_for_pid(pid);
+        assert!(
+            !pid_child::is_known(pid),
+            "{what} left process {pid} behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stderr_reader_that_does_not_start_kills_and_reaps_the_process() {
+        use crate::ffmpeg::capabilities::smoke::pid_child;
+        let dir = TestDirectory::new();
+        let pid = pid_child::pid_file(&dir.path, "process");
+        let _refusals = refuse_after_pids("preview-stderr", std::slice::from_ref(&pid));
+
+        let error = spawn(
+            Path::new(pid_child::SHELL),
+            &pid_child::arguments(&pid),
+            true,
+        )
+        .err()
+        .expect("a reader that does not start fails the spawn");
+
+        assert!(error.to_string().contains("preview-stderr"), "{error}");
+        assert_reaped(&pid, "the refused stderr reader");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_seek_reader_that_does_not_start_kills_and_reaps_the_process() {
+        use crate::ffmpeg::capabilities::smoke::pid_child;
+        let dir = TestDirectory::new();
+        let pid = pid_child::pid_file(&dir.path, "process");
+        let _refusals = refuse_after_pids("preview-seek", std::slice::from_ref(&pid));
+        let handle = handle();
+
+        let error = start_seek_window(
+            Path::new(pid_child::SHELL),
+            &pid_child::arguments(&pid),
+            handle.clone(),
+            Recorder::new(),
+            Box::new(|| {}),
+        )
+        .expect_err("a reader that does not start fails the window");
+
+        assert!(error.to_string().contains("preview-seek"), "{error}");
+        assert!(handle.is_canceled());
+        assert_reaped(&pid, "the refused seek reader");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_flv_reader_that_does_not_start_kills_and_reaps_both_processes() {
+        use crate::ffmpeg::capabilities::smoke::pid_child;
+        let recording = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        );
+        let dir = TestDirectory::new();
+        let source = write_file(&dir, &recording.bytes);
+        let start = source.head().first_frame_offset;
+        let remux = pid_child::pid_file(&dir.path, "remux");
+        let pcm = pid_child::pid_file(&dir.path, "pcm");
+        // The remux reader starts last, after the writer and the PCM reader.
+        let _refusals = refuse_after_pids("preview-remux", &[remux.clone(), pcm.clone()]);
+        let handle = handle();
+        let pcm_sink = Recorder::new();
+
+        let error = start_flv_window(
+            Path::new(pid_child::SHELL),
+            slice(&source, start, 0, 60_000),
+            &pid_child::arguments(&remux),
+            Some((
+                pid_child::arguments(&pcm),
+                pcm_sink.clone() as Arc<dyn WindowSink>,
+            )),
+            handle.clone(),
+            Recorder::new(),
+            Box::new(|| {}),
+            Box::new(|| {}),
+        )
+        .expect_err("a reader that does not start fails the window");
+
+        assert!(error.to_string().contains("preview-remux"), "{error}");
+        assert!(handle.is_canceled());
+        assert_reaped(&remux, "the refused remux reader");
+        assert_reaped(&pcm, "the refused remux reader");
+        // The PCM reader had started, so it still reports the end of its process.
+        assert_eq!(pcm_sink.wait_end().status, EndStatus::Canceled);
     }
 
     #[test]

@@ -6,14 +6,16 @@
 //! replaces the window of a newer request. The page names a window by its id to acknowledge its
 //! bytes and to close it, so a close that races with the next open never kills the newer one.
 
-use crate::ffmpeg::capabilities::smoke::kill_and_reap;
+use crate::ffmpeg::capabilities::smoke::{kill_and_reap, start_thread};
 use crate::flv::cache::{evict, Revision, SourceCache, KEEP_SOURCES};
 use crate::flv::FlvSource;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The two lanes of a preview. The video lane carries the remux windows, and on FLV also the PCM
 /// of their audio. The audio lane carries the PCM windows of a container that FFmpeg seeks in.
@@ -146,12 +148,100 @@ impl WindowHandle {
         }
     }
 
+    /// Cancel the window, send the kill to its processes, and reap them ([`reap_by`]), with
+    /// `wait` from the start of this call. Returns how many did not end in that time. A window
+    /// whose reader did not start uses this, because no reader then reaps its processes.
+    pub fn end_within(&self, wait: Duration, poll: Duration) -> usize {
+        let deadline = Instant::now() + wait;
+        self.signal();
+        reap_by(self.children(), deadline, poll)
+    }
+
     fn children(&self) -> Vec<Arc<Mutex<Child>>> {
         self.children
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
+}
+
+/// How many polls in a row may fail to read the status of a child before [`reap_later`] stops
+/// asking, as `reap` of the loudness job does. The log then names the last error.
+const REAP_ERRORS: u32 = 100;
+
+/// Reap each of `children` that ends by `deadline`, and give the others to `reap_later`. Returns
+/// how many were not reaped by `deadline`.
+///
+/// Short polls, not a blocking wait. A poll takes the lock of a child only when it is free, and
+/// holds it for one status read, so a [`WindowHandle::signal`] of an exit or a reload, or a reader
+/// of the window that already started, is not held up by this call, and a thread that holds the
+/// lock does not hold up this call past `deadline`. A process that waits for a share can run on
+/// after the kill, and a blocking wait would hold the caller as long as the share does. A status
+/// that cannot be read is read again at the next poll.
+pub fn reap_by(children: Vec<Arc<Mutex<Child>>>, deadline: Instant, poll: Duration) -> usize {
+    let mut running = children;
+    loop {
+        running.retain(|child| !matches!(try_reap(child), Ok(true)));
+        let now = Instant::now();
+        if running.is_empty() || now >= deadline {
+            break;
+        }
+        thread::sleep(poll.min(deadline - now));
+    }
+    let unended = running.len();
+    reap_later(running, poll);
+    unended
+}
+
+/// Reap `children` on a thread of its own, however long they take to end, with the polls of
+/// [`reap_by`]. When the system does not start that thread, the children stay unreaped, and the
+/// log says so.
+fn reap_later(children: Vec<Arc<Mutex<Child>>>, poll: Duration) {
+    if children.is_empty() {
+        return;
+    }
+    let count = children.len();
+    let started = start_thread("preview-reap", move || {
+        let mut running: Vec<(Arc<Mutex<Child>>, u32)> =
+            children.into_iter().map(|child| (child, 0)).collect();
+        while !running.is_empty() {
+            running.retain_mut(|(child, errors)| match try_reap(child) {
+                Ok(reaped) => {
+                    *errors = 0;
+                    !reaped
+                }
+                Err(error) => {
+                    *errors += 1;
+                    let stop = *errors >= REAP_ERRORS;
+                    if stop {
+                        eprintln!(
+                            "preview: the status of a window process cannot be read, so it \
+                             may stay unreaped: {error}"
+                        );
+                    }
+                    !stop
+                }
+            });
+            if !running.is_empty() {
+                thread::sleep(poll);
+            }
+        }
+    });
+    if let Err(error) = started {
+        eprintln!("preview: {count} window processes stay unreaped: {error}");
+    }
+}
+
+/// Reap `child` if it ended. True when it was reaped. A child whose lock another thread holds, as
+/// [`WindowHandle::kill`] does while it waits, counts as not reaped yet, so the poll does not wait
+/// for that lock.
+fn try_reap(child: &Mutex<Child>) -> std::io::Result<bool> {
+    let mut child = match child.try_lock() {
+        Ok(child) => child,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return Ok(false),
+    };
+    child.try_wait().map(|status| status.is_some())
 }
 
 /// A claim on a lane, taken when a request arrives.
@@ -429,7 +519,65 @@ impl PreviewWindows {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_reap_of_the_processes_of_a_window_waits_no_longer_than_its_bound() {
+        use crate::procutil::command_without_console;
+        use std::process::Stdio;
+        let child = command_without_console("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child = Arc::new(Mutex::new(child));
+
+        // A process that does not end by the deadline, as one that waits for a share, does not
+        // hold the call, and the call counts it.
+        let started = Instant::now();
+        let unended = reap_by(
+            vec![child.clone()],
+            started + Duration::from_millis(100),
+            Duration::from_millis(10),
+        );
+        assert_eq!(unended, 1);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // The thread of `reap_later` reaps it when it ends. This test reads no status of the
+        // child, so only that thread can reap it, and the system forgets the pid only then.
+        child.lock().unwrap().kill().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::ffmpeg::capabilities::smoke::pid_child::is_known(pid) {
+            assert!(Instant::now() < deadline, "no one reaped process {pid}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_ends_by_the_deadline_is_reaped_at_once() {
+        use crate::procutil::command_without_console;
+        use std::process::Stdio;
+        let mut child = command_without_console("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.kill().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let unended = reap_by(
+            vec![child.clone()],
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+        );
+        // Zero means that a poll of `reap_by` read the status, which reaps the child.
+        assert_eq!(unended, 0);
+    }
 
     #[test]
     fn a_new_ticket_supersedes_the_older_one_and_cancels_its_locate() {

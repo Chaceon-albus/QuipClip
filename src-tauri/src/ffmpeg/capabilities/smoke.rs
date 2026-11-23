@@ -17,7 +17,7 @@ use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// The timeout for one smoke test.
@@ -284,16 +284,23 @@ pub fn run_with_timeout_in(
         .stderr
         .take()
         .expect("stderr was requested as piped above");
-    let stderr_thread = thread::spawn(move || read_capped(stderr, STDERR_CAPTURE_LIMIT));
+    // A drain thread that does not start kills and reaps the child before the error returns,
+    // ahead of the polling below. A stderr drain that already started is not joined then: it
+    // ends on its own at the end of the closed pipe.
+    let stderr_thread = start_drain(&mut child, "smoke-stderr", move || {
+        read_capped(stderr, STDERR_CAPTURE_LIMIT)
+    })?;
     // Taken before the polling loop, like stderr's, so the drain runs for the whole life of
     // the process rather than starting once it has already filled the pipe and stopped.
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|stdout| thread::spawn(move || read_capped(stdout, STDOUT_CAPTURE_LIMIT)));
+    let stdout_thread = match child.stdout.take() {
+        Some(stdout) => Some(start_drain(&mut child, "smoke-stdout", move || {
+            read_capped(stdout, STDOUT_CAPTURE_LIMIT)
+        })?),
+        None => None,
+    };
 
     // The polling below returns `Result` instead of using `?` directly in this function:
-    // every path here must still end the child and join the drain threads before this
+    // every path out of it must still end the child and join the drain threads before this
     // function returns, including the error paths. A failed `try_wait` that returned early
     // would leave a live, unreaped process holding its pipe ends open, and the joins below
     // would then wait for it with no bound -- the exact failure this timeout exists to
@@ -369,6 +376,173 @@ pub(crate) fn kill_and_reap(child: &mut Child) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     child.wait().map(|_| ())
+}
+
+/// Start the thread `name` that runs `body`.
+///
+/// This is [`thread::Builder::spawn`] with a name. A system that cannot create the thread gives
+/// an error here, where [`thread::spawn`] panics. A test can make this refuse a thread by its name
+/// (`refused::refuse`, which exists only in a test build on Unix).
+pub(crate) fn start_thread<T: Send + 'static>(
+    name: &str,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<JoinHandle<T>> {
+    #[cfg(all(test, unix))]
+    if refused::take(name) {
+        return Err(io::Error::other(format!(
+            "the test refused the thread {name}"
+        )));
+    }
+    thread::Builder::new().name(name.to_owned()).spawn(body)
+}
+
+/// Start the thread `name` that drains a pipe of `child`. When the thread does not start, kill and
+/// reap `child` before the error returns.
+///
+/// A panic or an early return after the spawn must not leave the process behind. On Unix,
+/// dropping a `Child` neither kills nor reaps it, so the process would run on with its pipes open,
+/// or stay as a zombie. A drain thread of the same child that already started is not joined: it
+/// ends on its own when the kill closes the pipe that it reads, and the caller reports the error
+/// and needs no output.
+pub(crate) fn start_drain<T: Send + 'static>(
+    child: &mut Child,
+    name: &str,
+    body: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<JoinHandle<T>> {
+    start_thread(name, body).inspect_err(|_| {
+        // The caller reports the error of the thread. The kill only ends the process, so its own
+        // result has nowhere to go, as on the failed-`try_wait` path of the runners.
+        let _ = kill_and_reap(child);
+    })
+}
+
+/// The threads that [`start_thread`] refuses, for the tests of a system that cannot create a
+/// thread. A refusal holds for the thread of the test that set it, so parallel tests do not see it.
+/// Only the Unix tests use it.
+#[cfg(all(test, unix))]
+pub(crate) mod refused {
+    use std::cell::{Cell, RefCell};
+    use std::marker::PhantomData;
+
+    type Before = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static REFUSED: RefCell<Vec<(u64, String, Before)>> = const { RefCell::new(Vec::new()) };
+        static NEXT_ID: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Refuse the next start of the thread `name` on this thread. `before` runs in place of the
+    /// start, before the error returns. The refusal ends when the returned guard drops, if no
+    /// start used it before.
+    pub(crate) fn refuse(name: &str, before: impl FnOnce() + 'static) -> Refusal {
+        let id = NEXT_ID.with(|next| {
+            let id = next.get();
+            next.set(id + 1);
+            id
+        });
+        REFUSED.with(|refused| {
+            refused
+                .borrow_mut()
+                .push((id, name.to_owned(), Box::new(before)))
+        });
+        Refusal {
+            id,
+            thread: PhantomData,
+        }
+    }
+
+    /// Whether the start of the thread `name` is refused. A refusal is used once.
+    pub(super) fn take(name: &str) -> bool {
+        let taken = REFUSED.with(|refused| {
+            let mut refused = refused.borrow_mut();
+            let index = refused.iter().position(|(_, refused, _)| refused == name)?;
+            Some(refused.remove(index).2)
+        });
+        match taken {
+            Some(before) => {
+                before();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Removes its refusal when it drops. It stays on the thread that set the refusal, because
+    /// the refusals of each thread are its own.
+    pub(crate) struct Refusal {
+        id: u64,
+        thread: PhantomData<*const ()>,
+    }
+
+    impl Drop for Refusal {
+        fn drop(&mut self) {
+            REFUSED.with(|refused| refused.borrow_mut().retain(|(id, _, _)| *id != self.id));
+        }
+    }
+}
+
+/// A process for the tests of the paths that must kill and reap a child: a shell that writes its
+/// pid to a file and then becomes `sleep 30`.
+#[cfg(all(test, unix))]
+pub(crate) mod pid_child {
+    use crate::procutil::command_without_console;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    pub(crate) const SHELL: &str = "/bin/sh";
+
+    /// The arguments of [`SHELL`]: write the pid to `pid`, then sleep. The path goes to the shell
+    /// as an argument, so no character of it needs quoting. The pid file appears whole, by a
+    /// rename, so a reader never sees a part of it.
+    pub(crate) fn arguments(pid: &Path) -> Vec<String> {
+        vec![
+            "-c".to_owned(),
+            r#"echo $$ > "$1.partial" && mv "$1.partial" "$1" && exec sleep 30"#.to_owned(),
+            "sh".to_owned(),
+            pid.to_string_lossy().into_owned(),
+        ]
+    }
+
+    /// The pid file of `name` in `directory`.
+    pub(crate) fn pid_file(directory: &Path, name: &str) -> PathBuf {
+        directory.join(format!("{name}.pid"))
+    }
+
+    /// The pid that the process wrote, or `None` when it wrote none within 10 s. A refusal hook
+    /// calls this, so a slow process makes the test fail after the error path ran, not inside
+    /// it.
+    pub(crate) fn await_pid(pid: &Path) -> Option<u32> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(pid) {
+                return text.trim().parse().ok();
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Wait until the process wrote its pid, and return the pid.
+    pub(crate) fn wait_for_pid(pid: &Path) -> u32 {
+        await_pid(pid).expect("the process did not write its pid")
+    }
+
+    /// Whether the system still knows the process `pid`. A zombie, a process that ended but that
+    /// no one reaped, is still known: `kill -0` succeeds for it.
+    pub(crate) fn is_known(pid: u32) -> bool {
+        command_without_console(SHELL)
+            .args(["-c", &format!("kill -0 {pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the shell should run")
+            .success()
+    }
 }
 
 /// Read `reader` to end of stream, retaining only the first `cap` bytes.
@@ -788,6 +962,39 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "expected the timeout to fire well before ping finishes, took {elapsed:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_drain_thread_that_does_not_start_kills_and_reaps_the_process() {
+        // The second name refuses the stdout drain after the stderr drain started, so the run
+        // also leaves a started thread to end on its own.
+        for name in ["smoke-stderr", "smoke-stdout"] {
+            let directory = crate::flv::test_support::TestDirectory::new();
+            let pid_path = pid_child::pid_file(&directory.path, "shell");
+            let _refusals = {
+                let pid_path = pid_path.clone();
+                refused::refuse(name, move || {
+                    let _ = pid_child::await_pid(&pid_path);
+                })
+            };
+
+            let error = run_with_timeout(
+                Path::new(pid_child::SHELL),
+                &pid_child::arguments(&pid_path),
+                Duration::from_secs(30),
+                Duration::from_millis(10),
+                StdoutCapture::Capture,
+            )
+            .expect_err("a drain thread that does not start fails the run");
+
+            assert!(error.to_string().contains(name), "{error}");
+            let pid = pid_child::wait_for_pid(&pid_path);
+            assert!(
+                !pid_child::is_known(pid),
+                "the refused {name} left process {pid} behind"
+            );
+        }
     }
 
     #[test]

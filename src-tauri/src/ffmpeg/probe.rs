@@ -1,7 +1,7 @@
 //! ffprobe execution and normalization for imported media, and for the finished file of an
 //! export that writes no video ([`probe_output_audio`]).
 
-use crate::ffmpeg::capabilities::smoke::{kill_and_reap, read_capped};
+use crate::ffmpeg::capabilities::smoke::{kill_and_reap, read_capped, start_drain};
 use crate::procutil::command_without_console;
 use crate::time::{format_seconds, pts_seconds, FrameCount, Pts, Rational, TickCount};
 use serde::{Deserialize, Serialize};
@@ -1950,8 +1950,13 @@ fn finish_probe_run_with<T>(
 /// correctness requirement, not an optimization: a child that fills either pipe's operating
 /// system buffer blocks in its own write and never exits, and an undrained pipe would then
 /// produce a false timeout. Killing the child closes both of its ends, so the two joins at
-/// the end are bounded on every path: `kill_and_reap` runs on each exit from the polling
-/// loop that did not already collect the child's status.
+/// the end are bounded on every path through the polling loop: `kill_and_reap` runs on each
+/// exit from that loop that did not already collect the child's status.
+///
+/// A drain thread that the system does not start ends the run before the polling loop, with
+/// the error of the thread. The child is killed and reaped first, as `start_drain` states. A
+/// stdout drain that already started is not joined then: it ends on its own at the end of the
+/// closed pipe.
 ///
 /// `cancel`, when the caller passes one, is read at every poll, after the exit status and before
 /// the deadline. A set flag ends the child as the deadline does, and the run reports
@@ -1978,12 +1983,18 @@ fn run_probe_process(
         .stderr
         .take()
         .expect("stderr was requested as piped above");
-    let stdout_thread = thread::spawn(move || read_capped(stdout, STDOUT_CAPTURE_LIMIT));
-    let stderr_thread = thread::spawn(move || read_capped(stderr, STDERR_CAPTURE_LIMIT));
+    // A drain thread that does not start kills and reaps the child before the error returns. A
+    // stdout drain that already started then ends on its own at the end of the closed pipe.
+    let stdout_thread = start_drain(&mut child, "probe-stdout", move || {
+        read_capped(stdout, STDOUT_CAPTURE_LIMIT)
+    })?;
+    let stderr_thread = start_drain(&mut child, "probe-stderr", move || {
+        read_capped(stderr, STDERR_CAPTURE_LIMIT)
+    })?;
 
     // The polling below returns its `Result` rather than using `?` in this function, so that
-    // every path -- the error paths included -- still ends the child and joins both drain
-    // threads before this function returns. A failed `try_wait` that returned early would
+    // every path out of it -- the error paths included -- still ends the child and joins both
+    // drain threads before this function returns. A failed `try_wait` that returned early would
     // leave a live, unreaped `ffprobe` holding both pipes open, and because `read_capped`
     // reads until the pipe closes, the joins below would then wait for that child with no
     // bound at all. On Unix, dropping a `Child` neither kills nor reaps it, so nothing later
@@ -3412,6 +3423,42 @@ mod tests {
             panic!("the process exited on its own, got {:?}", run.end);
         };
         assert!(!exit.success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_drain_thread_that_does_not_start_kills_and_reaps_the_probe() {
+        use crate::ffmpeg::capabilities::smoke::{pid_child, refused};
+
+        // The second name refuses the stderr drain after the stdout drain started.
+        for name in ["probe-stdout", "probe-stderr"] {
+            let directory = crate::flv::test_support::TestDirectory::new();
+            let pid_path = pid_child::pid_file(&directory.path, "shell");
+            let _refusals = {
+                let pid_path = pid_path.clone();
+                refused::refuse(name, move || {
+                    let _ = pid_child::await_pid(&pid_path);
+                })
+            };
+            let arguments = pid_child::arguments(&pid_path);
+            let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+
+            let error = run_probe_process(
+                Path::new(pid_child::SHELL),
+                &arguments,
+                Duration::from_secs(30),
+                Duration::from_millis(10),
+                None,
+            )
+            .expect_err("a drain thread that does not start fails the run");
+
+            assert!(error.to_string().contains(name), "{error}");
+            let pid = pid_child::wait_for_pid(&pid_path);
+            assert!(
+                !pid_child::is_known(pid),
+                "the refused {name} left process {pid} behind"
+            );
+        }
     }
 
     #[cfg(unix)]
