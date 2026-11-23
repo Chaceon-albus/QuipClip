@@ -296,6 +296,21 @@ measurement is the highest true peak of the channels.
 - The meter runs in Rust, not in FFmpeg. QuipClip does not bundle FFmpeg (ADR 005). A meter in Rust
   gives the same values with each build of FFmpeg that a user installs.
 
+(Changed on 2026-11-22.) The implementation of the meter found these rules:
+
+- Above 48000 Hz, FFmpeg writes a mask also for 1 and 2 channels: the centre for mono, and left
+  and right for stereo. The meter then gets these positions, and their weights are the weights of
+  the default order.
+- A sample that is NaN or infinite ends the measurement with `invalidAudio`. FFmpeg passes such
+  values through float PCM. A NaN would stay in the filters of the loudness, and an infinity would
+  hide every other peak.
+- The interpolator of the true peak gives its output some frames late. At the end of the stream,
+  the meter reads the integrated loudness, and then gives the interpolator 64 frames of silence.
+  So the peaks between the last samples count, as they do for a player that reaches the end.
+- The meter forms its blocks of 400 ms from a step of 100 ms that it rounds to whole frames. At a
+  rate that is not a multiple of 10 Hz, a block can differ from 400 ms by up to 2 frames. The
+  change of the loudness is much less than 0.1 LU, so QuipClip keeps the blocks of the meter.
+
 **Messages.** The channel carries JSON messages:
 
 - A progress message, at most 4 times each second: the duration of the audio that the job read,

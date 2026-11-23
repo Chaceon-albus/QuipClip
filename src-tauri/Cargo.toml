@@ -47,6 +47,13 @@ sha2 = "0.10"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 zip = { version = "9.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+# The meter of ITU-R BS.1770-4 that measures the integrated loudness and the true peak of the audio
+# of an export (ADR 061). A meter in Rust gives the same values with each build of FFmpeg that a
+# user installs, and needs no parse of the FFmpeg log. `ebur128` is a pure Rust port of libebur128
+# under the MIT license, with no C build step. Of its four dependencies, `bitflags` 1 and
+# `smallvec` are already in the lock file, so it adds `dasp_frame` and `dasp_sample`, pure Rust too.
+ebur128 = "0.1"
+
 # The measurement of the macOS window buttons at startup (`traffic_lights.rs`, ADR 020). It
 # reads the frame of the standard close button through AppKit. tauri, tao and wry already
 # depend on these three crates at these versions, so the lock file gains no package. The
