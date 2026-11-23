@@ -265,11 +265,12 @@ pub(crate) fn command_line_length(arguments: &[String]) -> usize {
 /// otherwise.
 ///
 /// A plan with video that copies its audio ([`ExportPlan::separate_copy_process`]) opens
-/// `-f nut -i pipe:0` in the same place, maps `-map <n>:a`, and writes `-c:a copy` after the video
-/// flags, with `-bsf:a aac_adtstoasc` for AAC from MPEG-TS (ADR 048). Its graph is the graph of a
-/// plan without audio, and the command carries no output `-ss`, `-to`, `-t` or `-shortest`: the
-/// copy process ends the stream, and the encoder reads `pipe:0` to its end. A plan without video
-/// that copies its audio has no graph, and [`build_copy_arguments`] writes its command.
+/// `-f nut -i pipe:0` in the same place, maps `-map <n>:a`, takes the tags of that stream from
+/// the stream of the source (`-map_metadata:s:a:0 0:s:<index>`), and writes `-c:a copy` after the
+/// video flags, with `-bsf:a aac_adtstoasc` for AAC from MPEG-TS (ADR 048). Its graph is the graph
+/// of a plan without audio, and the command carries no output `-ss`, `-to`, `-t` or `-shortest`:
+/// the copy process ends the stream, and the encoder reads `pipe:0` to its end. A plan without
+/// video that copies its audio has no graph, and [`build_copy_arguments`] writes its command.
 ///
 /// `-b:a <n>k` follows `-c:a` directly when the audio part also carries a
 /// [`super::PlannedAudio::bitrate`] (ADR 023). [`Quality`] still describes the video stream
@@ -336,6 +337,18 @@ pub fn build_arguments(
         push_pair(&mut arguments, "-map", &audio);
     } else if plan.separate_copy_process() {
         push_pair(&mut arguments, "-map", &format!("{inputs}:a"));
+        // The tags of the copied stream come from the stream of the source, not from the pipe.
+        // The NUT demuxer reads no tag value of 1024 bytes or more, and it then drops that tag and
+        // each later tag of the stream (ADR 048, changed on 2026-11-23). A plan that copies has
+        // one piece, so input 0 is its source, opened as the copy process opens it.
+        debug_assert_eq!(inputs, 1, "a plan that copies its audio has one input");
+        if let Some(copied) = plan.copied_audio.as_ref() {
+            push_pair(
+                &mut arguments,
+                "-map_metadata:s:a:0",
+                &format!("0:s:{}", copied.stream_index),
+            );
+        }
     }
 
     push_encoder_arguments(&mut arguments, plan.video.as_ref(), plan.audio.as_ref());
@@ -493,9 +506,9 @@ pub enum CopyOutput<'a> {
 ///
 /// For [`CopyOutput::Pipe`], the flags are those of the audio process of ADR 043, and the command
 /// writes NUT to its stdout: no `-progress pipe:1`, which would write text into that stdout, and no
-/// `-y`. The encoder ([`build_arguments`]) reads the stream as `pipe:0`, and its own command
-/// converts AAC from ADTS where the plan asks, because the muxer of the output file needs the
-/// result.
+/// `-y`. It copies no tags of the source (`-map_metadata -1`). The encoder ([`build_arguments`])
+/// reads the stream as `pipe:0`, takes the tags of the stream from the source, and converts AAC
+/// from ADTS where the plan asks, because the muxer of the output file needs the result.
 ///
 /// For [`CopyOutput::File`], the command is the whole export of a plan without video: the flags of
 /// every export command, the conversion from ADTS, and the muxer of an audio-only export
@@ -541,7 +554,13 @@ pub fn build_copy_arguments(plan: &ExportPlan, output: CopyOutput<'_>) -> Option
         &format!("0:{}", copied.stream_index),
     );
     match output {
-        CopyOutput::Pipe => push_pair(&mut arguments, "-c:a", COPY_CODEC),
+        CopyOutput::Pipe => {
+            // No tags of the source on the pipe. The encoder takes the tags of the stream from the
+            // source ([`build_arguments`]), and a tag value of 1024 bytes or more would only make
+            // the NUT demuxer of the encoder write an error (ADR 048, changed on 2026-11-23).
+            push_pair(&mut arguments, "-map_metadata", "-1");
+            push_pair(&mut arguments, "-c:a", COPY_CODEC);
+        }
         CopyOutput::File(_) => push_copy_codec(&mut arguments, copied),
     }
     push_pair(&mut arguments, "-ss", &render_time(copied.start));
@@ -3897,7 +3916,8 @@ mod tests {
     fn the_copy_process_writes_the_cut_packets_as_nut_to_its_stdout() {
         // The input of the encoder, the stream by its absolute index, and the cut as an output
         // `-ss` and `-to` at the absolute In and Out points. The flags of the audio process: no
-        // `-progress pipe:1` and no `-y`. No graph, and no conversion from ADTS, which the encoder
+        // `-progress pipe:1` and no `-y`. No tags of the source on the pipe, because the encoder
+        // takes them from the source. No graph, and no conversion from ADTS, which the encoder
         // writes.
         assert_eq!(
             copy_process(&adts_copy_plan(Container::Mp4)),
@@ -3914,6 +3934,8 @@ mod tests {
                 "/media/source.mp4",
                 "-map",
                 "0:2",
+                "-map_metadata",
+                "-1",
                 "-c:a",
                 "copy",
                 "-ss",
@@ -3930,7 +3952,8 @@ mod tests {
     #[test]
     fn the_encoder_of_a_copy_process_copies_the_audio_of_its_stdin() {
         // The graph is the graph of a plan without audio, the pipe is NUT, and the audio is
-        // copied. Nothing cuts the output of the encoder: the copy process ends the stream.
+        // copied, with the tags of its stream in the source (stream 2 of input 0). Nothing cuts
+        // the output of the encoder: the copy process ends the stream.
         assert_eq!(
             arguments(&copy_plan(Container::Mp4), Inputs::PerPiece),
             vec![
@@ -3957,6 +3980,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_metadata:s:a:0",
+                "0:s:2",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -4084,10 +4109,13 @@ mod tests {
         copied.start = Rational::new(0, 1).unwrap();
         copied.end = Rational::new(5, 1).unwrap();
         assert_eq!(
-            copy_process(&plan)[5..13],
-            ["-copyts", "-i", SOURCE, "-map", "0:2", "-c:a", "copy", "-ss"]
+            copy_process(&plan)[5..10],
+            ["-copyts", "-i", SOURCE, "-map", "0:2"]
         );
-        assert_eq!(copy_process(&plan)[13..16], ["0", "-to", "5"]);
+        assert_eq!(
+            copy_process(&plan)[12..18],
+            ["-c:a", "copy", "-ss", "0", "-to", "5"]
+        );
     }
 
     #[test]

@@ -8513,11 +8513,33 @@ pub(crate) mod tests {
         streams: ExportStreams,
         output: &Path,
     ) -> (String, usize) {
+        real_copy_in(
+            ffmpeg,
+            ffprobe,
+            directory,
+            source,
+            streams,
+            output,
+            Container::Mp4,
+        )
+    }
+
+    /// [`real_copy`] with a preset of `container`.
+    fn real_copy_in(
+        ffmpeg: &Path,
+        ffprobe: &Path,
+        directory: &TestDirectory,
+        source: &Path,
+        streams: ExportStreams,
+        output: &Path,
+        container: Container,
+    ) -> (String, usize) {
         let probe = ffmpeg::probe_media(ffprobe, source).unwrap();
         let tb = probe.video_time_base;
         let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
         // An encode would write AC-3, so AAC in the output can only be the copy.
         let mut preset = sample_preset("active");
+        preset.container = container;
         preset.audio_encoder = "ac3".to_owned();
         preset.quality = Quality {
             kind: QualityKind::Crf,
@@ -8650,6 +8672,124 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_real_copy_with_video_keeps_a_long_title_of_the_audio_stream() {
+        // ADR 048, as changed on 2026-11-23. The copy process sent the tags of the source stream
+        // through the NUT pipe. The NUT demuxer of the encoder reads no tag value of 1024 bytes or
+        // more: it wrote "get_str failed while decoding info header", and the output lost that tag
+        // and each tag after it, while the export still succeeded. The encoder now takes the tags
+        // of the copied stream from the source. The title comes from a metadata file, because a
+        // command line on Windows holds at most 32,767 characters.
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let metadata = directory.path.join("title.txt");
+        fs::write(
+            &metadata,
+            format!(";FFMETADATA1\n[STREAM]\ntitle={}\n", "x".repeat(32_700)),
+        )
+        .unwrap();
+        let source = directory.path.join("source.mkv");
+        let status = crate::procutil::command_without_console(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg("testsrc2=size=160x90:rate=30")
+            .args(["-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:sample_rate=48000")
+            .arg("-i")
+            .arg(&metadata)
+            .args([
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map_metadata:s:a:0",
+                "2:s:0",
+                "-metadata:s:a:0",
+                "language=jpn",
+                // Matroska stores this tag after the title, so the test also sees the loss of the
+                // tags that follow the long one.
+                "-metadata:s:a:0",
+                "comment=after the title",
+                "-t",
+                "4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // The title, the language and the comment of the audio stream of `path`. Matroska writes
+        // the comment as `COMMENT`, so the keys compare without case.
+        let tags = |path: &Path| {
+            let answer = crate::procutil::command_without_console(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a",
+                    "-show_entries",
+                    "stream_tags=title,language,comment",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                ])
+                .arg(path)
+                .output()
+                .unwrap();
+            let text = String::from_utf8(answer.stdout).unwrap();
+            let value = |key: &str| {
+                text.lines().find_map(|line| {
+                    let (name, value) = line.strip_prefix("TAG:")?.split_once('=')?;
+                    name.eq_ignore_ascii_case(key).then(|| value.to_owned())
+                })
+            };
+            (value("title"), value("language"), value("comment"))
+        };
+        // The source holds the whole title, so the test exercises the long tag.
+        let expected = (
+            Some("x".repeat(32_700)),
+            Some("jpn".to_owned()),
+            Some("after the title".to_owned()),
+        );
+        assert_eq!(tags(&source), expected);
+
+        let output = directory.path.join("out.mkv");
+        let (codec, packets) = real_copy_in(
+            &ffmpeg,
+            &ffprobe,
+            &directory,
+            &source,
+            ExportStreams::VideoAndAudio,
+            &output,
+            Container::Mkv,
+        );
+        assert_eq!(codec, "aac");
+        assert!((69..=72).contains(&packets), "{packets} packets");
+        let (title, language, comment) = tags(&output);
+        assert_eq!(
+            title.as_ref().map(String::len),
+            Some(32_700),
+            "the title of the audio stream"
+        );
+        assert_eq!((title, language, comment), expected);
     }
 
     /// Export `source` from 1.0 s to 2.5 s to `output` with the gain `tenths_db`, encoding FLAC

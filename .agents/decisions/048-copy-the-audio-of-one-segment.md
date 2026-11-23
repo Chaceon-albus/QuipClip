@@ -208,6 +208,21 @@ The encoder renders the graph of an export without audio. It reads the pipe as
 `-bsf:a aac_adtstoasc` for the AAC of an MPEG-TS source. The encoder has no output `-ss`,
 `-to`, `-t` or `-shortest`. It reads the pipe to its end.
 
+(Changed on 2026-11-23.) The copy process has `-map_metadata -1` before `-c:a`, so it copies no
+tags of the source to the pipe. The encoder has `-map_metadata:s:a:0 0:s:<audio stream>`, so
+the audio stream of the output takes its tags from the stream of the source. Input 0 of the
+encoder is that source, because a copy has one piece. The commands above show the two processes
+as this record first decided them.
+
+This measurement with FFmpeg 9.0.2 on macOS caused the change. The NUT demuxer read a tag value
+of 1023 bytes, and it refused a value of 1024 bytes. It then wrote "get_str failed while
+decoding info header", and it lost that tag and each later tag of the same stream. Both
+processes still exited with 0. With an audio title of 32,700 bytes, a Matroska output had no
+title. The test `a_real_copy_with_video_keeps_a_long_title_of_the_audio_stream` exports such a
+source to Matroska. A MOV output writes a handler name of more than 255 bytes into a `hdlr` atom
+whose length byte is wrong. The pipe already carried names of 256 to 1023 bytes to that atom.
+Since this change, longer names also reach it.
+
 Without video, one `ffmpeg` copies the audio into the reserved file. It has no graph:
 
 ```
