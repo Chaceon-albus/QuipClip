@@ -215,9 +215,9 @@ pub(crate) fn command_line_length(arguments: &[String]) -> usize {
 /// `graph` names the file in the work directory that holds the string [`encoder_graph`] returned
 /// for these same `inputs` (ADR 055). The command carries the option of the probe and the name of the
 /// file, as two arguments, and never the graph itself. `output` is the reserved temporary path
-/// [`super::output::PendingOutput::path`] returns, **not** [`ExportPlan::destination`]: ffmpeg
-/// writes the reservation, and the rename that publishes the destination happens after this
-/// process has exited.
+/// [`super::output::PendingOutput::path`] returns, **not** the destination of the export, which the
+/// plan does not hold: ffmpeg writes the reservation, and the rename that publishes the
+/// destination happens after this process has exited.
 ///
 /// The vector excludes the executable itself. [`super::process::ExportProcessRequest`] carries
 /// the ffmpeg path separately, exactly as [`std::process::Command`] does.
@@ -1009,7 +1009,6 @@ mod tests {
         let frames = 6 + 12 * (count - 1);
         ExportPlan {
             sources: vec![source_at(SOURCE, 1, 2, 44_100)],
-            destination: PathBuf::from("/export/out.mp4"),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
                 canvas: None,
@@ -1818,7 +1817,6 @@ mod tests {
     fn the_mov_container_selects_the_mov_muxer_and_keeps_faststart() {
         let mut plan = fixture_plan(1);
         plan.container = Container::Mov;
-        plan.destination = PathBuf::from("/export/out.mov");
         assert_eq!(
             arguments(&plan, Inputs::PerPiece),
             vec![
@@ -1869,7 +1867,6 @@ mod tests {
         // the matroska muxer is an unknown option, not a no-op.
         let mut plan = fixture_plan(1);
         plan.container = Container::Mkv;
-        plan.destination = PathBuf::from("/export/out.mkv");
         assert_eq!(
             arguments(&plan, Inputs::PerPiece),
             vec![
@@ -2077,7 +2074,6 @@ mod tests {
         // pinned against the end of the vector as well as against the `-c:a` in front of it.
         let mut plan = fixture_plan(3);
         plan.container = Container::Mkv;
-        plan.destination = PathBuf::from("/export/out.mkv");
         // 510 kbps, not the settings maximum: libopus refuses more than 256 kbps for each
         // channel, and 510 kbps is valid for stereo.
         audio_mut(&mut plan).encoder = "libopus".to_owned();
@@ -2744,8 +2740,8 @@ mod tests {
         // without `-y`, ffmpeg refuses to touch the reserved file and still exits zero, so a
         // caller reading the exit status alone publishes zero bytes over the user's video;
         // without `-f`, the `.tmp-<pid>-<sequence>` suffix leaves ffmpeg no extension to infer
-        // a muxer from. The last argument must be the reservation, and the destination must not
-        // appear at all: ffmpeg never writes the published path.
+        // a muxer from. The last argument must be the reservation. ffmpeg never writes the
+        // published path: the plan does not hold it, so the builder cannot name it.
         for (plan, shape) in guard_matrix() {
             let arguments = arguments(&plan, shape);
             assert!(arguments.iter().any(|argument| argument == "-y"));
@@ -2759,8 +2755,6 @@ mod tests {
                 "mp4" | "mov" | "matroska"
             ));
             assert_eq!(arguments.last().map(String::as_str), Some(OUTPUT));
-            let destination = plan.destination.to_string_lossy().into_owned();
-            assert!(!arguments.contains(&destination), "{arguments:?}");
         }
     }
 
@@ -2917,9 +2911,6 @@ mod tests {
         });
         ExportPlan {
             sources: vec![source],
-            destination: PathBuf::from(
-                r"C:\Users\alexandra.whitfield\Videos\Exports\grand-final-highlights.mp4",
-            ),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(
                     Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),
@@ -3163,7 +3154,6 @@ mod tests {
             .collect();
         ExportPlan {
             sources: vec![widest_source(".mkv")],
-            destination: PathBuf::from(longest_windows_path(".mp4")),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(
                     Rational::new(30_000, 1_001).expect("30000/1001 is a valid rate"),

@@ -1310,7 +1310,6 @@ mod tests {
                 audio: Some(fixture_stream(2, 44_100)),
                 flv_input: None,
             }],
-            destination: PathBuf::from("/export/out.mp4"),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(Rational::new(25, 1).unwrap()),
                 canvas: None,
@@ -2161,7 +2160,7 @@ mod tests {
                     probe: &probe,
                     audio_frames: &crate::ffmpeg::AudioFrames::default(),
                 }],
-                destination,
+                destination: Some(destination),
                 segments: &segments,
                 preset: &preset,
                 streams,
@@ -2834,7 +2833,6 @@ mod tests {
                     flv_input: None,
                 },
             ],
-            destination: PathBuf::from("/export/out.mp4"),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(Rational::new(60, 1).unwrap()),
                 canvas: Some(Resolution { w: 1920, h: 1080 }),

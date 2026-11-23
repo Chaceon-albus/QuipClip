@@ -4,7 +4,7 @@
 //! `build_plan` is pure: every fact it needs about a real path reaches it through an injected
 //! `impl Fn(&Path) -> PathFacts`, so its own tests drive the whole ADR 014 preflight from a fixed
 //! table and never touch disk. [`inspect_path`] is the implementation the renderer passes:
-//! `commands::export::prepare_export_with` hands it to `build_plan` on every export. It is a plain
+//! `commands::export::prepare_plan_with` hands it to `build_plan` on every export. It is a plain
 //! function rather than a closure, and it coerces to that `impl Fn` bound at the call site. It is
 //! the only code in the export pipeline that reads the filesystem on the plan's behalf, and the
 //! only place a [`PathIdentity`] is ever produced.

@@ -68,8 +68,10 @@ pub struct PlanSource<'a> {
 pub struct PlanRequest<'a> {
     /// The sources of the pieces, in the order of their first piece. Every source has a piece.
     pub sources: &'a [PlanSource<'a>],
-    /// The final output location. Must also be an absolute path.
-    pub destination: &'a Path,
+    /// The final output location. Must also be an absolute path. `None` for a request that
+    /// writes no file, such as the measurement of the audio of an export (ADR 061): the plan
+    /// then skips the checks of the output path (checks 7 to 11 of [`build_plan`]).
+    pub destination: Option<&'a Path>,
     /// The requested pieces, in concat order.
     pub segments: &'a [SegmentBoundary],
     /// The export preset selecting the container, the encoders, the quality, and the two
@@ -197,6 +199,10 @@ pub enum PathFacts {
 ///     [`ExportErrorCode::OutputEqualsSource`].
 /// 11. `destination` exists as a regular file the user protected against writing --
 ///     [`ExportErrorCode::OutputReadOnly`].
+///
+///     Checks 7 to 11 run only when the request has a destination. A request with no
+///     destination ([`PlanRequest::destination`] is `None`) writes no file, and every other
+///     check runs for it as for an export.
 /// 12. The export writes video ([`ExportStreams::writes_video`]), and the preset's frame rate
 ///     is [`FrameRateSetting::Source`] but no source has a valid `avg_frame_rate` or
 ///     `r_frame_rate`, or the resolved rate is not strictly positive --
@@ -322,71 +328,10 @@ pub fn build_plan(
         }
     }
 
-    let destination = request.destination;
-    if destination_path_is_invalid(destination) {
-        return Err(ExportErrorCode::OutputPathInvalid);
-    }
-    let parent = destination
-        .parent()
-        .expect("destination_path_is_invalid rejected a destination with no parent");
-    if !matches!(inspect(parent), PathFacts::Directory) {
-        return Err(ExportErrorCode::OutputDirectoryMissing);
-    }
-
-    let destination_facts = inspect(destination);
-    // The renderer reserves a temporary file beside the destination
-    // (`fsutil::reserve_temporary_path`), lets ffmpeg write into it, and then renames that
-    // file over the destination (`PendingOutput::commit`, which calls `commit_within`, which
-    // calls `fsutil::replace_file_within` with `EXPORT_PUBLISH_BUDGET`). A rename cannot replace a
-    // directory with a regular file (`EISDIR` on Unix; `MoveFileEx` with
-    // `MOVEFILE_REPLACE_EXISTING` is documented to fail on a directory target on Windows),
-    // and a device node, a socket, or a named pipe is not a file the renderer can rename
-    // over either. The reservation only touches the destination's *parent*, so it would
-    // still succeed here, and the whole encode -- potentially minutes of it -- would run
-    // before the final rename failed. Reject the destination now instead, which is what
-    // this preflight exists for. There is no dedicated code for this case:
-    // `OutputPathInvalid` already means "the destination is not a usable output file
-    // path," whichever way the path is unusable.
-    match destination_facts {
-        PathFacts::Directory | PathFacts::Other => return Err(ExportErrorCode::OutputPathInvalid),
-        PathFacts::Absent | PathFacts::File { .. } => {}
-    }
-
-    // Any source, not only the first: the rename would replace whichever source the destination
-    // names.
-    let same_identity = matches!(
-        destination_facts,
-        PathFacts::File { identity, .. } if source_identities.contains(&identity)
-    );
-    if sources.iter().any(|source| source.path == destination) || same_identity {
-        return Err(ExportErrorCode::OutputEqualsSource);
-    }
-
-    // The same argument as the check above, for the other file the rename can refuse. ADR 015
-    // makes `fsutil::replace_file_within` refuse to replace a destination the user protected,
-    // on both platforms, and `PendingOutput::commit`'s own documentation asks a planning stage
-    // to reject such a destination ahead of the render. This is that stage: without the check
-    // here, a user who protected their output file waits out the whole encode and then reads
-    // `outputRenameFailed`, and the cleanup guard deletes the render on the way out.
-    //
-    // `read_only` is the very attribute the replacement guard reads, taken from the
-    // destination's own final component, so the preflight and the publication cannot disagree
-    // about which files are refused; `PathFacts::File` carries what that means, including why
-    // an unreadable attribute reads as `false` here. This runs after the same-file check on
-    // purpose: a destination that *is* a source is the more dangerous condition and the more
-    // specific report, whether or not the source happens to be protected.
-    //
-    // The late guard in `commit` stays. This check closes the common path, where the user
-    // protected the file before the export started; the file can still be protected between
-    // this check and the rename, and that window is what the late guard is for.
-    if matches!(
-        destination_facts,
-        PathFacts::File {
-            read_only: true,
-            ..
-        }
-    ) {
-        return Err(ExportErrorCode::OutputReadOnly);
+    // Checks 7 to 11 are about the output file. A request with no destination, such as the
+    // measurement of ADR 061, writes no file, so it skips them.
+    if let Some(destination) = request.destination {
+        check_destination(destination, sources, &source_identities, &inspect)?;
     }
 
     let preset = request.preset;
@@ -692,7 +637,6 @@ pub fn build_plan(
 
     Ok(ExportPlan {
         sources: planned_sources,
-        destination: destination.to_path_buf(),
         video: output_frame_rate.map(|rate| PlannedVideo {
             timing: OutputTiming::ConstantFrameRate(rate),
             canvas,
@@ -1018,6 +962,84 @@ fn source_path_is_valid(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && !path.as_os_str().as_encoded_bytes().contains(&0)
         && path.is_absolute()
+}
+
+/// Checks 7 to 11 of [`build_plan`], for a request that has a destination: the output path is
+/// valid, its parent directory exists, the path is not a directory or another kind of special
+/// file, it does not name a source, and the user did not protect it against writing.
+/// `source_identities` holds the identity of each source, which checks 4 to 6 read.
+fn check_destination(
+    destination: &Path,
+    sources: &[PlanSource<'_>],
+    source_identities: &[PathIdentity],
+    inspect: &impl Fn(&Path) -> PathFacts,
+) -> Result<(), ExportErrorCode> {
+    if destination_path_is_invalid(destination) {
+        return Err(ExportErrorCode::OutputPathInvalid);
+    }
+    let parent = destination
+        .parent()
+        .expect("destination_path_is_invalid rejected a destination with no parent");
+    if !matches!(inspect(parent), PathFacts::Directory) {
+        return Err(ExportErrorCode::OutputDirectoryMissing);
+    }
+
+    let destination_facts = inspect(destination);
+    // The renderer reserves a temporary file beside the destination
+    // (`fsutil::reserve_temporary_path`), lets ffmpeg write into it, and then renames that
+    // file over the destination (`PendingOutput::commit`, which calls `commit_within`, which
+    // calls `fsutil::replace_file_within` with `EXPORT_PUBLISH_BUDGET`). A rename cannot replace a
+    // directory with a regular file (`EISDIR` on Unix; `MoveFileEx` with
+    // `MOVEFILE_REPLACE_EXISTING` is documented to fail on a directory target on Windows),
+    // and a device node, a socket, or a named pipe is not a file the renderer can rename
+    // over either. The reservation only touches the destination's *parent*, so it would
+    // still succeed here, and the whole encode -- potentially minutes of it -- would run
+    // before the final rename failed. Reject the destination now instead, which is what
+    // this preflight exists for. There is no dedicated code for this case:
+    // `OutputPathInvalid` already means "the destination is not a usable output file
+    // path," whichever way the path is unusable.
+    match destination_facts {
+        PathFacts::Directory | PathFacts::Other => return Err(ExportErrorCode::OutputPathInvalid),
+        PathFacts::Absent | PathFacts::File { .. } => {}
+    }
+
+    // Any source, not only the first: the rename would replace whichever source the destination
+    // names.
+    let same_identity = matches!(
+        destination_facts,
+        PathFacts::File { identity, .. } if source_identities.contains(&identity)
+    );
+    if sources.iter().any(|source| source.path == destination) || same_identity {
+        return Err(ExportErrorCode::OutputEqualsSource);
+    }
+
+    // The same argument as the check above, for the other file the rename can refuse. ADR 015
+    // makes `fsutil::replace_file_within` refuse to replace a destination the user protected,
+    // on both platforms, and `PendingOutput::commit`'s own documentation asks a planning stage
+    // to reject such a destination ahead of the render. This is that stage: without the check
+    // here, a user who protected their output file waits out the whole encode and then reads
+    // `outputRenameFailed`, and the cleanup guard deletes the render on the way out.
+    //
+    // `read_only` is the very attribute the replacement guard reads, taken from the
+    // destination's own final component, so the preflight and the publication cannot disagree
+    // about which files are refused; `PathFacts::File` carries what that means, including why
+    // an unreadable attribute reads as `false` here. This runs after the same-file check on
+    // purpose: a destination that *is* a source is the more dangerous condition and the more
+    // specific report, whether or not the source happens to be protected.
+    //
+    // The late guard in `commit` stays. This check closes the common path, where the user
+    // protected the file before the export started; the file can still be protected between
+    // this check and the rename, and that window is what the late guard is for.
+    if matches!(
+        destination_facts,
+        PathFacts::File {
+            read_only: true,
+            ..
+        }
+    ) {
+        return Err(ExportErrorCode::OutputReadOnly);
+    }
+    Ok(())
 }
 
 /// `destination` must be non-empty, NUL-free, absolute, and must have both a file name and
@@ -1531,7 +1553,7 @@ mod tests {
                 probe,
                 audio_frames: frames,
             }],
-            destination: Path::new(DESTINATION),
+            destination: Some(Path::new(DESTINATION)),
             segments,
             preset,
             streams,
@@ -1624,7 +1646,7 @@ mod tests {
                     probe: &sample_probe(),
                     audio_frames: &AudioFrames::default(),
                 }],
-                destination: Path::new(DESTINATION),
+                destination: Some(Path::new(DESTINATION)),
                 segments: &[boundary(0, 1)],
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
@@ -1683,7 +1705,7 @@ mod tests {
                     probe: &sample_probe(),
                     audio_frames: &AudioFrames::default(),
                 }],
-                destination: Path::new(destination),
+                destination: Some(Path::new(destination)),
                 segments: &[boundary(0, 1)],
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
@@ -1749,9 +1771,8 @@ mod tests {
         for destination_facts in [absent(), present_file(7)] {
             let mut facts = valid_path_facts();
             facts.insert(PathBuf::from(DESTINATION), destination_facts);
-            let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts)
+            plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts)
                 .unwrap_or_else(|error| panic!("destination: {destination_facts:?}, {error:?}"));
-            assert_eq!(plan.destination, PathBuf::from(DESTINATION));
         }
     }
 
@@ -1763,7 +1784,7 @@ mod tests {
                 probe: &sample_probe(),
                 audio_frames: &AudioFrames::default(),
             }],
-            destination: Path::new(SOURCE),
+            destination: Some(Path::new(SOURCE)),
             segments: &[boundary(0, 1)],
             preset: &sample_preset(),
             streams: ExportStreams::VideoAndAudio,
@@ -1794,14 +1815,13 @@ mod tests {
 
     #[test]
     fn a_destination_with_no_identity_conflict_is_accepted() {
-        let plan = plan_with(
+        plan_with(
             &[boundary(0, 1)],
             &sample_probe(),
             &sample_preset(),
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.destination, PathBuf::from(DESTINATION));
     }
 
     #[test]
@@ -1811,8 +1831,7 @@ mod tests {
         // output, but it is not the source.
         let mut facts = valid_path_facts();
         facts.insert(PathBuf::from(DESTINATION), present_file(7));
-        let plan = plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap();
-        assert_eq!(plan.destination, PathBuf::from(DESTINATION));
+        plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap();
     }
 
     // -- preflight: a protected destination ------------------------------------------------
@@ -1834,14 +1853,13 @@ mod tests {
         // The ordinary case: a first export has nothing at the destination at all, and there is
         // no attribute to refuse it on. `valid_path_facts` already reports `DESTINATION` as
         // absent, so this states the requirement rather than discovering it.
-        let plan = plan_with(
+        plan_with(
             &[boundary(0, 1)],
             &sample_probe(),
             &sample_preset(),
             valid_path_facts(),
         )
         .unwrap();
-        assert_eq!(plan.destination, PathBuf::from(DESTINATION));
     }
 
     #[test]
@@ -1866,6 +1884,76 @@ mod tests {
         let error =
             plan_with(&[boundary(0, 1)], &sample_probe(), &sample_preset(), facts).unwrap_err();
         assert_eq!(error, ExportErrorCode::OutputEqualsSource);
+    }
+
+    // -- preflight: no destination (ADR 061) ------------------------------------------------
+
+    /// Plan a request with no destination, such as the measurement of the audio of an export
+    /// (ADR 061), with the `inspect` closure `inspect`.
+    fn plan_without_destination(
+        streams: ExportStreams,
+        probe: &MediaProbe,
+        inspect: impl Fn(&Path) -> PathFacts,
+    ) -> Result<ExportPlan, ExportErrorCode> {
+        let request = PlanRequest {
+            sources: &[PlanSource {
+                path: Path::new(SOURCE),
+                probe,
+                audio_frames: &AudioFrames::default(),
+            }],
+            destination: None,
+            segments: &[boundary(0, 90_000)],
+            preset: &sample_preset(),
+            streams,
+            audio_mode: ExportAudioMode::Encode,
+        };
+        build_plan(&request, inspect)
+    }
+
+    #[test]
+    fn a_request_with_no_destination_inspects_only_its_sources_and_plans_as_an_export() {
+        // Checks 7 to 11 inspect the destination and its parent. With no destination, the plan
+        // inspects no path but the source, so no fact of an output path can refuse it. Every
+        // other part of the plan is the plan of an export of the same pieces.
+        for (streams, probe) in [
+            (ExportStreams::VideoAndAudio, probe_with_audio()),
+            (ExportStreams::AudioOnly, probe_with_audio()),
+            (ExportStreams::VideoAndAudio, probe_with_empty_audio()),
+            (ExportStreams::VideoAndAudio, sample_probe()),
+        ] {
+            let plan = plan_without_destination(streams, &probe, |path: &Path| {
+                assert_eq!(path, Path::new(SOURCE), "the plan inspected {path:?}");
+                present_file(1)
+            })
+            .unwrap_or_else(|error| panic!("{streams:?}: {error:?}"));
+            let export = plan_streams(
+                streams,
+                &[boundary(0, 90_000)],
+                &probe,
+                &sample_preset(),
+                valid_path_facts(),
+            )
+            .unwrap();
+            assert_eq!(plan, export, "{streams:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_with_no_destination_still_runs_the_checks_of_its_sources_and_its_streams() {
+        // A source that is not there: check 5.
+        let error =
+            plan_without_destination(ExportStreams::VideoAndAudio, &probe_with_audio(), |_| {
+                absent()
+            })
+            .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceNotFound);
+        // Only the audio of a source with no audio stream: check 13, which ADR 061 keeps for a
+        // measurement without video.
+        let error = plan_without_destination(ExportStreams::AudioOnly, &sample_probe(), |_| {
+            present_file(1)
+        })
+        .unwrap_err();
+        assert_eq!(error, ExportErrorCode::SourceHasNoAudio);
     }
 
     // -- preflight: frame rate ------------------------------------------------------------
@@ -4360,7 +4448,7 @@ mod tests {
         build_plan(
             &PlanRequest {
                 sources: &sources,
-                destination: Path::new(DESTINATION),
+                destination: Some(Path::new(DESTINATION)),
                 segments: pieces,
                 preset,
                 streams,
@@ -4928,7 +5016,7 @@ mod tests {
         let plan = build_plan(
             &PlanRequest {
                 sources: &sources,
-                destination: Path::new(DESTINATION),
+                destination: Some(Path::new(DESTINATION)),
                 segments: &[piece(0, 0, 450_000), piece(1, 0, 450_000)],
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoAndAudio,
@@ -4976,7 +5064,7 @@ mod tests {
         let pieces = [piece(0, 0, 1), piece(1, 0, 1)];
         let request = |destination: &'static str| PlanRequest {
             sources: &sources,
-            destination: Path::new(destination),
+            destination: Some(Path::new(destination)),
             segments: &pieces,
             preset: &preset,
             streams: ExportStreams::VideoOnly,
@@ -5077,7 +5165,7 @@ mod tests {
         build_plan(
             &PlanRequest {
                 sources: &sources,
-                destination: Path::new(DESTINATION),
+                destination: Some(Path::new(DESTINATION)),
                 segments: pieces,
                 preset: &sample_preset(),
                 streams: ExportStreams::VideoOnly,

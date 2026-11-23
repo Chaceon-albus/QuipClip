@@ -582,9 +582,6 @@ pub struct ExportPlan {
     /// The sources of the pieces, in the order of their first piece. Each one has at least one
     /// piece ([`PlannedSegment::source`]).
     pub sources: Vec<PlannedSource>,
-    /// The final output location. The renderer writes a temporary file beside it and
-    /// renames on success (ADR 004, ADR 014's "Other rules").
-    pub destination: PathBuf,
     /// The video this plan writes, or `None` for a plan with no video.
     ///
     /// [`plan::build_plan`] fills this part exactly when [`ExportStreams::writes_video`] holds
@@ -802,7 +799,7 @@ export_error_codes! {
     /// reason. The request carries the whole preset (ADR 049), so the export reads no settings
     /// file.
     InvalidPreset => "invalidPreset",
-    /// Produced by `commands::export::prepare_export_with`: `ffmpeg` and `ffprobe` could not
+    /// Produced by `commands::export::prepare_plan_with`: `ffmpeg` and `ffprobe` could not
     /// both be located, mirroring `CapabilityProbeErrorCode::FfmpegPairMissing`.
     FfmpegPairMissing => "ffmpegPairMissing",
     /// Produced by `commands::export::map_reprobe_error`, for the mandatory re-probe (ADR
@@ -958,11 +955,18 @@ export_error_codes! {
     /// Produced by `commands::export::run_export_with`, on either of ADR 016's two cancel
     /// tests: the user canceled an export in progress.
     ///
-    /// Also produced by `commands::export::prepare_export_with` and by
-    /// `commands::export::start_export`, for a cancel that arrives while the run is still in
-    /// preparation. Preparation already holds the export slot and can last as long as
-    /// [`crate::ffmpeg::probe::PROBE_TIMEOUT`], so a cancel there ends the run rather than
-    /// letting it work through every remaining step and then start `ffmpeg`.
+    /// Also produced for a cancel that arrives before `ffmpeg` starts:
+    ///
+    /// - By `commands::export::prepare_plan_with` and `commands::export::prepare_export_with`,
+    ///   between their steps.
+    /// - By `commands::export::run_export_job_with`, for a run that a cancel reached before its
+    ///   preparation started, and for a preparation that a cancel reached. Its watchdog ends that
+    ///   preparation within `PREPARATION_CANCEL_GRACE`, also while a step is blocked.
+    /// - By the run that waits in the queue, when a cancel takes it out of the queue (ADR 049).
+    ///
+    /// Preparation already holds the export slot and can last up to `PREPARATION_TIMEOUT` for
+    /// each source (ADR 050), so a cancel there ends the run rather than letting it work through
+    /// every remaining step and then start `ffmpeg`.
     Canceled => "canceled",
     /// Produced by `commands::export::run_export_job_with` when preparation panicked or its
     /// helper thread could not be started, and by `commands::export::run_export_worker` when the
@@ -970,8 +974,9 @@ export_error_codes! {
     /// `ImportMediaErrorCode::CommandExecutionFailed`.
     CommandExecutionFailed => "commandExecutionFailed",
     /// Produced by `commands::export::start_export`, when the cache directory of the application
-    /// has no path, and by `commands::export::prepare_export_with`, when the work directory of
-    /// the export cannot be created or a graph file cannot be written in it (ADR 055).
+    /// has no path, by `commands::export::prepare_plan_with`, when the work directory of the
+    /// export cannot be created, and by `commands::export::prepare_export_with`, when a graph
+    /// file cannot be written in it (ADR 055).
     WorkDirectoryUnavailable => "workDirectoryUnavailable",
     /// Produced by [`graph_file::probe_graph_file_option`]: the `ffmpeg` of the export reads a
     /// filter graph from a file with neither `-/filter_complex` nor `-filter_complex_script`

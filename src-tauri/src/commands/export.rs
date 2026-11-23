@@ -29,8 +29,8 @@
 //!
 //! # The five obligations no type enforces
 //!
-//! The compose order in [`prepare_export_with`] and [`run_export_with`] is not free. Five of
-//! its steps are load-bearing and nothing in the type system holds them:
+//! The compose order in [`prepare_plan_with`], [`prepare_export_with`] and [`run_export_with`] is
+//! not free. Five of its steps are load-bearing and nothing in the type system holds them:
 //!
 //! 1. [`build_plan`] runs **before** [`PendingOutput::reserve`]. A destination that is a
 //!    directory reserves successfully and fails only at the rename, after a whole encode;
@@ -42,10 +42,11 @@
 //!    obligation from the other side: the reservation succeeds on it too, because it only
 //!    touches the parent directory, and `build_plan` rejects it as `outputReadOnly` rather than
 //!    letting the rename discard a finished encode.
-//! 2. [`build_arguments`] receives [`PendingOutput::path`], never `plan.destination`, and so
-//!    does [`build_copy_arguments`] for an export without video that copies its audio (ADR 048).
-//!    ffmpeg writes the reservation, and the rename that publishes the destination happens after
-//!    the process has exited.
+//! 2. [`build_arguments`] receives [`PendingOutput::path`], never the destination of the request,
+//!    and so does [`build_copy_arguments`] for an export without video that copies its audio (ADR
+//!    048). The plan does not hold the destination, so a builder cannot read it from there. ffmpeg
+//!    writes the reservation, and the rename that publishes the destination happens after the
+//!    process has exited.
 //! 3. [`assign_inputs`] is called once, and its result is passed to the FLV step, to
 //!    [`encoder_graph`] and [`build_arguments`], and to [`build_audio_graph`] and
 //!    [`build_audio_arguments`] of the audio process (ADR 043, ADR 055). Two assignments can
@@ -199,6 +200,39 @@ pub struct ExportRequestWire {
     pub new_batch: bool,
 }
 
+impl ExportRequestWire {
+    /// The fields of this request that decide the plan.
+    fn plan_scope(&self) -> PlanScope<'_> {
+        PlanScope {
+            sources: &self.sources,
+            pieces: &self.pieces,
+            segment_count: self.segment_count,
+            preset: &self.preset,
+            streams: self.streams,
+            audio_mode: self.audio_mode,
+        }
+    }
+}
+
+/// The fields of a request that decide what the plan reads and writes. An export and a
+/// measurement of its audio (ADR 061) share them. The fields of an export that only the run reads,
+/// such as its output path, are not here.
+#[derive(Debug, Clone, Copy)]
+struct PlanScope<'a> {
+    /// See [`ExportRequestWire::sources`].
+    sources: &'a [ExportSourceWire],
+    /// See [`ExportRequestWire::pieces`].
+    pieces: &'a [ExportPieceWire],
+    /// See [`ExportRequestWire::segment_count`].
+    segment_count: u32,
+    /// See [`ExportRequestWire::preset`].
+    preset: &'a Preset,
+    /// See [`ExportRequestWire::streams`].
+    streams: ExportStreams,
+    /// See [`ExportRequestWire::audio_mode`].
+    audio_mode: ExportAudioMode,
+}
+
 /// A request whose sources and pieces [`resolve_request`] checked.
 #[derive(Debug)]
 struct ResolvedRequest<'a> {
@@ -219,7 +253,8 @@ impl ResolvedRequest<'_> {
     }
 }
 
-/// Check the sources and the pieces of `request`, and order the sources by their first piece.
+/// Check the sources and the pieces of the request in `scope`, and order the sources by their
+/// first piece.
 ///
 /// The checks run in this order, and the first failure wins:
 ///
@@ -240,37 +275,37 @@ impl ResolvedRequest<'_> {
 /// [`build_plan`] checks 1 to 4, 6 and 7 again for any other caller. The order of the sources is the
 /// order of their first piece, so preparation runs once for each source in that order, and the
 /// plan breaks a tie of the canvas in favour of the earlier piece (ADR 053).
-fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, ExportCommandError> {
+fn resolve_request(scope: PlanScope<'_>) -> Result<ResolvedRequest<'_>, ExportCommandError> {
     let invalid = |detail: String| {
         Err(ExportCommandError::with_detail(
             ExportErrorCode::InvalidSources,
             detail,
         ))
     };
-    if request.pieces.is_empty() {
+    if scope.pieces.is_empty() {
         return Err(ExportCommandError::new(ExportErrorCode::NoSegments));
     }
-    if request.pieces.len() > MAX_EXPORT_PIECES {
+    if scope.pieces.len() > MAX_EXPORT_PIECES {
         return Err(ExportCommandError::new(ExportErrorCode::TooManySegments));
     }
-    if request.sources.is_empty() {
+    if scope.sources.is_empty() {
         return invalid("no source".to_owned());
     }
-    for (index, source) in request.sources.iter().enumerate() {
+    for (index, source) in scope.sources.iter().enumerate() {
         if source.id.is_empty() {
             return invalid("empty source id".to_owned());
         }
-        if request.sources[..index]
+        if scope.sources[..index]
             .iter()
             .any(|earlier| earlier.id == source.id)
         {
             return invalid(format!("duplicate source id: {}", source.id));
         }
     }
-    let mut sources: Vec<&ExportSourceWire> = Vec::with_capacity(request.sources.len());
-    let mut pieces = Vec::with_capacity(request.pieces.len());
-    for piece in &request.pieces {
-        let Some(wire) = request
+    let mut sources: Vec<&ExportSourceWire> = Vec::with_capacity(scope.sources.len());
+    let mut pieces = Vec::with_capacity(scope.pieces.len());
+    for piece in scope.pieces {
+        let Some(wire) = scope
             .sources
             .iter()
             .find(|source| source.id == piece.source_id)
@@ -290,7 +325,7 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
             out_pts: piece.out_pts,
         });
     }
-    if let Some(unused) = request
+    if let Some(unused) = scope
         .sources
         .iter()
         .find(|source| !sources.iter().any(|used| used.id == source.id))
@@ -300,7 +335,7 @@ fn resolve_request(request: &ExportRequestWire) -> Result<ResolvedRequest<'_>, E
     if sources.len() > MAX_EXPORT_INPUTS {
         return Err(ExportCommandError::new(ExportErrorCode::TooManySources));
     }
-    let segment_count = usize::try_from(request.segment_count).unwrap_or(usize::MAX);
+    let segment_count = usize::try_from(scope.segment_count).unwrap_or(usize::MAX);
     if segment_count == 0 || segment_count > pieces.len() {
         return Err(ExportCommandError::new(
             ExportErrorCode::InvalidSegmentCount,
@@ -659,38 +694,85 @@ struct PrepareRequest<'a> {
     graph_file: &'a GraphFileProbe<'a>,
 }
 
-/// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
+/// The plain data [`prepare_plan_with`] needs, grouped for the reason of [`PrepareRequest`]. The
+/// fields after [`Self::destination`] mean what the fields of [`PrepareRequest`] with the same
+/// names mean.
+#[derive(Clone, Copy)]
+struct PlanPreparation<'a> {
+    /// The fields of the request that decide the plan.
+    scope: PlanScope<'a>,
+    /// The output path of an export, which the plan checks (checks 7 to 11 of [`build_plan`]).
+    /// `None` for a request that writes no file, such as the measurement of ADR 061. The plan
+    /// then skips those checks.
+    destination: Option<&'a Path>,
+    app_data_directory: &'a Path,
+    cache_directory: &'a Path,
+    cancel: &'a AtomicBool,
+    preview_windows: &'a PreviewWindows,
+    stage: &'a PreparationStageCell,
+}
+
+/// What [`prepare_plan_with`] gives: the plan and what each later step of preparation reads.
+#[derive(Debug)]
+struct PreparedPlan {
+    /// The plan, with the FLV input of each source attached.
+    plan: ExportPlan,
+    /// The one assignment of the inputs (obligation 3 of this module), which the graphs and the
+    /// commands must read.
+    inputs: InputAssignment,
+    /// The located `ffmpeg` and `ffprobe`.
+    executables: FfmpegPaths,
+    /// The work directory (ADR 055). It holds the FLV heads of the plan, and it removes itself
+    /// when it drops.
+    work: WorkDirectory,
+}
+
+/// Do the steps of preparation that an export and a measurement of its audio share (ADR 061), in
+/// ADR 016's order:
+///
+/// 1. The check of the request ([`resolve_request`]), the discovery of ffmpeg, and the work
+///    directory.
+/// 2. A first pass over the sources, in the order of their first piece: the revision check, the
+///    re-probe, and the two reads of [`correct_audio_probe`].
+/// 3. The assignment of the inputs ([`assign_inputs`]), which needs the time base of each source
+///    from its re-probe.
+/// 4. A second pass over the sources: the FLV input of each source, then the read of
+///    [`read_audio_gaps`], which reads an FLV source through the slice of that input.
+/// 5. The plan, and the FLV input of each source attached to it.
+///
+/// [`prepare_export_with`] runs this function with the destination of its request. A request with
+/// no destination ([`PlanPreparation::destination`]) gets a plan that skipped the checks of the
+/// output path. These steps write nothing into the folder of the user. They write only into the
+/// cache directory of the application: the work directory (ADR 055), which removes itself when
+/// [`PreparedPlan::work`] drops, and, for an FLV source, the keyframe cache that the preview and
+/// every export share (ADR 057).
 ///
 /// The five injected functions are the ones that reach outside the process: executable
 /// discovery, the ffprobe re-probe, the two reads of [`correct_audio_probe`], and the read of
 /// [`read_audio_gaps`]. ADR 014's "Other rules" requires that re-probe -- the
 /// renderer reads the container start time and the selected stream indices from a fresh probe,
-/// never from stale project metadata. The option probe of ADR 055, which asks `ffmpeg` how it
-/// reads a graph file, rides in [`PrepareRequest::graph_file`]. It runs after the reservation,
-/// only for an export whose commands carry a graph, and each graph is then written into its file
-/// in the work directory.
+/// never from stale project metadata.
 ///
-/// See this module's documentation for the five ordering obligations the body below carries.
+/// `cancel` is the stop flag of preparation, read between the steps. The re-probe and the reads
+/// of the audio stop on the flag. Reading the flag between the steps does not shorten an
+/// in-process step that has already started, such as a stat on a share that stopped answering,
+/// but it stops the caller from working through every remaining step after the answer is no
+/// longer wanted.
 ///
-/// `cancel` is the stop flag of preparation, read between the steps. Preparation runs while the
-/// run already holds the export slot, and its steps reach outside the process. The re-probe and
-/// the reads of the audio stop on the flag. Reading the flag between the steps does not shorten
-/// an in-process step that has already started, such as a stat on a share that stopped
-/// answering, but it stops the run from working through every remaining step after the answer
-/// is no longer wanted.
-///
-/// A step in the file system has no time bound here. [`run_export_job_with`] runs this function
-/// on a helper thread and bounds it from the export thread: a cancel of the run, or
+/// A step in the file system has no time bound here. The caller bounds it. For an export,
+/// the run already holds the export slot, and [`run_export_job_with`] runs the preparation on a
+/// helper thread and watches it from the export thread: a cancel of the run, or
 /// [`PREPARATION_TIMEOUT`], ends the run even while a step is blocked. `stage` tells that watchdog
-/// which step runs ([`PreparationStage`]).
-fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
-    prepare: PrepareRequest<'_>,
+/// which step runs ([`PreparationStage`]). A measurement has a slot of its own (ADR 061), and its
+/// caller must bound these steps in the same way.
+fn prepare_plan_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
+    preparation: PlanPreparation<'_>,
     discover: Discover,
     mut probe: Probe,
     mut first_audio_packet: FirstPacket,
     mut audio_sample_rate_at: RateAt,
     mut audio_gaps: Gaps,
-) -> Result<PreparedExport, ExportCommandError>
+) -> Result<PreparedPlan, ExportCommandError>
 where
     Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
     Probe: FnMut(&Path, &Path, &AtomicBool) -> Result<MediaProbe, ProbeError>,
@@ -699,15 +781,15 @@ where
     RateAt: FnMut(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
     Gaps: FnMut(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
 {
-    let PrepareRequest {
-        request,
+    let PlanPreparation {
+        scope,
+        destination,
         app_data_directory,
         cache_directory,
         cancel,
         preview_windows,
         stage,
-        graph_file,
-    } = prepare;
+    } = preparation;
     // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
     // `ExportRegistry::cancel`'s store.
     let canceled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
@@ -724,7 +806,7 @@ where
 
     // The sources and the pieces, checked before any step reaches outside the process: a request
     // that does not hold together is a fault of the frontend, and no read can change that.
-    let resolved = resolve_request(request)?;
+    let resolved = resolve_request(scope)?;
 
     stage.enter(PreparationStage::Discovery);
     let executables = discover(app_data_directory)
@@ -732,8 +814,7 @@ where
 
     // The preset of the request, which `start_export` checked. The settings file is not read
     // here, so an edit of the preset after the command accepted the run changes nothing.
-    let preset = &request.preset;
-    let destination = PathBuf::from(&request.output_path);
+    let preset = scope.preset;
 
     // ADR 055: the work directory, before the first source, whose FLV head it receives. The
     // sweep first removes what earlier exports left. The guard removes the directory when it
@@ -794,7 +875,7 @@ where
             })?;
         let rate_readable = rate_readable_from_packets(&source_probe.format_names);
         if let Some(audio) = source_probe.audio.as_mut().filter(|audio| {
-            request.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
+            scope.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
         }) {
             stage.enter(PreparationStage::AudioReads);
             correct_audio_probe(
@@ -839,7 +920,7 @@ where
                 pieces: &pieces,
                 inputs: &input_ordinals(&inputs, &resolved.pieces, index),
             },
-            request.streams,
+            scope.streams,
             FlvPlace {
                 cache_directory,
                 work_directory: &work,
@@ -857,7 +938,7 @@ where
             source,
             source_probe,
             &pieces,
-            request.streams,
+            scope.streams,
             flv_input.as_ref().map(|flv| (flv, work.path())),
             cancel,
             &mut audio_gaps,
@@ -889,11 +970,11 @@ where
     let mut plan = build_plan(
         &PlanRequest {
             sources: &plan_sources,
-            destination: &destination,
+            destination,
             segments: &resolved.pieces,
             preset,
-            streams: request.streams,
-            audio_mode: request.audio_mode,
+            streams: scope.streams,
+            audio_mode: scope.audio_mode,
         },
         inspect_path,
     )
@@ -902,6 +983,78 @@ where
         let pieces = resolved.pieces_of(index).len();
         plan.sources[index].flv_input = flv_input.filter(|flv| flv.segment_offsets.len() == pieces);
     }
+    Ok(PreparedPlan {
+        plan,
+        inputs,
+        executables,
+        work,
+    })
+}
+
+/// Do every fallible step an export needs before ffmpeg starts, in ADR 016's order.
+///
+/// [`prepare_plan_with`] does the steps up to the plan, with the destination of the request. This
+/// function then does the steps of the output: the option probe of ADR 055, the reservation of
+/// the output file, the graph files, and the commands. The option probe, which asks `ffmpeg` how it
+/// reads a graph file, rides in [`PrepareRequest::graph_file`]. It runs before the reservation,
+/// only for an export whose commands carry a graph, and each graph is then written into its file
+/// in the work directory.
+///
+/// See this module's documentation for the five ordering obligations that the two functions
+/// carry. [`prepare_plan_with`] states the injected functions, the stop flag `cancel`, and the
+/// watchdog that `stage` informs.
+fn prepare_export_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
+    prepare: PrepareRequest<'_>,
+    discover: Discover,
+    probe: Probe,
+    first_audio_packet: FirstPacket,
+    audio_sample_rate_at: RateAt,
+    audio_gaps: Gaps,
+) -> Result<PreparedExport, ExportCommandError>
+where
+    Discover: FnOnce(&Path) -> Result<FfmpegPaths, LocateError>,
+    Probe: FnMut(&Path, &Path, &AtomicBool) -> Result<MediaProbe, ProbeError>,
+    FirstPacket:
+        FnMut(&Path, &Path, u32, &AtomicBool) -> Result<Option<FirstAudioPacket>, ProbeError>,
+    RateAt: FnMut(&Path, &Path, u64, u32, &AtomicBool) -> Result<Option<u32>, ProbeError>,
+    Gaps: FnMut(&Path, &Path, &AudioGapRead<'_>, &AtomicBool) -> Result<AudioFrames, ProbeError>,
+{
+    let PrepareRequest {
+        request,
+        app_data_directory,
+        cache_directory,
+        cancel,
+        preview_windows,
+        stage,
+        graph_file,
+    } = prepare;
+    // Read the same way `ExportSlot::is_canceled` reads it, so the ordering pairs with
+    // `ExportRegistry::cancel`'s store.
+    let canceled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
+
+    let destination = PathBuf::from(&request.output_path);
+    let PreparedPlan {
+        plan,
+        inputs,
+        executables,
+        work,
+    } = prepare_plan_with(
+        PlanPreparation {
+            scope: request.plan_scope(),
+            destination: Some(&destination),
+            app_data_directory,
+            cache_directory,
+            cancel,
+            preview_windows,
+            stage,
+        },
+        discover,
+        probe,
+        first_audio_packet,
+        audio_sample_rate_at,
+        audio_gaps,
+    )?;
+
     // A copy that the plan refused is no error: the export encodes the audio, or writes none
     // (ADR 048).
     if let Some(refusal) = plan.audio_copy_refusal {
@@ -946,7 +1099,7 @@ where
     // the same record: a refusal QuipClip decides for itself about an enumerable condition, where
     // the code is the whole account and a Rust-authored sentence adds nothing.
     stage.enter(PreparationStage::Reservation);
-    let pending = PendingOutput::reserve(&plan.destination).map_err(|error| {
+    let pending = PendingOutput::reserve(&destination).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::OutputNotWritable, error.to_string())
     })?;
 
@@ -989,7 +1142,7 @@ where
     }
 
     Ok(PreparedExport {
-        preset_id: preset.id.clone(),
+        preset_id: request.preset.id.clone(),
         streams: request.streams,
         segment_count: request.segment_count,
         plan,
@@ -1583,7 +1736,7 @@ fn start_payload(run_id: &str, prepared: &PreparedExport) -> ExportStart {
         run_id: run_id.to_owned(),
         preset_id: prepared.preset_id.clone(),
         streams: prepared.streams,
-        output_path: path_to_string(&prepared.plan.destination),
+        output_path: path_to_string(prepared.pending.destination()),
         // The segments of the user, which `resolve_request` held between 1 and the number of
         // pieces. The pieces are not what the user counts (ADR 053).
         segment_count: prepared.segment_count,
@@ -2165,7 +2318,7 @@ fn run_export_worker(
     let output_path = start.output_path.clone();
     // The published path, as a path. `output_path` is its lossy string form for the event, and
     // the show command must name the file that the rename wrote.
-    let destination = prepared.plan.destination.clone();
+    let destination = prepared.pending.destination().to_path_buf();
     // A panic inside the run has to be turned back into a report. A lost report cannot be
     // tolerated -- the interface sits on "exporting" forever, with no timeout, and
     // `cancel_export` answers `false` because the slot is already free -- so the run needs the
@@ -2787,7 +2940,7 @@ mod tests {
         unreachable!("the re-probe reported a sample rate, or no packet gave a position")
     }
 
-    fn sample_plan(destination: &Path) -> ExportPlan {
+    fn sample_plan() -> ExportPlan {
         ExportPlan {
             sources: vec![crate::ffmpeg::export::PlannedSource {
                 path: PathBuf::from("/media/source.mp4"),
@@ -2796,7 +2949,6 @@ mod tests {
                 audio: None,
                 flv_input: None,
             }],
-            destination: destination.to_path_buf(),
             video: Some(PlannedVideo {
                 timing: OutputTiming::ConstantFrameRate(Rational::new(30, 1).unwrap()),
                 canvas: None,
@@ -3156,7 +3308,7 @@ mod tests {
         )
         .unwrap();
         let windows = PreviewWindows::default();
-        let pieces = resolve_request(&request).unwrap().pieces;
+        let pieces = resolve_request(request.plan_scope()).unwrap().pieces;
         let run = |probe: &MediaProbe, cancel: &AtomicBool| {
             flv_input_for(
                 &ffprobe,
@@ -4092,6 +4244,92 @@ mod tests {
     }
 
     #[test]
+    fn the_preparation_of_a_plan_with_no_destination_writes_nothing_beside_the_source() {
+        // The measurement of the audio of an export (ADR 061) prepares a plan with no
+        // destination. The folder of the source gains no file, because the only directory that
+        // these steps create is the work directory in the cache. The plan is the plan that the
+        // export of the same request prepares.
+        let directory = TestDirectory::new();
+        let media = directory.path.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let source = media.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let cache = directory.path.join("cache");
+        let request = ExportRequestWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+            }],
+            pieces: vec![ExportPieceWire {
+                source_id: "source".to_owned(),
+                in_pts: Pts::new(0),
+                out_pts: Pts::new(90_000),
+            }],
+            segment_count: 1,
+            output_path: media.join("out.mp4").to_string_lossy().into_owned(),
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+        };
+        let executables = FfmpegPaths {
+            ffmpeg: directory.path.join("ffmpeg"),
+            ffprobe: directory.path.join("ffprobe"),
+            origin: ExecutableOrigin::Path,
+        };
+
+        let prepared = prepare_plan_with(
+            PlanPreparation {
+                scope: request.plan_scope(),
+                destination: None,
+                app_data_directory: &directory.path,
+                cache_directory: &cache,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+            },
+            |_| Ok(executables.clone()),
+            |_, path, _| {
+                assert_eq!(path, source);
+                Ok(sample_probe())
+            },
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap();
+
+        let names: Vec<std::ffi::OsString> = fs::read_dir(&media)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("source.mp4")]);
+        assert!(prepared.work.path().starts_with(&cache));
+        assert!(prepared.work.path().is_dir());
+        assert_eq!(prepared.executables, executables);
+
+        let exported = prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &cache,
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
+            },
+            |_| Ok(executables.clone()),
+            |_, _, _| Ok(sample_probe()),
+            first_packet_unread,
+            sample_rate_not_read,
+            no_audio_gaps,
+        )
+        .unwrap();
+        assert_eq!(prepared.plan, exported.plan);
+    }
+
+    #[test]
     fn preparation_builds_the_command_against_the_reservation_and_not_the_destination() {
         let directory = TestDirectory::new();
         let source = directory.path.join("source.mp4");
@@ -4144,7 +4382,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(prepared.preset_id, "active");
-        assert_eq!(prepared.plan.destination, destination);
+        assert_eq!(prepared.pending.destination(), destination);
         assert_eq!(prepared.ffmpeg, directory.path.join("ffmpeg"));
         // ffmpeg writes the reservation. The destination must appear nowhere in the argument
         // list: the rename that publishes it happens after this process has exited.
@@ -4945,10 +5183,10 @@ mod tests {
     }
 
     #[test]
-    fn the_start_payload_reports_the_plan_and_not_the_request() {
+    fn the_start_payload_reports_the_reserved_destination_and_the_timing_of_the_plan() {
         let directory = TestDirectory::new();
         let destination = directory.path.join("out.mp4");
-        let plan = sample_plan(&destination);
+        let plan = sample_plan();
         let pending = PendingOutput::reserve(&destination).unwrap();
         let prepared = PreparedExport {
             preset_id: "active".to_owned(),
@@ -4986,7 +5224,7 @@ mod tests {
         // `slot.is_canceled()` re-check and this test fails on all three assertions.
         let directory = TestDirectory::new();
         let destination = directory.path.join("out.mp4");
-        let plan = sample_plan(&destination);
+        let plan = sample_plan();
         let pending = PendingOutput::reserve(&destination).unwrap();
         let reserved = pending.path().to_path_buf();
         let prepared = PreparedExport {
@@ -6338,8 +6576,8 @@ mod tests {
     // -- the stream choice: the success check of an export without video -------------------
 
     /// A one-second plan that writes 48000 Hz audio and no video.
-    fn sample_audio_plan(destination: &Path) -> ExportPlan {
-        let mut plan = sample_plan(destination);
+    fn sample_audio_plan() -> ExportPlan {
+        let mut plan = sample_plan();
         plan.video = None;
         plan.audio = Some(crate::ffmpeg::export::PlannedAudio {
             output_sample_rate: 48_000,
@@ -6945,7 +7183,7 @@ mod tests {
             preset_id: "active".to_owned(),
             streams: ExportStreams::AudioOnly,
             segment_count: 1,
-            plan: sample_audio_plan(destination),
+            plan: sample_audio_plan(),
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
@@ -7381,7 +7619,7 @@ mod tests {
                 preset_id: "active".to_owned(),
                 streams,
                 segment_count: 1,
-                plan: sample_plan(&destination),
+                plan: sample_plan(),
                 ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
                 ffprobe: PathBuf::from("/usr/bin/ffprobe"),
                 arguments: vec![],
@@ -7428,7 +7666,7 @@ mod tests {
             preset_id: "active".to_owned(),
             streams: ExportStreams::VideoAndAudio,
             segment_count: 1,
-            plan: sample_plan(&destination),
+            plan: sample_plan(),
             ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/bin/ffprobe"),
             arguments: vec![],
@@ -8315,7 +8553,7 @@ mod tests {
     fn prepared_copy_run(destination: &Path) -> (PreparedExport, PathBuf) {
         let pending = PendingOutput::reserve(destination).unwrap();
         let reserved = pending.path().to_path_buf();
-        let mut plan = sample_plan(destination);
+        let mut plan = sample_plan();
         plan.copied_audio = Some(crate::ffmpeg::export::CopiedAudio {
             stream_index: 1,
             start: Rational::new(0, 1).unwrap(),
@@ -8503,7 +8741,7 @@ mod tests {
         let directory = TestDirectory::new();
         let destination = directory.path.join("out.mp4");
         fs::write(&destination, b"protected contents").unwrap();
-        let plan = sample_plan(&destination);
+        let plan = sample_plan();
         let pending = PendingOutput::reserve(&destination).unwrap();
         let reserved = pending.path().to_path_buf();
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o444)).unwrap();
@@ -9248,7 +9486,7 @@ mod tests {
             &[("a", a), ("b", b)],
             &[("b", 0, 90_000), ("a", 0, 90_000), ("b", 90_000, 180_000)],
         );
-        let resolved = resolve_request(&request).unwrap();
+        let resolved = resolve_request(request.plan_scope()).unwrap();
         let ids: Vec<&str> = resolved
             .sources
             .iter()
@@ -9265,7 +9503,8 @@ mod tests {
     fn a_request_whose_sources_do_not_match_its_pieces_is_refused_with_a_code() {
         let a = Path::new("/media/a.mp4");
         let b = Path::new("/media/b.mp4");
-        let refused = |request: ExportRequestWire| resolve_request(&request).unwrap_err();
+        let refused =
+            |request: ExportRequestWire| resolve_request(request.plan_scope()).unwrap_err();
         let invalid = |detail: &str| {
             ExportCommandError::with_detail(ExportErrorCode::InvalidSources, detail.to_owned())
         };
@@ -9288,7 +9527,7 @@ mod tests {
                 (["a", "b"][index % 2], start, start + 90_000)
             })
             .collect();
-        assert!(resolve_request(&request_of(&[("a", a), ("b", b)], &two)).is_ok());
+        assert!(resolve_request(request_of(&[("a", a), ("b", b)], &two).plan_scope()).is_ok());
         let mut two_too_many = two.clone();
         two_too_many.push(("a", 0, 90_000));
         assert_eq!(
@@ -9326,7 +9565,7 @@ mod tests {
             );
         }
         request.segment_count = 2;
-        assert!(resolve_request(&request).is_ok());
+        assert!(resolve_request(request.plan_scope()).is_ok());
 
         assert_eq!(
             refused(request_of(&[("a", a)], &[("a", 5, 5)])).code,
@@ -9393,9 +9632,10 @@ mod tests {
 
     #[test]
     fn a_request_of_more_sources_than_inputs_is_refused_in_the_order_of_adr_055() {
-        let refused = |request: ExportRequestWire| resolve_request(&request).unwrap_err().code;
+        let refused =
+            |request: ExportRequestWire| resolve_request(request.plan_scope()).unwrap_err().code;
         // Each source needs one input, so an export uses at most `MAX_EXPORT_INPUTS` sources.
-        assert!(resolve_request(&request_of_sources(MAX_EXPORT_INPUTS)).is_ok());
+        assert!(resolve_request(request_of_sources(MAX_EXPORT_INPUTS).plan_scope()).is_ok());
         assert_eq!(
             refused(request_of_sources(MAX_EXPORT_INPUTS + 1)),
             ExportErrorCode::TooManySources
@@ -9639,7 +9879,7 @@ mod tests {
         assert_eq!(error.detail, None);
         // The same pieces in source order read one input.
         request.pieces.reverse();
-        assert!(resolve_request(&request).is_ok());
+        assert!(resolve_request(request.plan_scope()).is_ok());
     }
 
     #[test]

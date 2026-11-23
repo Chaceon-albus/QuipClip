@@ -610,7 +610,7 @@ mod tests {
                     probe: &probe(),
                     audio_frames: &crate::ffmpeg::AudioFrames::default(),
                 }],
-                destination: &destination,
+                destination: Some(&destination),
                 segments: &segments,
                 preset,
                 streams: ExportStreams::VideoAndAudio,
