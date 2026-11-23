@@ -25,6 +25,8 @@ QuipClip can do these things:
 - Export the segments with a preset. The output can hold the video and the audio, the
   video only, or the audio only. An export of one segment can copy the source audio.
 - Add an export to a queue while another export runs.
+- Measure the loudness and the true peak of the audio of an export before it starts.
+  QuipClip then fills a gain for a target true peak of -1.0 dBTP.
 - Find `ffmpeg`, and test which encoders work on your machine.
 - Download `ffmpeg` after you agree, when QuipClip finds none.
 - Show the interface in English or Simplified Chinese, with a light or a dark theme.
@@ -108,6 +110,22 @@ QuipClip searches for the programs in this order:
 5. Press `Cmd+E` or `Ctrl+E`.
 6. Select a preset and the streams.
 7. Click **Export…**, and select where to save the file.
+
+The "Gain" row shows when the export writes audio and **Copy audio** is off. To adjust the
+gain of the audio, set **Adjust** to on before you click **Export…**. The switch is at the end
+of the "Gain" row. QuipClip then measures the integrated loudness (I) and the true peak (TP) of
+the audio of the export, and shows them on the "Measured" line. While **Adjust** is on,
+**Copy audio** stays off.
+
+When the measurement ends, QuipClip fills the gain in the "Gain" row. When the true peak is at
+-1.0 dBTP or lower, the filled gain is 0.0 dB. Otherwise, the filled gain lowers the true peak
+to -1.0 dBTP, and it is never below -20.0 dB. If the measurement fails, the row keeps the gain
+of the preset.
+
+You can change the gain. The "After gain" line adds the gain to the measured values. The
+encoder of the export can raise the true peak of the file above the value on that line. You
+cannot export while the measurement runs or while the gain is not valid. To export at once,
+set **Adjust** to off.
 
 QuipClip numbers the segments in the order that you mark them. A split puts the right half
 directly after the left half. The export joins the segments in the order of their numbers,

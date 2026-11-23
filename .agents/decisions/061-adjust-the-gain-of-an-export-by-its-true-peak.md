@@ -71,6 +71,11 @@ measurement.
    no spike at its start or at the join. A measurement before the encode cannot predict this spike.
 4. **Speed.** `ebur128` with the true peak read the 30 s file in 0.08 s, about 376 times real time.
    This record has no measurement of the meter that it chooses. The implementation measures it.
+   (Changed on 2026-11-22.) The implementation measured the `ebur128` crate with the true peak,
+   in a release build on an Apple M6. It read 30 s of 48000 Hz stereo in 0.028 s, about 1070
+   times real time. It read 30 s of 48000 Hz 5.1 in 0.058 s, and 30 s of 96000 Hz stereo in
+   0.064 s. These times do not include the decode of the audio by FFmpeg, which comes before
+   the meter.
 
 The signals are synthetic. They show that the rise exists, and that its size depends on the
 encoder, the bitrate and the signal. They do not give an upper limit.
