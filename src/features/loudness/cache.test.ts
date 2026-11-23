@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import type { Pts } from "@/types/project";
-import { LoudnessCache, loudnessCacheKey } from "./cache";
+import { LoudnessCache, loudnessCacheKey, loudnessIdentity } from "./cache";
 import type { LoudnessScope } from "./types";
 
 function scope(overrides: Partial<LoudnessScope> = {}): LoudnessScope {
@@ -117,6 +117,43 @@ describe("the key of a kept measurement (ADR 061)", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("the identity of a measurement (ADR 061)", () => {
+  const unrevised = (overrides: Partial<LoudnessScope> = {}) =>
+    scope({
+      sources: scope().sources.map(({ id, path }) => ({ id, path })),
+      ...overrides,
+    });
+
+  it("is the cache key when every source has a revision", () => {
+    expect(loudnessIdentity(scope())).toBe(loudnessCacheKey(scope()));
+  });
+
+  it("reads only what decides the audio when a source has no revision", () => {
+    const preset = scope().preset;
+    // Another name of the preset, and another frame rate for an export with no video.
+    expect(loudnessIdentity(unrevised({ preset: { ...preset, name: "Q" } }))).toBe(
+      loudnessIdentity(unrevised()),
+    );
+    expect(
+      loudnessIdentity(
+        unrevised({
+          streams: "audioOnly",
+          preset: { ...preset, frameRate: { n: 25, d: 1 } },
+        }),
+      ),
+    ).toBe(loudnessIdentity(unrevised({ streams: "audioOnly" })));
+    // Another rate of the audio is other audio.
+    expect(
+      loudnessIdentity(unrevised({ preset: { ...preset, audioSampleRate: 44100 } })),
+    ).not.toBe(loudnessIdentity(unrevised()));
+  });
+
+  it("differs between the same audio with and without revisions", () => {
+    // The user accepted a changed file: the step measures the file again.
+    expect(loudnessIdentity(unrevised())).not.toBe(loudnessIdentity(scope()));
   });
 });
 

@@ -173,6 +173,32 @@ The Export action of the step is not available while the measurement runs. Its r
 the measurement runs. To export at once, the user turns the switch off, and the export uses the
 gain of the preset.
 
+(Changed on 2026-11-22.) The implementation of the step adds these rules:
+
+- A measurement of a source that has no revision has an identity of the same fields as the key,
+  with no revisions. Another preset with the same sample rate, channel setting and, with video,
+  frame rate does not start a new measurement.
+- While the field holds no filled value and no value that the user typed, it shows the gain of
+  the preset that is selected now. This is so while the measurement runs and after a failure.
+  When the user then selects another preset with the same key, the field shows the gain of that
+  preset. A filled or typed value stays.
+- The field is a number input, so it shows a positive gain with no "+" sign, as the preset editor
+  does. The rows and the two lines show the sign.
+- A cancel that the page did not ask for, as at the exit, ends the measurement with no result.
+  The step shows no line, and the Export action waits no longer.
+- The Export action waits until the measurement of the current request starts and ends. A result
+  of an earlier request does not end the wait, and it does not fill the field.
+- While the switch is on and the step cannot measure, the field shows the gain of the preset and
+  is disabled. The preset can have a setting that blocks the export, or the step cannot build the
+  request. The request then carries no gain of its own.
+- After the save panel closes, the export builds its request again. When the audio of that
+  request is not the audio that the step measured, the export does not start. This is also so
+  when the step could not build a request before the panel and can build one after it. The
+  dialog stays on the setup step, and the step measures the new audio.
+- After "Export anyway" (ADR 024), the request has no revision, and neither the identity nor
+  the export can see a later change of the file. A gain that the step measured before such a
+  change can go with the export of the changed file. The user accepted that the file changed.
+
 When the measurement fails, the Measured line shows the error and the diagnostic text of ADR 011.
 The field becomes available with the gain of the preset. The After gain line is absent. The
 Export action is available.

@@ -16,7 +16,7 @@
 
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { LoudnessCache, loudnessCacheKey } from "./cache";
+import { LoudnessCache, loudnessCacheKey, loudnessIdentity } from "./cache";
 import { startLoudnessMeasurement, type LoudnessJob } from "./client";
 import {
   LoudnessError,
@@ -77,26 +77,24 @@ export const BUSY_RETRY_LIMIT_MS = 10_000;
 /** One request of the step: its scope, and its identity. */
 interface Request {
   readonly scope: LoudnessScope;
-  /** The cache key, or the request itself when it is not kept. */
+  /** The identity of its audio (`loudnessIdentity`), which is its cache key when it is kept. */
   readonly id: string;
   readonly cacheable: boolean;
 }
 
+/**
+ * The identity of the measurement of `scope`: two scopes with the same identity measure the same
+ * audio. The setup step measures again when it changes (ADR 061).
+ */
+export function loudnessRequestId(scope: LoudnessScope): string {
+  return requestOf(scope).id;
+}
+
 function requestOf(scope: LoudnessScope): Request {
-  const key = loudnessCacheKey(scope);
-  if (key !== null) {
-    return { scope, id: key, cacheable: true };
-  }
   return {
     scope,
-    id: JSON.stringify([
-      "uncached",
-      scope.sources,
-      scope.pieces,
-      scope.preset,
-      scope.streams,
-    ]),
-    cacheable: false,
+    id: loudnessIdentity(scope),
+    cacheable: loudnessCacheKey(scope) !== null,
   };
 }
 

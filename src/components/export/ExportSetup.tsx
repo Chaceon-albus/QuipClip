@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useExportStore } from "@/features/export/store";
@@ -83,6 +84,16 @@ import {
   type StreamSwitchView,
 } from "./exportStreamsPresenter";
 import { useExportSourceFacts } from "./useExportSourceFacts";
+import { ExportErrorDetails } from "./ExportErrorDetails";
+import {
+  presentAdjustSwitch,
+  presentGainField,
+  presentLoudnessLines,
+  type AdjustSwitchView,
+  type GainFieldView,
+  type LoudnessLinesView,
+} from "./loudnessAdjustPresenter";
+import type { LoudnessMeasurement } from "@/features/loudness/store";
 import { useSequenceMediaStore } from "@/features/sequence";
 
 // One bigint or null, which compare by value, so the step renders again only when the exact
@@ -121,39 +132,52 @@ function SummarySentence({
   );
 }
 
+/** What a row of the summary can carry besides its value. */
+type RowSlot = {
+  /** A control in place of the value text, such as the Gain field. */
+  readonly value?: ReactNode;
+  /** A control at the end of the row, on the first line of its value. */
+  readonly trailing?: ReactNode;
+  /** Rows of their own after the row, in the same grid, such as the lines of a measurement. */
+  readonly after?: ReactNode;
+};
+
 /**
  * The rows of one part of the preset summary. Every list has the same label column, so the
  * values of the container row and of both groups start at one edge.
  *
- * `trailing` puts a control at the end of the row that `rowId` names, on the first line of its
- * value, so the control needs no row of its own and does not move when the value wraps. The
- * value keeps the rest of the line and wraps in front of the control.
+ * `slots` can give a row a control in place of its value, a control at its end, and rows after
+ * it. A control at the end sits on the first line of the value, so it needs no row of its own and
+ * does not move when the value wraps. The value keeps the rest of the line and wraps in front of
+ * the control.
  */
 function SummaryRows({
   rows,
-  trailing = null,
+  slots = {},
   translate,
 }: {
   rows: readonly PresetSummaryRowView[];
-  trailing?: { readonly rowId: string; readonly node: ReactNode } | null;
+  slots?: Readonly<Record<string, RowSlot>>;
   translate: Translate;
 }) {
   return (
     <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1">
       {rows.map((row) => {
+        const slot = slots[row.id];
         // An encoder name is free text of up to 64 characters with no space in it.
-        const value = translate(row.valueKey, row.valueValues);
+        const value = slot?.value ?? translate(row.valueKey, row.valueValues);
         return (
           <Fragment key={row.id}>
             <dt className="text-muted-foreground">{translate(row.labelKey)}</dt>
-            {trailing !== null && trailing.rowId === row.id ? (
+            {slot?.trailing ? (
               <dd className="flex items-start justify-between gap-3">
                 <span className="min-w-0 wrap-anywhere text-foreground">{value}</span>
-                {trailing.node}
+                {slot.trailing}
               </dd>
             ) : (
               <dd className="wrap-anywhere text-foreground">{value}</dd>
             )}
+            {slot?.after}
           </Fragment>
         );
       })}
@@ -318,79 +342,278 @@ function StreamSwitch({
 }
 
 /**
- * The switch that asks for a copy of the audio, with its visible label, at the end of the
- * Encoder row of the Audio group, under the switch of the Audio heading (ADR 048). The step
- * renders it only where it offers the copy. While the save panel is open it is frozen as the
- * stream switches are: it carries `aria-disabled`, keeps the focus, and ignores a toggle.
+ * A switch with its visible label at the end of a row of the Audio group: the copy of the audio
+ * at the end of the Encoder row (ADR 048), and Adjust at the end of the Gain row (ADR 061).
+ * While the save panel is open it is frozen as the stream switches are: it carries
+ * `aria-disabled`, keeps the focus, and ignores a toggle.
+ *
+ * A switch with a lock reason is off and locked in the same way. Its reason shows only in a
+ * tooltip, on hover and on focus, and a hidden copy of it describes the switch, as for the stream
+ * switches. The copy is locked so while Adjust is on.
  *
  * The switch is 6 px under the switch of the heading. Its click area reaches 4 px above and
  * below it, not the 8 px of a switch, so it stops in the space between the two switches and
  * does not cover the track of the switch above it.
  */
-function CopyAudioSwitch({
-  view,
+function LabeledSwitch({
+  labelKey,
+  checked,
+  lockKey = null,
   frozen,
   onCheckedChange,
   translate,
 }: {
-  view: CopyAudioSwitchView;
+  labelKey: string;
+  checked: boolean;
+  /** The reason of a locked switch, or null. */
+  lockKey?: string | null;
   frozen: boolean;
   onCheckedChange: (on: boolean) => void;
   translate: Translate;
 }) {
   const switchId = useId();
+  const reasonId = useId();
+  const reason = lockKey !== null ? translate(lockKey) : null;
+  const locked = reason !== null || frozen;
   return (
     <span className="inline-flex items-center gap-1.5">
       <label
         htmlFor={switchId}
         className={cn(
           "whitespace-nowrap text-muted-foreground select-none",
-          frozen && "opacity-70",
+          locked && "opacity-70",
         )}
       >
-        {translate(view.labelKey)}
+        {translate(labelKey)}
       </label>
-      <Switch
-        id={switchId}
-        size="sm"
-        checked={view.checked}
-        onCheckedChange={(checked) => {
-          if (!frozen) {
-            onCheckedChange(checked);
-          }
-        }}
-        aria-disabled={frozen ? true : undefined}
-        className="after:-inset-y-1 aria-disabled:opacity-70"
-      />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex">
+            <Switch
+              id={switchId}
+              size="sm"
+              checked={checked}
+              onCheckedChange={(next) => {
+                if (!locked) {
+                  onCheckedChange(next);
+                }
+              }}
+              aria-disabled={locked ? true : undefined}
+              aria-describedby={reason !== null ? reasonId : undefined}
+              className="after:-inset-y-1 aria-disabled:opacity-70"
+            />
+            {reason !== null ? (
+              <span id={reasonId} hidden>
+                {reason}
+              </span>
+            ) : null}
+          </span>
+        </TooltipTrigger>
+        {reason !== null ? <TooltipContent>{reason}</TooltipContent> : null}
+      </Tooltip>
     </span>
   );
 }
 
+/** The Gain field of the Gain row while Adjust is on, with its unit and the message of a value
+ * that is not valid. */
+function GainField({
+  view,
+  label,
+  issueId,
+  onTextChange,
+  translate,
+}: {
+  view: GainFieldView;
+  label: string;
+  /** The id of the message of a value that is not valid, which the Export button also names. */
+  issueId: string;
+  onTextChange: (text: string) => void;
+  translate: Translate;
+}) {
+  return (
+    <span className="flex flex-col gap-0.5">
+      <span className="inline-flex items-center gap-1.5">
+        <Input
+          type="number"
+          inputMode="decimal"
+          value={view.text}
+          min={view.min}
+          max={view.max}
+          step={view.step}
+          disabled={view.disabled}
+          aria-label={label}
+          aria-invalid={view.issue !== null ? true : undefined}
+          aria-describedby={view.issue !== null ? issueId : undefined}
+          onChange={(event) => {
+            onTextChange(event.target.value);
+          }}
+          className="h-6 w-20 px-1.5 text-xs md:text-xs"
+        />
+        <span className="text-muted-foreground">
+          {translate("settings.preset.unitDecibels")}
+        </span>
+      </span>
+      {view.issue !== null ? (
+        <span id={issueId} className="text-destructive-text">
+          {translate(view.issue.key, view.issue.values)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+const AFTER_TONE_CLASS = {
+  normal: "text-foreground",
+  warning: "text-warning-text",
+  destructive: "text-destructive-text",
+} as const;
+
+/**
+ * The Measured and After gain lines under the Gain row (ADR 061), as rows of the summary list.
+ * The Measured line shows the progress, the values, or the failure with its diagnostic. The After
+ * gain line shows the values after the gain, in the tone of its true peak.
+ */
+function LoudnessLines({
+  view,
+  measuredId,
+  translate,
+}: {
+  view: LoudnessLinesView;
+  /** The id of the Measured line, which the Export button names while it waits. */
+  measuredId: string;
+  translate: Translate;
+}) {
+  const { measured, after } = view;
+  return (
+    <>
+      <dt className="text-muted-foreground">
+        {translate("export.setup.measuredLabel")}
+      </dt>
+      <dd id={measuredId} className="min-w-0 wrap-anywhere text-foreground">
+        {measured.kind === "failed" ? (
+          <span className="flex flex-col gap-1">
+            <span className="text-destructive-text">
+              {translate(measured.text.key, { reason: translate(measured.reasonKey) })}
+            </span>
+            {measured.detail !== null ? (
+              <ExportErrorDetails detail={measured.detail} />
+            ) : null}
+          </span>
+        ) : (
+          translate(measured.text.key, measured.text.values)
+        )}
+      </dd>
+      {after !== null ? (
+        <>
+          <dt className="text-muted-foreground">
+            {translate("export.setup.afterGainLabel")}
+          </dt>
+          <dd className={cn("min-w-0 wrap-anywhere", AFTER_TONE_CLASS[after.tone])}>
+            {translate(after.text.key, after.text.values)}
+          </dd>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/** What the Audio group shows for the Adjust switch of its Gain row (ADR 061). */
+type AdjustGroupView = {
+  readonly switchView: AdjustSwitchView;
+  /** The Gain field, while Adjust is on. */
+  readonly field: GainFieldView | null;
+  /** The two lines, while Adjust is on and a measurement started. */
+  readonly lines: LoudnessLinesView | null;
+  readonly ids: AdjustDescriptionIds;
+};
+
+/** The ids of the two reasons that the Export button names while Adjust holds the export. */
+export type AdjustDescriptionIds = {
+  /** The Measured line, while the measurement runs. */
+  readonly measured: string;
+  /** The message of a gain that is not valid. */
+  readonly issue: string;
+};
+
 /**
  * One group of the preset summary, named by its heading, with the switch of its stream at the
  * end of the heading. The Audio group can also carry the switch that asks for a copy of the
- * audio, at the end of its Encoder row. That row names the encoder of the preset, or the codec
- * of the source while the copy is on, so the switch keeps its place and its focus when it
- * changes.
+ * audio, at the end of its Encoder row, and the Adjust switch at the end of its Gain row with the
+ * Gain field and the two lines of the measurement (ADR 061). The Encoder row names the encoder of
+ * the preset, or the codec of the source while the copy is on, so the switch keeps its place and
+ * its focus when it changes. Each switch is on the row that it changes.
  */
 function SummaryGroup({
   group,
   streamSwitch,
   copyAudioSwitch,
+  adjust,
   streamsFrozen,
   onStreamChange,
   onCopyAudioChange,
+  onAdjustChange,
+  onGainTextChange,
   translate,
 }: {
   group: PresetSummaryGroupView;
   streamSwitch: StreamSwitchView;
   copyAudioSwitch: CopyAudioSwitchView | null;
+  adjust: AdjustGroupView | null;
   streamsFrozen: boolean;
   onStreamChange: (kind: ExportStreamKind, on: boolean) => void;
   onCopyAudioChange: (on: boolean) => void;
+  onAdjustChange: (on: boolean) => void;
+  onGainTextChange: (text: string) => void;
   translate: Translate;
 }) {
   const headingId = useId();
+  const slots: Record<string, RowSlot> = {};
+  if (copyAudioSwitch) {
+    slots.audioEncoder = {
+      trailing: (
+        <LabeledSwitch
+          labelKey={copyAudioSwitch.labelKey}
+          checked={copyAudioSwitch.checked}
+          lockKey={copyAudioSwitch.lockKey}
+          frozen={streamsFrozen}
+          onCheckedChange={onCopyAudioChange}
+          translate={translate}
+        />
+      ),
+    };
+  }
+  if (adjust !== null && group.rows.some((row) => row.id === "audioGain")) {
+    slots.audioGain = {
+      trailing: (
+        <LabeledSwitch
+          labelKey={adjust.switchView.labelKey}
+          checked={adjust.switchView.checked}
+          frozen={streamsFrozen}
+          onCheckedChange={onAdjustChange}
+          translate={translate}
+        />
+      ),
+      value:
+        adjust.field !== null ? (
+          <GainField
+            view={adjust.field}
+            label={translate("settings.preset.audioGainLabel")}
+            issueId={adjust.ids.issue}
+            onTextChange={onGainTextChange}
+            translate={translate}
+          />
+        ) : undefined,
+      after:
+        adjust.lines !== null ? (
+          <LoudnessLines
+            view={adjust.lines}
+            measuredId={adjust.ids.measured}
+            translate={translate}
+          />
+        ) : undefined,
+    };
+  }
   return (
     <div role="group" aria-labelledby={headingId} className="space-y-1">
       <div className="flex items-center justify-between gap-3">
@@ -405,25 +628,7 @@ function SummaryGroup({
         />
       </div>
       {group.rows.length > 0 ? (
-        <SummaryRows
-          rows={group.rows}
-          trailing={
-            copyAudioSwitch
-              ? {
-                  rowId: "audioEncoder",
-                  node: (
-                    <CopyAudioSwitch
-                      view={copyAudioSwitch}
-                      frozen={streamsFrozen}
-                      onCheckedChange={onCopyAudioChange}
-                      translate={translate}
-                    />
-                  ),
-                }
-              : null
-          }
-          translate={translate}
-        />
+        <SummaryRows rows={group.rows} slots={slots} translate={translate} />
       ) : null}
       {group.noteKey ? (
         <p className="text-muted-foreground">{translate(group.noteKey)}</p>
@@ -547,6 +752,22 @@ export interface ExportSetupProps {
    * resolves the audio mode to `encode`, because a copy applies no gain.
    */
   adjustGain: boolean;
+  /** Callback fired when the user turns the Adjust switch on or off (ADR 061). */
+  onAdjustGainChange: (on: boolean) => void;
+  /**
+   * True while the step measures for the Adjust switch. While the switch is on and the step does
+   * not measure, because the preset cannot export or no request can be built, the field shows
+   * the gain of the preset and cannot change.
+   */
+  adjustAvailable: boolean;
+  /** The ids of the reasons that the Export button names while Adjust holds the export. */
+  adjustDescriptionIds: AdjustDescriptionIds;
+  /** The text of the Gain field while Adjust is on. */
+  gainText: string;
+  /** Callback fired when the user changes the text of the Gain field. */
+  onGainTextChange: (text: string) => void;
+  /** The measurement of the audio while Adjust is on (ADR 061). */
+  measurement: LoudnessMeasurement;
   /**
    * True while the save panel is open. The request already holds the stream choice and the
    * copy of the audio, so the switches do not change until the panel closes.
@@ -611,6 +832,12 @@ export function ExportSetup({
   copyAudio,
   onCopyAudioChange,
   adjustGain,
+  onAdjustGainChange,
+  adjustAvailable,
+  adjustDescriptionIds,
+  gainText,
+  onGainTextChange,
+  measurement,
   streamsFrozen = false,
   onOpenSettings,
   firstControlRef,
@@ -742,7 +969,25 @@ export function ExportSetup({
       streams,
       segmentCount: sourceFacts.copySegmentCount,
     });
-  const copyAudioSwitch = presentCopyAudioSwitch(copyAudio, copyOffered);
+  const copyAudioSwitch = presentCopyAudioSwitch(copyAudio, copyOffered, adjustGain);
+  // The Adjust switch of the Gain row, with the field and the two lines while it is on (ADR 061).
+  const locale = numberFormatter.resolvedOptions().locale;
+  const gainField = adjustGain
+    ? presentGainField(
+        gainText,
+        measurement.status === "measuring" || !adjustAvailable,
+        streamsFrozen,
+      )
+    : null;
+  const adjust = {
+    switchView: presentAdjustSwitch(adjustGain),
+    field: gainField,
+    lines:
+      gainField !== null
+        ? presentLoudnessLines(measurement, gainField.tenthsDb, locale)
+        : null,
+    ids: adjustDescriptionIds,
+  };
   const audioMode = resolveExportAudioMode(copyAudio, copyOffered, adjustGain);
   const options = settings
     ? presentPresetOptions(settings, ffmpegState, numberFormatter, streams)
@@ -863,9 +1108,12 @@ export function ExportSetup({
               group={group}
               streamSwitch={streamSwitches[group.id]}
               copyAudioSwitch={group.id === "audio" ? copyAudioSwitch : null}
+              adjust={group.id === "audio" ? adjust : null}
               streamsFrozen={streamsFrozen}
               onStreamChange={onStreamChange}
               onCopyAudioChange={onCopyAudioChange}
+              onAdjustChange={onAdjustGainChange}
+              onGainTextChange={onGainTextChange}
               translate={translate}
             />
           ))}

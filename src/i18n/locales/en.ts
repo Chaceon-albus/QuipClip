@@ -1065,6 +1065,25 @@ export const en = {
       // can hold. When it is on, the export copies the audio of the source as it is, and the
       // preset does not encode it.
       copyAudio: "Copy audio",
+      // The tooltip of the Copy audio switch while the Adjust switch is on (ADR 061).
+      copyLockedByAdjust:
+        "Adjusting the gain encodes the audio, so it cannot be copied.",
+      // The visible label of the switch at the end of the Gain row. When it is on, QuipClip
+      // measures the audio of the export and fills the gain (ADR 061).
+      adjust: "Adjust",
+      // The two lines under the Gain row while Adjust is on.
+      measuredLabel: "Measured",
+      afterGainLabel: "After gain",
+      // The values of a line. {{loudness}} is the integrated loudness and {{peak}} the true
+      // peak, each with one decimal place and its sign, or "—" when there is no value.
+      loudnessValues: "I {{loudness}} LUFS · TP {{peak}} dBTP",
+      measuring: "Measuring the audio. You can export when the measurement ends.",
+      // {{percent}} is the part of the audio that QuipClip measured, as a percent in the
+      // number format of the language, such as "40%".
+      measuringPercent:
+        "Measuring the audio ({{percent}}). You can export when the measurement ends.",
+      // {{reason}} is the message of the failure.
+      measureFailed: "The audio could not be measured. {{reason}}",
       // The value of the same Encoder row while the switch is on. {{codec}} is the codec of the
       // source audio as FFmpeg names it, such as "aac" or "ac3".
       copiedAudio: "Copied from Source ({{codec}})",
@@ -1249,5 +1268,27 @@ export const en = {
     sourceRevisionChanged:
       "The video file on disk changed after it was opened. The marked segments may no longer name the same frames.",
     unknown: "An unknown error occurred during export.",
+  },
+  // The failures of the measurement of the audio of an export that are not failures of the
+  // export preparation (ADR 061). A failure of the preparation shows its message under
+  // `exportError`.
+  loudnessError: {
+    spawnFailed:
+      "QuipClip could not start FFmpeg, or a thread that reads the output of FFmpeg, to measure the audio.",
+    readFailed: "QuipClip could not read the audio that FFmpeg wrote.",
+    decodeFailed: "The FFmpeg process that decodes the audio did not end correctly.",
+    invalidAudio:
+      "The audio that FFmpeg wrote is not in a form that QuipClip can measure.",
+    audioShort: "FFmpeg wrote less audio than the export holds.",
+    invalidRequest: "The request of the measurement is not valid.",
+    busy: "Another measurement is still running.",
+    superseded: "The window loaded again before the measurement started.",
+    closed: "QuipClip is closing.",
+    invalidResponse: "The measurement sent an answer that QuipClip cannot read.",
+    // The command did not reach Rust, Rust could not start the thread of the measurement, or
+    // that thread stopped with an internal fault.
+    commandExecutionFailed: "QuipClip could not run the measurement of the audio.",
+    preparationTimedOut:
+      "QuipClip could not prepare the measurement in time. A drive or a network share might not be answering.",
   },
 } as const;

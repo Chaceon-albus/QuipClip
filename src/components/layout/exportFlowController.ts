@@ -54,6 +54,11 @@ import {
   sequenceExportPieces,
 } from "@/features/export/sequenceRequest";
 import { timelineStore } from "@/features/timeline";
+import type { TimelineTruth } from "@/features/timeline/types";
+import type { ImportMediaResult } from "@/features/media/types";
+import { loudnessRequestId } from "@/features/loudness/store";
+import type { LoudnessScope } from "@/features/loudness/types";
+import type { Preset } from "@/features/settings/types";
 import type { Segment } from "@/types/project";
 
 /**
@@ -65,6 +70,116 @@ export type MediaFlowDescriptor = MediaSourceRevisionDescriptor & {
   /** The probe of the import. Its format names tell an FLV, which can grow (ADR 058). */
   probe?: { readonly formatNames: readonly string[] };
 };
+
+/** The facts of the session that an export request reads. */
+export interface ExportRequestParts {
+  /** The clips, the segments and the sources of the sequence. */
+  readonly timeline: Pick<
+    TimelineTruth,
+    "clips" | "sequenceSegments" | "sequenceSources"
+  >;
+  /** The imported media of the sources, by source ID. */
+  readonly sources: Readonly<Record<string, ImportMediaResult>>;
+  /** The media of the attached clip, for a sequence of one clip. */
+  readonly media: MediaFlowDescriptor | null;
+  /** The segments of the attached clip, for a sequence of one clip. */
+  readonly segments: readonly Segment[];
+  /** The source of the attached clip, for a sequence of one clip. */
+  readonly sourceId: string | null;
+  readonly outputPath: string;
+  readonly preset: Preset;
+  readonly streams: ExportStreams;
+  readonly audioMode: ExportAudioMode;
+  /** True after "Export anyway": the request carries no revision (ADR 024). */
+  readonly skipSourceRevisionCheck: boolean;
+  /** The gain of the Adjust switch (ADR 061), or undefined while it is off. */
+  readonly adjustedAudioGainTenthsDb?: number;
+  /** The builder of the request of one clip. Defaults to `buildExportRequest`. */
+  readonly buildRequest?: typeof buildExportRequest;
+}
+
+/**
+ * The export request of the session: of the pieces of the sequence when it has several clips
+ * (`buildSequenceExportRequest`), and of the segments of the attached clip otherwise
+ * (`buildExportRequest`). Null when the request cannot be built. The export and the measurement
+ * of its audio (ADR 061) both build their request here, so both read the same audio.
+ */
+export function composeExportRequest(parts: ExportRequestParts): ExportRequest | null {
+  const { timeline, media, preset, streams, audioMode, outputPath } = parts;
+  if (timeline.clips.length > 1) {
+    return buildSequenceExportRequest({
+      clips: timeline.clips,
+      segments: timeline.sequenceSegments,
+      sources: new Map(Object.entries(timeline.sequenceSources)),
+      media: parts.sources,
+      outputPath,
+      preset,
+      streams,
+      audioMode,
+      adjustedAudioGainTenthsDb: parts.adjustedAudioGainTenthsDb,
+      checkRevisions: !parts.skipSourceRevisionCheck,
+    });
+  }
+  return (parts.buildRequest ?? buildExportRequest)({
+    media,
+    outputPath,
+    segments: parts.segments,
+    activeSourceId: parts.sourceId,
+    preset,
+    streams,
+    audioMode,
+    adjustedAudioGainTenthsDb: parts.adjustedAudioGainTenthsDb,
+    expectedSourceRevision:
+      parts.skipSourceRevisionCheck || !media
+        ? null
+        : { size: media.size, mtime: media.mtime },
+  });
+}
+
+/**
+ * The output path that `measurementScope` gives `composeExportRequest`. A measurement writes no
+ * file, and the builders need a path; the scope drops it.
+ */
+const MEASUREMENT_OUTPUT_PATH = "measurement";
+
+/**
+ * The scope of the measurement of the audio of the export that the setup step would start now
+ * (ADR 061): the request of `composeExportRequest`, with no output path and no audio mode. Null
+ * when the request cannot be built.
+ */
+export function measurementScope(
+  parts: Omit<
+    ExportRequestParts,
+    "outputPath" | "audioMode" | "adjustedAudioGainTenthsDb"
+  >,
+): LoudnessScope | null {
+  const request = composeExportRequest({
+    ...parts,
+    outputPath: MEASUREMENT_OUTPUT_PATH,
+    audioMode: "encode",
+  });
+  return request === null ? null : scopeOfRequest(request);
+}
+
+/** The scope of the measurement of the audio of `request`. */
+function scopeOfRequest(request: ExportRequest): LoudnessScope {
+  return {
+    sources: request.sources,
+    pieces: request.pieces,
+    segmentCount: request.segmentCount,
+    preset: request.preset,
+    streams: request.streams,
+  };
+}
+
+/**
+ * The Adjust switch while it is active (ADR 061): the gain of the Gain field, and the identity of
+ * the request that the step measured for it (`loudnessRequestId`). A null request means that the
+ * step could not build a request, so it measured nothing, and the request carries the gain of the
+ * preset.
+ */
+export type AdjustedGain =
+  { readonly request: string; readonly tenthsDb: number } | { readonly request: null };
 
 /** True when the probe of `media` names the FLV container. */
 function isFlvMedia(media: MediaFlowDescriptor): boolean {
@@ -465,7 +580,11 @@ export class ExportFlowController {
    *    which the segments were marked against, unless `skipSourceRevisionCheck` is set. A null
    *    request reports `noSegments` or `sourceNotFound`. A sequence of several clips builds the
    *    request from the pieces of its segments, with the path and the revision of each source
-   *    (`buildSequenceExportRequest`).
+   *    (`buildSequenceExportRequest`). With `adjusted`, the request carries its gain when the
+   *    request measures the same audio as the setup step measured for it. Otherwise the audio
+   *    changed while the save panel was open, also from no request to a request, and the step
+   *    returns false and keeps the modal open, where the setup step measures the new audio
+   *    (ADR 061).
    * 6. Calls `setModalOpen(true)` and awaits `submit(request)`.
    *    - `refused`: no run exists. Reports the error of the result, for example
    *      `outputAlreadyQueued`, keeps the modal open, and returns false.
@@ -486,6 +605,7 @@ export class ExportFlowController {
     presetId: string,
     streams: ExportStreams,
     audioMode: ExportAudioMode,
+    adjusted?: AdjustedGain,
   ): Promise<boolean> {
     const settings = this.getSettingsFn();
     const preset = settings?.presets.find((p) => p.id === presetId);
@@ -534,37 +654,35 @@ export class ExportFlowController {
     const currentSegments = this.getSegmentsFn();
     const currentSourceId = this.getSourceIdFn();
 
-    const timeline = timelineStore.getState();
-    const request =
-      timeline.clips.length > 1
-        ? buildSequenceExportRequest({
-            clips: timeline.clips,
-            segments: timeline.sequenceSegments,
-            sources: new Map(Object.entries(timeline.sequenceSources)),
-            media: mediaStore.getState().sources,
-            outputPath,
-            preset,
-            streams,
-            audioMode,
-            checkRevisions: !this.skipSourceRevisionCheck,
-          })
-        : this.buildRequestFn({
-            media: currentMedia,
-            outputPath,
-            segments: currentSegments,
-            activeSourceId: currentSourceId,
-            preset,
-            streams,
-            audioMode,
-            expectedSourceRevision:
-              this.skipSourceRevisionCheck || !currentMedia
-                ? null
-                : { size: currentMedia.size, mtime: currentMedia.mtime },
-          });
+    const request = composeExportRequest({
+      timeline: timelineStore.getState(),
+      sources: mediaStore.getState().sources,
+      media: currentMedia,
+      segments: currentSegments,
+      sourceId: currentSourceId,
+      outputPath,
+      preset,
+      streams,
+      audioMode,
+      skipSourceRevisionCheck: this.skipSourceRevisionCheck,
+      adjustedAudioGainTenthsDb:
+        adjusted?.request === null ? undefined : adjusted?.tenthsDb,
+      buildRequest: this.buildRequestFn,
+    });
 
     if (!request) {
       const code: ExportErrorCode = currentMedia ? "noSegments" : "sourceNotFound";
       this.reportErrorFn(new ExportError({ code }));
+      this.setModalOpen(true);
+      return false;
+    }
+    if (
+      adjusted !== undefined &&
+      (adjusted.request === null ||
+        loudnessRequestId(scopeOfRequest(request)) !== adjusted.request)
+    ) {
+      // The gain belongs to the audio that the step measured, and the audio of the export
+      // changed while the save panel was open.
       this.setModalOpen(true);
       return false;
     }
@@ -792,8 +910,14 @@ export function confirmExportFlow(
   presetId: string,
   streams: ExportStreams,
   audioMode: ExportAudioMode,
+  adjusted?: AdjustedGain,
 ): Promise<boolean> {
-  return new ExportFlowController(options).confirm(presetId, streams, audioMode);
+  return new ExportFlowController(options).confirm(
+    presetId,
+    streams,
+    audioMode,
+    adjusted,
+  );
 }
 
 /** The stores that `openExportFlow` reads. Each one defaults to its production store. */

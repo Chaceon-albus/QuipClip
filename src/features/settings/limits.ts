@@ -581,6 +581,31 @@ function optionListIssue(
 }
 
 /**
+ * The issue of a gain in tenths of a decibel, or null for a valid gain (ADR 054). A value that is
+ * not an integer, the `NaN` of a blank field included, is `oneDecimal`: the editor shows decibels,
+ * and such a value is the fraction that it stores. A value outside the bounds is `outOfRange`,
+ * with the bounds in decibels. The bounds lie inside the safe integer range, so a whole number too
+ * large for it is out of range, not a decimal problem. The Gain field of the export setup step
+ * (ADR 061) uses the same check.
+ */
+export function audioGainIssue(tenthsDb: number): PresetFieldIssue | null {
+  if (!Number.isInteger(tenthsDb)) {
+    return { field: "audioGainTenthsDb", code: "oneDecimal" };
+  }
+  if (tenthsDb < MIN_AUDIO_GAIN_TENTHS_DB || tenthsDb > MAX_AUDIO_GAIN_TENTHS_DB) {
+    return {
+      field: "audioGainTenthsDb",
+      code: "outOfRange",
+      values: {
+        min: MIN_AUDIO_GAIN_TENTHS_DB / 10,
+        max: MAX_AUDIO_GAIN_TENTHS_DB / 10,
+      },
+    };
+  }
+  return null;
+}
+
+/**
  * Validates the fields of an individual export preset, returning issues in fixed field order.
  *
  * Order: name, videoEncoder, audioEncoder, audioBitrate, audioSampleRate, audioGainTenthsDb,
@@ -670,20 +695,9 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
   // value with more than one decimal place is the fraction it stores); outside bounds ->
   // outOfRange, with the bounds in decibels. The bounds lie inside the safe integer range, so a
   // whole number too large for it is out of range, not a decimal problem.
-  if (!Number.isInteger(preset.audioGainTenthsDb)) {
-    issues.push({ field: "audioGainTenthsDb", code: "oneDecimal" });
-  } else if (
-    preset.audioGainTenthsDb < MIN_AUDIO_GAIN_TENTHS_DB ||
-    preset.audioGainTenthsDb > MAX_AUDIO_GAIN_TENTHS_DB
-  ) {
-    issues.push({
-      field: "audioGainTenthsDb",
-      code: "outOfRange",
-      values: {
-        min: MIN_AUDIO_GAIN_TENTHS_DB / 10,
-        max: MAX_AUDIO_GAIN_TENTHS_DB / 10,
-      },
-    });
+  const gainIssue = audioGainIssue(preset.audioGainTenthsDb);
+  if (gainIssue !== null) {
+    issues.push(gainIssue);
   }
 
   // 7. quality: not safe integer -> notInteger; outside range -> outOfRange

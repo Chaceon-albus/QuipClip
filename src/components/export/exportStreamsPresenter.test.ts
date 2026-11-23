@@ -267,11 +267,24 @@ describe("presentCopyAudioSwitch", () => {
     expect(presentCopyAudioSwitch(false, true)).toStrictEqual({
       checked: false,
       labelKey: "export.setup.copyAudio",
+      lockKey: null,
     });
     expect(presentCopyAudioSwitch(true, true)).toStrictEqual({
       checked: true,
       labelKey: "export.setup.copyAudio",
+      lockKey: null,
     });
+  });
+
+  it("stays in its place, off and locked, while Adjust is on (ADR 061)", () => {
+    for (const chosen of [false, true]) {
+      expect(presentCopyAudioSwitch(chosen, true, true)).toStrictEqual({
+        checked: false,
+        labelKey: "export.setup.copyAudio",
+        lockKey: "export.setup.copyLockedByAdjust",
+      });
+    }
+    expect(presentCopyAudioSwitch(true, false, true)).toBeNull();
   });
 
   it("shows no switch where the step does not offer the copy, whatever the choice", () => {

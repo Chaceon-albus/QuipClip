@@ -73,6 +73,8 @@ import {
 } from "./exportDialogCompose";
 import { resolveExportDismissal } from "./exportCancelState";
 import { useExportSourceFacts } from "./useExportSourceFacts";
+import { presentGainField } from "./loudnessAdjustPresenter";
+import { useLoudnessAdjust, useMeasurementScope } from "./useLoudnessAdjust";
 import {
   resolveExportDialogFocusOrder,
   resolveExportDialogFooter,
@@ -515,9 +517,50 @@ export function ExportDialog({
   // The blocker does not read the copy: the backend encodes the audio with the preset when it
   // cannot copy it.
   const blocker = presentSetupBlocker(selectedPreset, streams);
+  // The Adjust switch of the Gain row (ADR 061). While it is active, the step measures the audio
+  // of the export and fills the Gain field, and the request carries the gain of the field. It is
+  // active where the Gain row shows (an export that writes audio, which encodes it while Adjust is
+  // on) and the preset can export.
+  const setAdjustGain = useExportStreamChoice((state) => state.setAdjustGain);
+  const adjustActive =
+    open &&
+    step === "setup" &&
+    adjustGain &&
+    streams !== "videoOnly" &&
+    selectedPreset !== null &&
+    blocker === null;
+  const measuredScope = useMeasurementScope(
+    selectedPreset,
+    streams,
+    sourceChangeAccepted,
+  );
+  const loudnessAdjust = useLoudnessAdjust({
+    active: adjustActive,
+    scope: measuredScope,
+    presetGainTenths: selectedPreset?.audioGainTenthsDb ?? 0,
+  });
+  // The step measures only while it can build the request. Otherwise the field shows the gain of
+  // the preset, and the request carries the preset as it is.
+  const adjustAvailable = loudnessAdjust.request !== null;
+  const adjustedGain =
+    adjustAvailable && !loudnessAdjust.pending
+      ? presentGainField(loudnessAdjust.fieldText, false, false).tenthsDb
+      : null;
+  // The export waits for the measurement, and for a gain that is valid. Its reason shows on the
+  // Measured line and under the field, and the Export button names it.
+  const adjustBlocksExport =
+    adjustAvailable && (loudnessAdjust.pending || adjustedGain === null);
+  const measuredLineId = useId();
+  const gainIssueId = useId();
+  const adjustReasonId = adjustBlocksExport
+    ? loudnessAdjust.pending
+      ? measuredLineId
+      : gainIssueId
+    : undefined;
   const exportDisabled =
     effectivePresetId === null ||
     blocker !== null ||
+    adjustBlocksExport ||
     frame.choosingDestination ||
     frame.backCheckPending;
 
@@ -904,6 +947,11 @@ export function ExportDialog({
         effectivePresetId,
         streams,
         audioMode,
+        !adjustActive
+          ? undefined
+          : loudnessAdjust.request === null || adjustedGain === null
+            ? { request: null }
+            : { request: loudnessAdjust.request, tenthsDb: adjustedGain },
       );
       if (started && isCurrent()) {
         // Clear the user's manual selection once the export has started so that a subsequent
@@ -1087,6 +1135,12 @@ export function ExportDialog({
             copyAudio={copyAudio}
             onCopyAudioChange={setCopyAudio}
             adjustGain={adjustGain}
+            onAdjustGainChange={setAdjustGain}
+            adjustAvailable={adjustAvailable}
+            adjustDescriptionIds={{ measured: measuredLineId, issue: gainIssueId }}
+            gainText={loudnessAdjust.fieldText}
+            onGainTextChange={loudnessAdjust.setFieldText}
+            measurement={loudnessAdjust.measurement}
             streamsFrozen={frame.choosingDestination}
             onOpenSettings={(section) => {
               handleOpenSettings(section, effectivePresetId);
@@ -1204,6 +1258,7 @@ export function ExportDialog({
                 <Button
                   ref={exportButtonRef}
                   disabled={exportDisabled}
+                  aria-describedby={adjustReasonId}
                   aria-busy={frame.backCheckPending || undefined}
                   onClick={() => void handleConfirmExport()}
                   onKeyDown={(event) => {

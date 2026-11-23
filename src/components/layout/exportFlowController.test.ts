@@ -5,10 +5,12 @@ import {
   ExportFlowController,
   openExportFlow,
   needsStrictRevisionCheck,
+  measurementScope,
   runExportFlow,
   SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
+import { loudnessRequestId } from "@/features/loudness/store";
 import {
   cancelExport as clientCancelExport,
   createExportComposeStore,
@@ -2543,5 +2545,117 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
       { id: "A", path: "/a.mp4" },
       { id: "B", path: "/b.mp4" },
     ]);
+  });
+
+  describe("the gain of the Adjust switch (ADR 061)", () => {
+    const preset = createPreset({ id: "p1" });
+
+    /** The identity of the request that the setup step measures now. */
+    function measured(): string {
+      const scope = measurementScope({
+        timeline: timelineStore.getState(),
+        sources: mediaStore.getState().sources,
+        media,
+        segments: [],
+        sourceId: "sequence:1",
+        preset,
+        streams: "videoAndAudio",
+        skipSourceRevisionCheck: false,
+      });
+      if (scope === null) {
+        throw new Error("the sequence gives no request");
+      }
+      return loudnessRequestId(scope);
+    }
+
+    function controllerWith(openSaveDialog: () => Promise<string | null>) {
+      const submit = vi.fn().mockResolvedValue(STARTED);
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const controller = createExportFlowController({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        submit,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getSettings: () => createSettings([preset], "p1"),
+        getMedia: () => media,
+        getSourceId: () => "sequence:1",
+        getSegments: () => [],
+      });
+      return { controller, submit, setModalOpen, reportError };
+    }
+
+    it("carries the gain when the export has the audio that the step measured", async () => {
+      loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+      const { controller, submit } = controllerWith(() => Promise.resolve("/out.mp4"));
+
+      const result = await controller.confirm("p1", "videoAndAudio", "encode", {
+        tenthsDb: -17,
+        request: measured(),
+      });
+
+      expect(result).toBe(true);
+      expect(submit).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ adjustedAudioGainTenthsDb: -17 }),
+      );
+    });
+
+    it("starts nothing when the audio changed while the save panel was open", async () => {
+      loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+      const request = measured();
+      const { controller, submit, setModalOpen, reportError } = controllerWith(() => {
+        loadSequence([anchored("s1", "a1", "200", "b1", "1000")]);
+        return Promise.resolve("/out.mp4");
+      });
+
+      const result = await controller.confirm("p1", "videoAndAudio", "encode", {
+        tenthsDb: -17,
+        request,
+      });
+
+      expect(result).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      // The new audio builds a request, so nothing failed.
+      expect(reportError).not.toHaveBeenCalled();
+      // The dialog stays on the setup step, which measures the new audio.
+      expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+    });
+
+    it("starts nothing when a request becomes possible while the save panel is open", async () => {
+      // No segment: the step could build no request, so it measured nothing.
+      loadSequence([]);
+      const { controller, submit, setModalOpen, reportError } = controllerWith(() => {
+        loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+        return Promise.resolve("/out.mp4");
+      });
+
+      const result = await controller.confirm("p1", "videoAndAudio", "encode", {
+        request: null,
+      });
+
+      expect(result).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+    });
+
+    it("reports noSegments when no request can be built with Adjust on", async () => {
+      loadSequence([]);
+      const { controller, submit, reportError } = controllerWith(() =>
+        Promise.resolve("/out.mp4"),
+      );
+
+      const result = await controller.confirm("p1", "videoAndAudio", "encode", {
+        request: null,
+      });
+
+      expect(result).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      expect(reportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "noSegments" }),
+      );
+    });
   });
 });

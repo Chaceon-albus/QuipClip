@@ -111,6 +111,12 @@ export type CopyAudioSwitchView = {
   readonly checked: boolean;
   /** The visible label of the switch, which is also its accessible name. */
   readonly labelKey: "export.setup.copyAudio";
+  /**
+   * The reason of a locked switch, or null. While the Adjust switch is on, the export encodes its
+   * audio, so the switch stays in its place, off and locked, and its tooltip gives this reason
+   * (ADR 061).
+   */
+  readonly lockKey: "export.setup.copyLockedByAdjust" | null;
 };
 
 /**
@@ -118,17 +124,29 @@ export type CopyAudioSwitchView = {
  * offer the copy (`canCopyAudio`). The step then shows no switch, and the request asks for an
  * encode, whatever the choice holds.
  *
- * The switch shows the choice of the user and not the resolved mode: while it shows, the two
- * agree (`resolveExportAudioMode`).
+ * The switch shows the choice of the user and not the resolved mode: while it shows and Adjust
+ * is off, the two agree (`resolveExportAudioMode`). While Adjust is on, the switch is off and
+ * locked.
  *
  * @param chosen The choice of the user (`copyAudio` of the stream choice).
  * @param offered True when the step offers the copy.
+ * @param adjustGain True while the Adjust switch of the Gain row is on (ADR 061).
  */
 export function presentCopyAudioSwitch(
   chosen: boolean,
   offered: boolean,
+  adjustGain = false,
 ): CopyAudioSwitchView | null {
-  return offered ? { checked: chosen, labelKey: "export.setup.copyAudio" } : null;
+  if (!offered) {
+    return null;
+  }
+  return adjustGain
+    ? {
+        checked: false,
+        labelKey: "export.setup.copyAudio",
+        lockKey: "export.setup.copyLockedByAdjust",
+      }
+    : { checked: chosen, labelKey: "export.setup.copyAudio", lockKey: null };
 }
 
 /**
