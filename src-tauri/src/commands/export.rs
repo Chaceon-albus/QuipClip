@@ -241,23 +241,23 @@ impl ExportRequestWire {
 /// measurement of its audio (ADR 061) share them. The fields of an export that only the run reads,
 /// such as its output path, are not here.
 #[derive(Debug, Clone, Copy)]
-struct PlanScope<'a> {
+pub(super) struct PlanScope<'a> {
     /// See [`ExportRequestWire::sources`].
-    sources: &'a [ExportSourceWire],
+    pub(super) sources: &'a [ExportSourceWire],
     /// See [`ExportRequestWire::pieces`].
-    pieces: &'a [ExportPieceWire],
+    pub(super) pieces: &'a [ExportPieceWire],
     /// See [`ExportRequestWire::segment_count`].
-    segment_count: u32,
+    pub(super) segment_count: u32,
     /// See [`ExportRequestWire::preset`].
-    preset: &'a Preset,
+    pub(super) preset: &'a Preset,
     /// See [`ExportRequestWire::streams`].
-    streams: ExportStreams,
+    pub(super) streams: ExportStreams,
     /// See [`ExportRequestWire::audio_mode`].
-    audio_mode: ExportAudioMode,
+    pub(super) audio_mode: ExportAudioMode,
     /// The gain that replaces the gain of the preset in the plan, or `None` for the gain of the
     /// preset ([`PlanRequest::audio_gain_tenths_db`]). See
     /// [`ExportRequestWire::adjusted_audio_gain_tenths_db`].
-    adjusted_audio_gain_tenths_db: Option<i32>,
+    pub(super) adjusted_audio_gain_tenths_db: Option<i32>,
 }
 
 /// A request whose sources and pieces [`resolve_request`] checked.
@@ -452,7 +452,7 @@ pub struct ExportCommandError {
 
 impl ExportCommandError {
     /// A failure with a stable code and no diagnostic text.
-    fn new(code: ExportErrorCode) -> Self {
+    pub(super) fn new(code: ExportErrorCode) -> Self {
         Self {
             code,
             detail: None,
@@ -465,7 +465,7 @@ impl ExportCommandError {
 
     /// A failure carrying an untranslated diagnostic, such as an operating system message or
     /// an ffmpeg stderr tail. ADR 011 keeps the English out of `code` and puts it here.
-    fn with_detail(code: ExportErrorCode, detail: impl Into<String>) -> Self {
+    pub(super) fn with_detail(code: ExportErrorCode, detail: impl Into<String>) -> Self {
         Self {
             detail: Some(detail.into()),
             ..Self::new(code)
@@ -680,7 +680,7 @@ pub async fn cancel_export(
 /// This mirrors `commands::capabilities::discover_for_probe`. It is the one read of the
 /// settings file in an export: the request carries its preset (ADR 049), and the configured
 /// path of ffmpeg is part of the machine, so the run reads it when it starts.
-fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateError> {
+pub(super) fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateError> {
     let configured = settings::configured_ffmpeg_path(app_data_directory);
     ffmpeg::discover(configured.as_deref(), app_data_directory)
 }
@@ -688,7 +688,7 @@ fn discover_for_export(app_data_directory: &Path) -> Result<FfmpegPaths, LocateE
 /// The option probe of ADR 055 as [`prepare_export_with`] runs it: the path of `ffmpeg`, the work
 /// directory, and the stop flag of preparation. Production passes
 /// [`probe_graph_file_option`].
-type GraphFileProbe<'a> =
+pub(super) type GraphFileProbe<'a> =
     dyn Fn(&Path, &WorkDirectory, &AtomicBool) -> Result<GraphFileOption, GraphFileProbeError> + 'a;
 
 /// The plain data [`prepare_export_with`] needs, grouped apart from the five functions it also
@@ -725,33 +725,33 @@ struct PrepareRequest<'a> {
 /// fields after [`Self::destination`] mean what the fields of [`PrepareRequest`] with the same
 /// names mean.
 #[derive(Clone, Copy)]
-struct PlanPreparation<'a> {
+pub(super) struct PlanPreparation<'a> {
     /// The fields of the request that decide the plan.
-    scope: PlanScope<'a>,
+    pub(super) scope: PlanScope<'a>,
     /// The output path of an export, which the plan checks (checks 7 to 11 of [`build_plan`]).
     /// `None` for a request that writes no file, such as the measurement of ADR 061. The plan
     /// then skips those checks.
-    destination: Option<&'a Path>,
-    app_data_directory: &'a Path,
-    cache_directory: &'a Path,
-    cancel: &'a AtomicBool,
-    preview_windows: &'a PreviewWindows,
-    stage: &'a PreparationStageCell,
+    pub(super) destination: Option<&'a Path>,
+    pub(super) app_data_directory: &'a Path,
+    pub(super) cache_directory: &'a Path,
+    pub(super) cancel: &'a AtomicBool,
+    pub(super) preview_windows: &'a PreviewWindows,
+    pub(super) stage: &'a PreparationStageCell,
 }
 
 /// What [`prepare_plan_with`] gives: the plan and what each later step of preparation reads.
 #[derive(Debug)]
-struct PreparedPlan {
+pub(super) struct PreparedPlan {
     /// The plan, with the FLV input of each source attached.
-    plan: ExportPlan,
+    pub(super) plan: ExportPlan,
     /// The one assignment of the inputs (obligation 3 of this module), which the graphs and the
     /// commands must read.
-    inputs: InputAssignment,
+    pub(super) inputs: InputAssignment,
     /// The located `ffmpeg` and `ffprobe`.
-    executables: FfmpegPaths,
+    pub(super) executables: FfmpegPaths,
     /// The work directory (ADR 055). It holds the FLV heads of the plan, and it removes itself
     /// when it drops.
-    work: WorkDirectory,
+    pub(super) work: WorkDirectory,
 }
 
 /// Do the steps of preparation that an export and a measurement of its audio share (ADR 061), in
@@ -792,7 +792,7 @@ struct PreparedPlan {
 /// [`PREPARATION_TIMEOUT`], ends the run even while a step is blocked. `stage` tells that watchdog
 /// which step runs ([`PreparationStage`]). A measurement has a slot of its own (ADR 061), and its
 /// caller must bound these steps in the same way.
-fn prepare_plan_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
+pub(super) fn prepare_plan_with<Discover, Probe, FirstPacket, RateAt, Gaps>(
     preparation: PlanPreparation<'_>,
     discover: Discover,
     mut probe: Probe,
@@ -1186,7 +1186,11 @@ where
 /// Write `graph` as the file `name` of the work directory: the exact bytes of the builder, ASCII,
 /// with no byte order mark and no line end (ADR 055). A failed write gives
 /// `workDirectoryUnavailable`, with the error as its detail.
-fn write_graph(work: &WorkDirectory, name: &str, graph: &str) -> Result<(), ExportCommandError> {
+pub(super) fn write_graph(
+    work: &WorkDirectory,
+    name: &str,
+    graph: &str,
+) -> Result<(), ExportCommandError> {
     work.write(name, graph.as_bytes()).map_err(|error| {
         ExportCommandError::with_detail(
             ExportErrorCode::WorkDirectoryUnavailable,
@@ -1752,7 +1756,7 @@ fn check_source_revision(source: &ExportSourceWire) -> Result<(), ExportCommandE
 /// The frontend sends a preset of the settings that this backend loaded or saved, and both
 /// validate, so this fails only for a fault in the frontend. The reason is a diagnostic for a
 /// bug report, so it goes in the detail (ADR 011).
-fn validate_request_preset(preset: &Preset) -> Result<(), ExportCommandError> {
+pub(super) fn validate_request_preset(preset: &Preset) -> Result<(), ExportCommandError> {
     settings::validate_preset(preset).map_err(|error| {
         ExportCommandError::with_detail(ExportErrorCode::InvalidPreset, error.to_string())
     })
@@ -1951,7 +1955,7 @@ pub(crate) const PREPARATION_POLL: Duration = Duration::from_millis(50);
 /// The time limits of the watchdog of [`run_export_job_with`]. Production uses
 /// [`PreparationLimits::PRODUCTION`]. The tests use limits of milliseconds.
 #[derive(Debug, Clone, Copy)]
-struct PreparationLimits {
+pub(super) struct PreparationLimits {
     /// See [`PREPARATION_TIMEOUT`].
     timeout: Duration,
     /// See [`PREPARATION_CANCEL_GRACE`].
@@ -1961,7 +1965,7 @@ struct PreparationLimits {
 }
 
 impl PreparationLimits {
-    const PRODUCTION: Self = Self {
+    pub(super) const PRODUCTION: Self = Self {
         timeout: PREPARATION_TIMEOUT,
         grace: PREPARATION_CANCEL_GRACE,
         poll: PREPARATION_POLL,
@@ -1970,7 +1974,7 @@ impl PreparationLimits {
     /// These limits for a preparation of `sources` sources: the timeout multiplied by their
     /// number, at least one. Preparation runs its bounded steps once for each source (ADR 050,
     /// ADR 053), so one limit covers the whole preparation.
-    fn for_sources(self, sources: usize) -> Self {
+    pub(super) fn for_sources(self, sources: usize) -> Self {
         let factor = u32::try_from(sources.max(1)).unwrap_or(u32::MAX);
         Self {
             timeout: self.timeout.saturating_mul(factor),
@@ -1984,7 +1988,7 @@ impl PreparationLimits {
 /// The list is short on purpose. It names the step that waits, not each call inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-enum PreparationStage {
+pub(super) enum PreparationStage {
     /// The discovery of ffmpeg and ffprobe, with the read of the settings file.
     Discovery = 0,
     /// The read of the revision of the source ([`check_source_revision`]).
@@ -2052,14 +2056,14 @@ impl PreparationStage {
 /// the source whose steps run, in the order of the first piece of each source, or 0 outside the
 /// steps of a source.
 #[derive(Debug, Default)]
-struct PreparationStageCell(AtomicUsize);
+pub(super) struct PreparationStageCell(AtomicUsize);
 
 /// The bits of [`PreparationStageCell`] that hold the stage.
 const STAGE_BITS: u32 = 8;
 
 impl PreparationStageCell {
     /// Record that `stage` starts now, for the source whose steps run already, if any.
-    fn enter(&self, stage: PreparationStage) {
+    pub(super) fn enter(&self, stage: PreparationStage) {
         let stage = stage as usize;
         // Keep the source bits, and replace the stage bits, in one exchange.
         let mut word = self.0.load(Ordering::SeqCst);
@@ -2219,68 +2223,84 @@ fn run_export_job_with<Prepare, Run, Fail>(
     Run: FnOnce(ExportSlot, PreparedExport),
     Fail: FnOnce(ExportCommandError),
 {
+    let cancel = slot.cancel_flag();
+    match prepare_on_helper("export-prepare", &cancel, limits, prepare) {
+        Ok(prepared) => run(slot, prepared),
+        Err(error) => fail(error),
+    }
+}
+
+/// Run `prepare` on a helper thread named `name`, and watch it from this thread within `limits`.
+///
+/// `cancel` is the cancel flag of the caller: the slot of an export run, or the job of a
+/// measurement of loudness (ADR 061). The rules are those of [`run_export_job_with`]: a cancel
+/// before the call starts no helper, a cancel or the timeout ends the wait after the grace, an
+/// abandoned helper drops its late answer on its own thread, and a cancel that comes after an
+/// answer drops that answer. Every failure is the error that the caller reports.
+pub(super) fn prepare_on_helper<T, Prepare>(
+    name: &str,
+    cancel: &AtomicBool,
+    limits: PreparationLimits,
+    prepare: Prepare,
+) -> Result<T, ExportCommandError>
+where
+    T: Send + 'static,
+    Prepare: FnOnce(&AtomicBool, &PreparationStageCell) -> Result<T, ExportCommandError>
+        + Send
+        + 'static,
+{
     // Before the spawn: a run that a Stop reached before it started does not touch the file
     // system at all.
-    if slot.is_canceled() {
-        fail(ExportCommandError::new(ExportErrorCode::Canceled));
-        return;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
-    let stop = Arc::new(AtomicBool::new(slot.is_canceled()));
+    let stop = Arc::new(AtomicBool::new(cancel.load(Ordering::SeqCst)));
     let stage = Arc::new(PreparationStageCell::default());
     // A rendezvous channel. A send completes only when this thread receives the answer, so no
     // answer waits in a buffer after this thread stopped waiting. The send of an abandoned
     // helper fails, and the answer drops on the helper thread.
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<PreparationAnswer>(0);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<T, ExportCommandError>>(0);
     let spawned = {
         let stop = Arc::clone(&stop);
         let stage = Arc::clone(&stage);
         std::thread::Builder::new()
-            .name("export-prepare".to_owned())
+            .name(name.to_owned())
             .spawn(move || {
                 let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     prepare(&stop, &stage)
                 }))
                 .unwrap_or_else(|payload| Err(panic_error(payload.as_ref())));
-                // A failed send means that the export thread stopped waiting. The answer then
+                // A failed send means that the watching thread stopped waiting. The answer then
                 // drops here, on this thread.
                 let _ = sender.send(answer);
             })
     };
     if let Err(error) = spawned {
-        fail(ExportCommandError::with_detail(
+        return Err(ExportCommandError::with_detail(
             ExportErrorCode::CommandExecutionFailed,
             error.to_string(),
         ));
-        return;
     }
-    let cancel = slot.cancel_flag();
-    let answer = watch_preparation(&receiver, &cancel, &stop, &stage, limits);
+    let answer = watch_preparation(&receiver, cancel, &stop, &stage, limits);
     // Before the report, so the send of an abandoned helper fails from now on.
     drop(receiver);
-    let prepared = match answer {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            fail(error);
-            return;
-        }
-    };
-    if slot.is_canceled() {
+    let prepared = answer?;
+    if cancel.load(Ordering::SeqCst) {
         drop(prepared);
-        fail(ExportCommandError::new(ExportErrorCode::Canceled));
-        return;
+        return Err(ExportCommandError::new(ExportErrorCode::Canceled));
     }
-    run(slot, prepared);
+    Ok(prepared)
 }
 
 /// Wait for the answer of the helper thread of preparation, within `limits`. See
 /// [`run_export_job_with`] for the rules.
-fn watch_preparation(
-    receiver: &std::sync::mpsc::Receiver<PreparationAnswer>,
+fn watch_preparation<T>(
+    receiver: &std::sync::mpsc::Receiver<Result<T, ExportCommandError>>,
     cancel: &AtomicBool,
     stop: &AtomicBool,
     stage: &PreparationStageCell,
     limits: PreparationLimits,
-) -> PreparationAnswer {
+) -> Result<T, ExportCommandError> {
     use std::sync::mpsc::RecvTimeoutError;
 
     let started = Instant::now();
@@ -2324,9 +2344,10 @@ fn watch_preparation(
 ///
 /// The caller reports the end of the run itself, so the answer only matters for its cleanup. A
 /// prepared export that comes in the grace drops here, and its reservation guard deletes the
-/// temporary file before the report.
-fn stop_preparation(
-    receiver: &std::sync::mpsc::Receiver<PreparationAnswer>,
+/// temporary file before the report. A prepared measurement removes its work directory in the
+/// same way.
+fn stop_preparation<T>(
+    receiver: &std::sync::mpsc::Receiver<Result<T, ExportCommandError>>,
     stop: &AtomicBool,
     grace: Duration,
 ) {
@@ -2873,7 +2894,7 @@ fn path_to_string(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ffmpeg::export::{OutputTiming, PlannedSegment, PlannedVideo, MAX_EXPORT_INPUTS};
     use crate::ffmpeg::ExecutableOrigin;
@@ -2895,7 +2916,7 @@ mod tests {
         }
     }
 
-    fn sample_preset(id: &str) -> Preset {
+    pub(crate) fn sample_preset(id: &str) -> Preset {
         Preset {
             id: id.to_owned(),
             name: "Test preset".to_owned(),
@@ -2918,7 +2939,7 @@ mod tests {
         }
     }
 
-    fn sample_probe() -> MediaProbe {
+    pub(crate) fn sample_probe() -> MediaProbe {
         MediaProbe {
             format_names: vec!["mov".to_owned(), "mp4".to_owned()],
             format_long_name: Some("QuickTime / MOV".to_owned()),
@@ -2945,7 +2966,7 @@ mod tests {
     }
 
     /// A read of the first audio packet that fails, so the values of the re-probe stand.
-    fn first_packet_unread(
+    pub(crate) fn first_packet_unread(
         _: &Path,
         _: &Path,
         _: u32,
@@ -2969,7 +2990,7 @@ mod tests {
     }
 
     /// A read of the gaps inside the audio stream that finds none.
-    fn no_audio_gaps(
+    pub(crate) fn no_audio_gaps(
         _: &Path,
         _: &Path,
         _: &AudioGapRead<'_>,
@@ -2979,7 +3000,7 @@ mod tests {
     }
 
     /// The option probe of ADR 055 on FFmpeg 7.0 and later: `-/filter_complex`.
-    fn slash_graph_file(
+    pub(crate) fn slash_graph_file(
         _: &Path,
         _: &WorkDirectory,
         _: &AtomicBool,
@@ -2988,7 +3009,7 @@ mod tests {
     }
 
     /// A read of the sample rate that a test expects never to run.
-    fn sample_rate_not_read(
+    pub(crate) fn sample_rate_not_read(
         _: &Path,
         _: &Path,
         _: u64,
@@ -3037,12 +3058,12 @@ mod tests {
         }
     }
 
-    struct TestDirectory {
-        path: PathBuf,
+    pub(crate) struct TestDirectory {
+        pub(crate) path: PathBuf,
     }
 
     impl TestDirectory {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "quipclip-export-command-{}-{}",
                 std::process::id(),
@@ -3062,7 +3083,7 @@ mod tests {
 
     /// The ffmpeg and the ffprobe of this machine, or `None`, in which case the test does
     /// nothing.
-    fn real_tools() -> Option<(PathBuf, PathBuf)> {
+    pub(crate) fn real_tools() -> Option<(PathBuf, PathBuf)> {
         let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
@@ -5729,7 +5750,7 @@ mod tests {
     /// The sample probe as the re-probe reads a Matroska source of 120 s whose audio starts
     /// after its first 5 s: the start and the length of the container, and the tag of the track
     /// (ADR 014 measurement 24).
-    fn sample_probe_with_a_missed_audio_start() -> MediaProbe {
+    pub(crate) fn sample_probe_with_a_missed_audio_start() -> MediaProbe {
         let mut probe = MediaProbe {
             video_duration_ticks: Some(TickCount::new(120 * 90_000).unwrap()),
             approximate_duration_seconds: Some(120.0),

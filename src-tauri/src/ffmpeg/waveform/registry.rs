@@ -61,6 +61,16 @@ impl JobHandle {
             .retain(|kept| !Arc::ptr_eq(kept, child));
     }
 
+    /// The number of processes that the job holds, for the tests of a job that must release its
+    /// processes.
+    #[cfg(test)]
+    pub fn adopted(&self) -> usize {
+        self.children
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
     /// Cancel the job and send the kill to its processes without waiting for them. The job reaps
     /// them, so a process that waits for a share delays neither a cancel nor an exit.
     pub fn signal(&self) {

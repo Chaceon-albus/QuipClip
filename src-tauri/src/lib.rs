@@ -98,6 +98,9 @@ pub fn run() {
         // The one slot of the audio envelope jobs (ADR 056). The job threads share it with the
         // commands, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::waveform::registry::WaveformJobs::default()))
+        // The one slot of the measurements of loudness (ADR 061), apart from the slot of the
+        // envelope. The job threads share it with the commands, so the managed value is the `Arc`.
+        .manage(Arc::new(ffmpeg::loudness::registry::LoudnessJobs::default()))
         // The one slot of the install of ffmpeg (ADR 059). The job thread shares it with the
         // commands, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::install::registry::InstallJobs::default()))
@@ -154,6 +157,13 @@ pub fn run() {
                 {
                     jobs.cancel_all(floor);
                 }
+                // So does the measurement of loudness of the old page (ADR 061).
+                if let Some(jobs) = webview
+                    .app_handle()
+                    .try_state::<Arc<ffmpeg::loudness::registry::LoudnessJobs>>()
+                {
+                    jobs.cancel_all(floor);
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -171,6 +181,7 @@ pub fn run() {
                 // is the page of the envelope job (ADR 056).
                 stop_preview_windows(window.app_handle());
                 stop_waveform_jobs(window.app_handle());
+                stop_loudness_jobs(window.app_handle());
                 if let Some(settings) = window
                     .app_handle()
                     .get_webview_window(SETTINGS_WINDOW_LABEL)
@@ -237,6 +248,8 @@ pub fn run() {
             commands::waveform::cancel_waveform,
             commands::waveform::waveform_cache_usage,
             commands::waveform::clear_waveform_cache,
+            commands::loudness::start_loudness_measurement,
+            commands::loudness::cancel_loudness_measurement,
             commands::build_info::build_info,
             commands::ffmpeg_install::ffmpeg_download_offer,
             commands::ffmpeg_install::start_ffmpeg_install,
@@ -284,6 +297,7 @@ pub fn run() {
             }
             stop_preview_windows(handle);
             stop_waveform_jobs(handle);
+            stop_loudness_jobs(handle);
             stop_ffmpeg_install(handle);
             stop_export_before_exit(handle);
         }
@@ -294,6 +308,7 @@ pub fn run() {
         tauri::RunEvent::Exit => {
             stop_preview_windows(handle);
             stop_waveform_jobs(handle);
+            stop_loudness_jobs(handle);
             stop_ffmpeg_install(handle);
             stop_export_before_exit(handle);
         }
@@ -333,6 +348,17 @@ fn stop_preview_windows(handle: &tauri::AppHandle) {
 /// job writes its cache file only at its end, so the exit waits for nothing more.
 fn stop_waveform_jobs(handle: &tauri::AppHandle) {
     if let Some(jobs) = handle.try_state::<Arc<ffmpeg::waveform::registry::WaveformJobs>>() {
+        jobs.close_for_exit();
+    }
+}
+
+/// Kill the process of the measurement of loudness and refuse new ones (ADR 061, ADR 017
+/// amendment). The measurement reserves no output file. It writes its work directory, and for an
+/// FLV source the shared keyframe cache (ADR 057), which it replaces in one atomic step. So the
+/// exit waits for nothing more and gives it no part of its budget. A work directory that a kill
+/// leaves is removed by the sweep of the export kind after 24 h.
+fn stop_loudness_jobs(handle: &tauri::AppHandle) {
+    if let Some(jobs) = handle.try_state::<Arc<ffmpeg::loudness::registry::LoudnessJobs>>() {
         jobs.close_for_exit();
     }
 }
@@ -825,6 +851,10 @@ mod tests {
         // The audio envelope of a source (`features/waveform/client.ts`, ADR 056).
         "start_waveform",
         "cancel_waveform",
+        // The measurement of loudness of the export setup (`features/loudness/client.ts`, ADR
+        // 061).
+        "start_loudness_measurement",
+        "cancel_loudness_measurement",
     ];
 
     /// The commands that the page of the Settings window calls: the settings file, its

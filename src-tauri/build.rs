@@ -42,6 +42,8 @@ const APP_COMMANDS: &[&str] = &[
     "cancel_waveform",
     "waveform_cache_usage",
     "clear_waveform_cache",
+    "start_loudness_measurement",
+    "cancel_loudness_measurement",
     "build_info",
     "ffmpeg_download_offer",
     "start_ffmpeg_install",

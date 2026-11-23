@@ -245,6 +245,26 @@ The measurement therefore includes each step of the audio of the export: the cut
 the fill of silence, `concat`, and the final `aformat` with the sample rate and the channels of
 the preset (ADR 023, ADR 053).
 
+(Changed on 2026-11-22.) One step of the export is not in the measurement. The final `aformat`
+can leave a layout or a rate that the encoder does not take. FFmpeg then converts the audio in
+front of the encoder, and the measurement reads the audio before that conversion. A review of the
+implementation measured this with FFmpeg 9.0.2:
+
+- `libmp3lame` takes mono and stereo up to 48000 Hz. It received a 5.1 source as stereo, and a
+  stereo preset at 96000 Hz as 48000 Hz.
+- `libopus` takes 48000 Hz and lower rates of its own list, so a source at 44100 Hz with the
+  sample-rate setting Source arrives at 48000 Hz.
+- `aac` takes a list of rates up to 96000 Hz and a list of layouts. It received a source at 50000
+  Hz as 48000 Hz, and it refused `22.2`. The seeds of ADR 040 keep the rate and the layout of the
+  source, so a source outside those lists differs too.
+
+In those cases the measured values can differ from the values of the audio that the encoder
+receives. A mix of channels changes both values. A change of the rate changes the true peak by a
+little and the loudness by much less. QuipClip does not know the layouts and the rates that each
+encoder takes. The user accepted this gap: the common encoders take the common formats, and a
+user who needs a format that they do not take is not a user of QuipClip. With a layout and a rate
+that the encoder takes, the measurement reads the audio that the encoder receives.
+
 Two plans have no process that filters audio:
 
 - A plan with video in which no piece reads an audio stream, because each audio stream holds no
@@ -342,6 +362,28 @@ therefore never shorter. When the audio is shorter, the job ends `failed` with `
 - The job deletes its work directory at its end, as an export does (ADR 055). A kill at the exit
   can leave the directory. The sweep of the export kind deletes it after 24 h.
 
+(Changed on 2026-11-22.) The implementation adds these rules of control:
+
+- The run reads the stdout of its process on a reader thread and polls every 50 ms. After a
+  cancel, it waits at most 2 s for that thread, as the envelope job of ADR 056 does. Then it ends
+  as `canceled` and frees the slot, also when a pipe stays open.
+- A process that a kill does not end goes to a thread that kills and reaps it later, so it holds
+  no slot.
+- The job reads the cancel flag one last time before it frees the slot and sends the end
+  message. A cancel before that read turns the message into `canceled`. A cancel after it cannot
+  change the message. The page ignores the end of a measurement that it canceled.
+- After a cancel, the run waits neither for the exit of its process nor for its error output. It
+  kills the process, and a process that has not ended goes to a thread that kills and reaps it.
+- The exit kills the process of the run. A probe of the preparation is not a process of the run:
+  it ends at the stop flag of the preparation. When the application ended first, the probe ends
+  on its own, or a write to the closed pipe of the application can end it. FFmpeg 9.0.2 did not
+  always end at once when its error output was closed. This is the exit of the envelope job of
+  ADR 056, which gives the job no part of the budget of ADR 017.
+- A thread that reads a pipe that a child of the process keeps open stays behind until the pipe
+  closes. It holds no slot.
+- The start command decodes the request itself, so a request of the wrong shape is
+  `invalidRequest`.
+
 A measurement can run while an export runs. Both read the sources. On a network share, each read
 then becomes slower.
 
@@ -350,7 +392,8 @@ then becomes slower.
 - The start command: `invalidRequest`, `busy`, `superseded` and `closed`.
 - The end message: each failure code of the export preparation (ADR 016, ADR 050) with the same
   meaning, and `spawnFailed`, `readFailed`, `decodeFailed`, `invalidAudio` and `audioShort`.
-  `invalidAudio` means that Rust cannot read the WAV header.
+  `invalidAudio` means that Rust cannot read the WAV header. (Changed on 2026-11-22.) It also
+  means a format that the meter cannot take, and a sample that is not a finite number.
 
 ### Out of scope
 

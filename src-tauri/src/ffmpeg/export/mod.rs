@@ -94,8 +94,8 @@ pub mod registry;
 pub mod verify;
 
 pub use arguments::{
-    build_arguments, build_audio_arguments, build_copy_arguments, check_command_line,
-    encoder_graph, CopyOutput,
+    build_arguments, build_audio_arguments, build_copy_arguments, build_measurement_arguments,
+    check_command_line, encoder_graph, CopyOutput,
 };
 pub use fsinspect::inspect_path;
 pub use graph::{build_audio_graph, build_filter_graph, build_video_graph};

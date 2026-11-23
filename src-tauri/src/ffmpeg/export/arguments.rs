@@ -377,6 +377,46 @@ pub fn build_audio_arguments(
     inputs: &InputAssignment,
     graph: GraphFile<'_>,
 ) -> Vec<String> {
+    let mut arguments = audio_pipe_arguments(plan, inputs, graph);
+    // The stand-in video, to an output that discards it. `rawvideo` is the encoder every build
+    // has, and its frames are 2x2 pixels.
+    push_pair(&mut arguments, "-map", "[pv]");
+    push_pair(&mut arguments, "-c:v", "rawvideo");
+    push_pair(&mut arguments, "-f", "null");
+    arguments.push("-".to_owned());
+    arguments
+}
+
+/// The command of the measurement of an export without video (ADR 061): the inputs and the
+/// graph of the one process of that export ([`encoder_graph`]), with its `[a]` written to stdout
+/// as the audio process writes it. The measurement then reads the audio that the encoder of the
+/// export would receive.
+///
+/// The plan must have no video. With video, the measurement runs [`build_audio_arguments`], the
+/// command of the audio process itself.
+#[must_use]
+pub fn build_measurement_arguments(
+    plan: &ExportPlan,
+    inputs: &InputAssignment,
+    graph: GraphFile<'_>,
+) -> Vec<String> {
+    debug_assert!(
+        plan.video.is_none(),
+        "with video, the measurement runs the audio process itself"
+    );
+    audio_pipe_arguments(plan, inputs, graph)
+}
+
+/// The arguments that write the `[a]` of `graph` to stdout as 32-bit float PCM in WAV: the flags,
+/// the inputs of the pieces that read an audio stream, the graph file, and the WAV output. The
+/// command of the audio process adds its output of the stand-in video
+/// ([`build_audio_arguments`]), and the command of the measurement of an export without video
+/// adds nothing ([`build_measurement_arguments`]).
+fn audio_pipe_arguments(
+    plan: &ExportPlan,
+    inputs: &InputAssignment,
+    graph: GraphFile<'_>,
+) -> Vec<String> {
     debug_assert!(
         !plan.segments.is_empty(),
         "an export plan must carry at least one segment"
@@ -398,12 +438,6 @@ pub fn build_audio_arguments(
     push_pair(&mut arguments, "-c:a", AUDIO_PIPE_CODEC);
     push_pair(&mut arguments, "-f", AUDIO_PIPE_FORMAT);
     arguments.push("pipe:1".to_owned());
-    // The stand-in video, to an output that discards it. `rawvideo` is the encoder every build
-    // has, and its frames are 2x2 pixels.
-    push_pair(&mut arguments, "-map", "[pv]");
-    push_pair(&mut arguments, "-c:v", "rawvideo");
-    push_pair(&mut arguments, "-f", "null");
-    arguments.push("-".to_owned());
     arguments
 }
 
