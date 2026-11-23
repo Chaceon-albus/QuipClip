@@ -69,6 +69,15 @@ describe("the Adjust switch of the Gain row (ADR 061)", () => {
       tenthsDb: null,
       issue: { key: "settings.field.oneDecimal" },
     });
+    // The digits of the text decide, not the number: this one reads as -1.
+    expect(presentGainField("-1.0000000000000001", false, false)).toMatchObject({
+      tenthsDb: null,
+      issue: { key: "settings.field.oneDecimal" },
+    });
+    expect(presentGainField("-1e0", false, false)).toMatchObject({
+      tenthsDb: -10,
+      issue: null,
+    });
     expect(presentGainField("", false, false)).toMatchObject({
       tenthsDb: null,
       issue: { key: "settings.field.oneDecimal" },

@@ -729,7 +729,9 @@ export function presentNumericField(value: number): string {
  * the text of a number input as numbers, so the text "-1.0" or "-0" that the user is typing
  * equals the value -1 or -0 and stays as it is. A string "-1" or "0" would replace it. Text that
  * is not yet a number, such as "-" or "1.", reads as an empty value, which equals the `NaN` that
- * the controller stores for it, so that text stays too.
+ * the controller stores for it, so that text stays too. A number whose text has more than one
+ * decimal place but reads as a whole number of tenths, such as "1.0000000000000001", also gets
+ * `NaN` (`parseAudioGainField`), so the input becomes empty and the error stays under it.
  */
 export function presentAudioGainField(tenthsDb: number): number | "" {
   return Number.isNaN(tenthsDb) ? "" : tenthsDb / 10;

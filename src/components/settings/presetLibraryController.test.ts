@@ -2153,6 +2153,13 @@ describe("PresetLibraryController", () => {
       expect(controller.getView().issues).toEqual([
         { field: "audioGainTenthsDb", code: "oneDecimal" },
       ]);
+
+      // Also when the number itself loses the extra digits and reads as 1.
+      controller.updateAudioGain("1.0000000000000001");
+      expect(controller.getView().issues).toEqual([
+        { field: "audioGainTenthsDb", code: "oneDecimal" },
+      ]);
+      expect(controller.getView().canSave).toBe(false);
     });
 
     it("accepts trailing zeros after the one decimal place", () => {
