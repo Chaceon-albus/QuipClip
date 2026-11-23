@@ -66,6 +66,10 @@ pub const CANCEL_WAIT: Duration = Duration::from_secs(2);
 /// How long the run waits for the end of the error output after the process exited.
 const STDERR_WAIT: Duration = Duration::from_secs(1);
 
+/// `Number.MAX_SAFE_INTEGER`. The counters of a progress message cross as JavaScript numbers, and
+/// the page refuses a larger one, so a message carries at most this value.
+const JAVASCRIPT_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
 /// Microseconds in one second.
 const MICROSECONDS_PER_SECOND: u128 = 1_000_000;
 
@@ -287,8 +291,9 @@ pub fn read_stream(
         if last_progress.elapsed() >= PROGRESS_INTERVAL {
             last_progress = Instant::now();
             let message = Progress {
-                read_us: frames_us(meter.frames(), format.sample_rate),
-                total_us,
+                read_us: frames_us(meter.frames(), format.sample_rate)
+                    .min(JAVASCRIPT_MAX_SAFE_INTEGER),
+                total_us: total_us.min(JAVASCRIPT_MAX_SAFE_INTEGER),
             };
             if !progress(&message) {
                 return Err(ReadFailure::Stopped);

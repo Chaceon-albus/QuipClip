@@ -40,6 +40,8 @@ export const BACKEND_COMMANDS = {
   CANCEL_WAVEFORM: "cancel_waveform",
   WAVEFORM_CACHE_USAGE: "waveform_cache_usage",
   CLEAR_WAVEFORM_CACHE: "clear_waveform_cache",
+  START_LOUDNESS_MEASUREMENT: "start_loudness_measurement",
+  CANCEL_LOUDNESS_MEASUREMENT: "cancel_loudness_measurement",
   FFMPEG_DOWNLOAD_OFFER: "ffmpeg_download_offer",
   START_FFMPEG_INSTALL: "start_ffmpeg_install",
   CANCEL_FFMPEG_INSTALL: "cancel_ffmpeg_install",
