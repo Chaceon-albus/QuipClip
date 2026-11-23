@@ -8,6 +8,11 @@
  * for the session: it is not a field of the preset, and nothing stores it in the settings file
  * or in the web view. `bindStreamChoiceToMedia` turns both streams on and the copy off again
  * each time the open media changes, so a choice made for one file never applies to the next.
+ *
+ * The Adjust switch of the Gain row (ADR 061) lasts for the session in the same way, and the
+ * same reset turns it off. An Adjust switch that is on needs an encode of the audio, so the
+ * store never holds it and the copy both on: a turn of Adjust to on turns the copy off, and a
+ * turn of the copy to on does nothing while Adjust is on.
  */
 
 import { useStore } from "zustand";
@@ -81,6 +86,12 @@ export type ExportStreamChoiceState = {
    * and apply again when the step offers it again.
    */
   copyAudio: boolean;
+  /**
+   * True when the user turned on the Adjust switch of the Gain row (ADR 061): the step measures
+   * the audio and the export applies the gain of the row. The store never holds it and the copy
+   * of the audio both on, because a copy applies no gain.
+   */
+  adjustGain: boolean;
 };
 
 export type ExportStreamChoiceActions = {
@@ -89,9 +100,14 @@ export type ExportStreamChoiceActions = {
    * nothing, so at least one stream stays on.
    */
   setStream: (kind: ExportStreamKind, on: boolean) => void;
-  /** Asks for a copy of the audio, or for an encode. */
+  /** Asks for a copy of the audio, or for an encode. A copy does nothing while Adjust is on. */
   setCopyAudio: (on: boolean) => void;
-  /** Turns both streams on and the copy of the audio off. */
+  /**
+   * Turns the Adjust switch on or off (ADR 061). On also turns the copy of the audio off, also a
+   * copy that the step does not offer now.
+   */
+  setAdjustGain: (on: boolean) => void;
+  /** Turns both streams on, and the copy of the audio and the Adjust switch off. */
   reset: () => void;
 };
 
@@ -101,10 +117,13 @@ export type ExportStreamChoiceStoreState = ExportStreamChoiceState &
 export function createExportStreamChoiceStore(
   initialChoice: ExportStreamChoice = BOTH_EXPORT_STREAMS,
   initialCopyAudio = false,
+  initialAdjustGain = false,
 ): StoreApi<ExportStreamChoiceStoreState> {
   return createStore<ExportStreamChoiceStoreState>()((set, get) => ({
     choice: initialChoice,
-    copyAudio: initialCopyAudio,
+    // The two are never on together, whatever the caller passes.
+    copyAudio: initialCopyAudio && !initialAdjustGain,
+    adjustGain: initialAdjustGain,
     setStream: (kind, on) => {
       const current = get().choice;
       if (current[kind] === on) {
@@ -117,14 +136,23 @@ export function createExportStreamChoiceStore(
       set({ choice: next });
     },
     setCopyAudio: (on) => {
-      if (get().copyAudio !== on) {
-        set({ copyAudio: on });
+      const { copyAudio, adjustGain } = get();
+      if (copyAudio === on || (on && adjustGain)) {
+        return;
       }
+      set({ copyAudio: on });
+    },
+    setAdjustGain: (on) => {
+      const { copyAudio, adjustGain } = get();
+      if (adjustGain === on && !(on && copyAudio)) {
+        return;
+      }
+      set(on ? { adjustGain: true, copyAudio: false } : { adjustGain: false });
     },
     reset: () => {
-      const { choice, copyAudio } = get();
-      if (!choice.video || !choice.audio || copyAudio) {
-        set({ choice: BOTH_EXPORT_STREAMS, copyAudio: false });
+      const { choice, copyAudio, adjustGain } = get();
+      if (!choice.video || !choice.audio || copyAudio || adjustGain) {
+        set({ choice: BOTH_EXPORT_STREAMS, copyAudio: false, adjustGain: false });
       }
     },
   }));

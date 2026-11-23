@@ -440,28 +440,36 @@ function presentAudioBitrateRow(
 }
 
 /**
- * The gain row of the audio group (ADR 054): "No Change" for 0, or the gain in decibels with its
- * sign and one decimal place, such as "-1.0 dB".
+ * The Gain row of the audio group (ADR 054, ADR 061): the gain of the preset in decibels with one
+ * decimal place, and with its sign when it is not 0, such as "0.0 dB" or "-1.0 dB".
  */
 function presentAudioGainRow(
   preset: Preset,
   formatter: Intl.NumberFormat,
 ): PresetSummaryRowView {
-  const labelKey = "settings.preset.audioGainLabel";
-  if (preset.audioGainTenthsDb === 0) {
-    return { id: "audioGain", labelKey, valueKey: "export.setup.audioGainNone" };
-  }
-  const decibels = new Intl.NumberFormat(formatter.resolvedOptions().locale, {
+  return {
+    id: "audioGain",
+    labelKey: "settings.preset.audioGainLabel",
+    valueKey: "export.setup.audioGainValue",
+    valueValues: {
+      value: formatGainDecibels(
+        preset.audioGainTenthsDb,
+        formatter.resolvedOptions().locale,
+      ),
+    },
+  };
+}
+
+/**
+ * A gain in tenths of a decibel as decibels with one decimal place, with its sign when it is not
+ * 0: "0.0", "-1.0", "+2.0" (ADR 061).
+ */
+export function formatGainDecibels(tenthsDb: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
     signDisplay: "exceptZero",
-  });
-  return {
-    id: "audioGain",
-    labelKey,
-    valueKey: "export.setup.audioGainValue",
-    valueValues: { value: decibels.format(preset.audioGainTenthsDb / 10) },
-  };
+  }).format(tenthsDb / 10);
 }
 
 function presentSampleRateRow(

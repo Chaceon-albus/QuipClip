@@ -165,9 +165,14 @@ describe("canCopyAudio", () => {
 
 describe("resolveExportAudioMode", () => {
   it("asks for the copy only when the user chose it and the step offers it", () => {
-    expect(resolveExportAudioMode(true, true)).toBe("copy");
-    expect(resolveExportAudioMode(true, false)).toBe("encode");
-    expect(resolveExportAudioMode(false, true)).toBe("encode");
-    expect(resolveExportAudioMode(false, false)).toBe("encode");
+    expect(resolveExportAudioMode(true, true, false)).toBe("copy");
+    expect(resolveExportAudioMode(true, false, false)).toBe("encode");
+    expect(resolveExportAudioMode(false, true, false)).toBe("encode");
+    expect(resolveExportAudioMode(false, false, false)).toBe("encode");
+  });
+
+  it("encodes while the Adjust switch is on, because a copy applies no gain (ADR 061)", () => {
+    expect(resolveExportAudioMode(true, true, true)).toBe("encode");
+    expect(resolveExportAudioMode(false, true, true)).toBe("encode");
   });
 });

@@ -198,6 +198,42 @@ describe("createExportStreamChoiceStore", () => {
     store.getState().setCopyAudio(true);
     expect(listener).not.toHaveBeenCalled();
   });
+
+  it("never holds the Adjust switch and the copy both on (ADR 061)", () => {
+    const store = createExportStreamChoiceStore();
+    expect(store.getState().adjustGain).toBe(false);
+    // A turn of Adjust to on turns the copy off, also a copy that the step does not offer now.
+    store.getState().setCopyAudio(true);
+    store.getState().setAdjustGain(true);
+    expect(store.getState()).toMatchObject({ adjustGain: true, copyAudio: false });
+    // A turn of the copy to on does nothing while Adjust is on, and notifies no listener.
+    const listener = vi.fn();
+    const unsubscribe = store.subscribe(listener);
+    store.getState().setCopyAudio(true);
+    expect(store.getState().copyAudio).toBe(false);
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+    // Adjust off keeps the copy off, and the copy can then turn on.
+    store.getState().setAdjustGain(false);
+    expect(store.getState()).toMatchObject({ adjustGain: false, copyAudio: false });
+    store.getState().setCopyAudio(true);
+    expect(store.getState().copyAudio).toBe(true);
+    // Both on at the start: the copy gives way.
+    expect(
+      createExportStreamChoiceStore(BOTH_EXPORT_STREAMS, true, true).getState(),
+    ).toMatchObject({ adjustGain: true, copyAudio: false });
+  });
+
+  it("turns the Adjust switch off at a reset, and notifies no listener for no change", () => {
+    const store = createExportStreamChoiceStore();
+    store.getState().setAdjustGain(true);
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.getState().setAdjustGain(true);
+    expect(listener).not.toHaveBeenCalled();
+    store.getState().reset();
+    expect(store.getState().adjustGain).toBe(false);
+  });
 });
 
 describe("bindStreamChoiceToMedia", () => {
@@ -230,6 +266,19 @@ describe("bindStreamChoiceToMedia", () => {
     choice.getState().setCopyAudio(true);
     await media.getState().importPath("/media/clip.mp4");
     expect(choice.getState().copyAudio).toBe(false);
+  });
+
+  it("turns the Adjust switch off when the media changes (ADR 061)", async () => {
+    const media = createMediaStore({
+      importMedia: () => Promise.resolve(createMediaResult("clip.mp4", STEREO)),
+    });
+    const choice = createExportStreamChoiceStore();
+    bindStreamChoiceToMedia(media, choice);
+
+    await media.getState().importPath("/media/clip.mp4");
+    choice.getState().setAdjustGain(true);
+    await media.getState().importPath("/media/clip.mp4");
+    expect(choice.getState().adjustGain).toBe(false);
   });
 
   it("turns both streams on when the same file opens again, and when the media closes", async () => {

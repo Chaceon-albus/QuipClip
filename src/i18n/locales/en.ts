@@ -734,7 +734,7 @@ export const en = {
       audioChannelsLabel: "Channels",
       audioChannelsStereo: "Stereo",
       audioChannelsMono: "Mono",
-      audioGainLabel: "Volume",
+      audioGainLabel: "Gain",
       audioGainHint: "Changes the volume of the exported audio. 0 dB makes no change.",
       audioGainBoostHint:
         "A value above 0 dB can raise the peaks above full scale. Then the audio can clip.",
@@ -1033,10 +1033,8 @@ export const en = {
       qualityBitrate: "{{value}} kbps",
       qualityScale: "Quality scale {{value}}",
       audioBitrateLossless: "Lossless",
-      // The value of the Volume row when the preset has no gain.
-      audioGainNone: "No Change",
-      // The value of the Volume row. {{value}} is the gain with its sign and one decimal place,
-      // such as "-1.0" or "+0.5".
+      // The value of the Gain row. {{value}} is the gain with one decimal place, and with its
+      // sign when it is not 0, such as "0.0", "-1.0" or "+0.5".
       audioGainValue: "{{value}} dB",
       resolutionValue: "{{width}} × {{height}}",
       frameRateValue: "{{value}} fps",

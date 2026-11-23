@@ -543,6 +543,11 @@ export interface ExportSetupProps {
   /** Callback fired when the user turns the copy of the audio on or off. */
   onCopyAudioChange: (on: boolean) => void;
   /**
+   * True when the Adjust switch of the Gain row is on for this session (ADR 061). The step then
+   * resolves the audio mode to `encode`, because a copy applies no gain.
+   */
+  adjustGain: boolean;
+  /**
    * True while the save panel is open. The request already holds the stream choice and the
    * copy of the audio, so the switches do not change until the panel closes.
    */
@@ -605,6 +610,7 @@ export function ExportSetup({
   onStreamChange,
   copyAudio,
   onCopyAudioChange,
+  adjustGain,
   streamsFrozen = false,
   onOpenSettings,
   firstControlRef,
@@ -737,7 +743,7 @@ export function ExportSetup({
       segmentCount: sourceFacts.copySegmentCount,
     });
   const copyAudioSwitch = presentCopyAudioSwitch(copyAudio, copyOffered);
-  const audioMode = resolveExportAudioMode(copyAudio, copyOffered);
+  const audioMode = resolveExportAudioMode(copyAudio, copyOffered, adjustGain);
   const options = settings
     ? presentPresetOptions(settings, ffmpegState, numberFormatter, streams)
     : [];

@@ -117,13 +117,15 @@ export function canCopyAudio({
 }
 
 /**
- * The audio mode of the request: `copy` when the user chose the copy and the setup step offers
- * it, and `encode` otherwise. A choice that the step does not offer, after the user added a
- * second segment for example, asks for nothing.
+ * The audio mode of the request: `copy` when the user chose the copy, the setup step offers it,
+ * and the Adjust switch of the Gain row is off (ADR 061), and `encode` otherwise. A choice that
+ * the step does not offer, after the user added a second segment for example, asks for nothing.
+ * An adjusted gain needs an encode, because a copy applies no gain.
  */
 export function resolveExportAudioMode(
   copyChosen: boolean,
   copyOffered: boolean,
+  adjustGain: boolean,
 ): ExportAudioMode {
-  return copyChosen && copyOffered ? "copy" : "encode";
+  return copyChosen && copyOffered && !adjustGain ? "copy" : "encode";
 }

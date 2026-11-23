@@ -452,15 +452,17 @@ describe("exportSetupPresenter", () => {
             {
               id: "audioGain",
               labelKey: "settings.preset.audioGainLabel",
-              valueKey: "export.setup.audioGainNone",
+              valueKey: "export.setup.audioGainValue",
+              valueValues: { value: "0.0" },
             },
           ],
         },
       ]);
     });
 
-    it("shows the gain with its sign and one decimal place", () => {
+    it("shows the gain with its sign and one decimal place, and 0 as 0.0 (ADR 061)", () => {
       for (const [gain, value] of [
+        [0, "0.0"],
         [-10, "-1.0"],
         [-15, "-1.5"],
         [5, "+0.5"],
@@ -491,11 +493,13 @@ describe("exportSetupPresenter", () => {
     });
 
     it.each([
-      ["en", "No Change", "-1.0 dB"],
-      ["zh-CN", "不调整", "-1.0 dB"],
-    ] as const)("words the gain row in %s", (language, none, value) => {
+      ["en", "Gain", "-1.0 dB"],
+      ["zh-CN", "增益", "-1.0 dB"],
+    ] as const)("words the gain row in %s", (language, label, value) => {
       const catalog = language === "en" ? en : zhCN;
-      expect(lookup(catalog, "export.setup.audioGainNone")).toBe(none);
+      expect(lookup(catalog, "settings.preset.audioGainLabel")).toBe(label);
+      // The text "No Change" is gone: the row always shows a number (ADR 061).
+      expect(lookup(catalog, "export.setup.audioGainNone")).toBeUndefined();
       expect(lookup(catalog, "export.setup.audioGainValue")).toBe("{{value}} dB");
       expect(
         (lookup(catalog, "export.setup.audioGainValue") as string).replace(

@@ -496,9 +496,11 @@ export function ExportDialog({
     sourceHasAudio(sourceFacts.output),
   );
   // The copy of the audio (ADR 048): the request asks for it only while the setup step offers
-  // it, which the setup step resolves the same way for its switch and its summary.
+  // it and the Adjust switch of ADR 061 is off, which the setup step resolves the same way for
+  // its switch and its summary.
   const copyAudio = useExportStreamChoice((state) => state.copyAudio);
   const setCopyAudio = useExportStreamChoice((state) => state.setCopyAudio);
+  const adjustGain = useExportStreamChoice((state) => state.adjustGain);
   const audioMode = resolveExportAudioMode(
     copyAudio,
     selectedPreset !== null &&
@@ -508,6 +510,7 @@ export function ExportDialog({
         streams,
         segmentCount: sourceFacts.copySegmentCount,
       }),
+    adjustGain,
   );
   // The blocker does not read the copy: the backend encodes the audio with the preset when it
   // cannot copy it.
@@ -1083,6 +1086,7 @@ export function ExportDialog({
             onStreamChange={setStream}
             copyAudio={copyAudio}
             onCopyAudioChange={setCopyAudio}
+            adjustGain={adjustGain}
             streamsFrozen={frame.choosingDestination}
             onOpenSettings={(section) => {
               handleOpenSettings(section, effectivePresetId);
