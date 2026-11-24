@@ -12161,3 +12161,244 @@ describe("primeFirstFrame (ADR 003, WKWebView)", () => {
     expect(stalled.video.playbackRate).toBe(1);
   });
 });
+
+describe("A frame step when WebKit keeps the frame of the seek before (ADR 022)", () => {
+  // A native MP4 at 60 fps on a time base of 1/15360: 256 ticks to the frame, an exact grid.
+  const tb = { n: 1, d: 15360 };
+  const fps60 = { n: 60, d: 1 };
+  const source: PlaybackSource = {
+    path: "/media/steps.mp4",
+    size: 4096,
+    mtime: 1795151829,
+    videoTimeBase: tb,
+    videoStartPts: "0" as Pts,
+    avgFrameRate: fps60,
+    rFrameRate: fps60,
+    approximateDurationSeconds: 10,
+  };
+  const key = getSourceRevisionKey(source);
+  const frameStart = (index: number) => index / 60;
+  const frameMiddle = (index: number) => (index + 0.5) / 60;
+  const ptsOf = (index: number) => String(index * 256);
+
+  /** A calibrated element that shows frame `index`, reached by an exact seek. */
+  function showing(index: number, shown: PlaybackSource = source) {
+    const shownKey = getSourceRevisionKey(shown);
+    const store = createPlaybackStore();
+    const video = createFakeVideo({ duration: 10 });
+    store.getState().attach(shown, video);
+    video.readyState = 1;
+    store.getState().syncReady(shownKey, video);
+    store.getState().syncPresentedFrame(shownKey, 0, 1, video);
+    store.getState().seekToPts(ptsOf(index) as Pts);
+    fireSeeked(store, shownKey, video);
+    store.getState().syncPresentedFrame(shownKey, frameStart(index), 2, video);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsOf(index));
+    return { store, video };
+  }
+
+  /**
+   * A step from frame `from` by `delta` whose seek WebKit ends on frame `from`: the element
+   * reports the new target, and the late callback of frame `from` clears the display target.
+   */
+  function stepThatKeepsTheFrame(
+    from: number,
+    delta: number,
+    shown: PlaybackSource = source,
+  ) {
+    const shownKey = getSourceRevisionKey(shown);
+    const { store, video } = showing(from, shown);
+    store.getState().seekNominal(delta);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(from + delta), 9);
+    fireSeeked(store, shownKey, video);
+    store.getState().syncPresentedFrame(shownKey, frameStart(from), 3, video);
+    const state = store.getState();
+    expect(state.presentedFrame?.inferredSourcePts).toBe(ptsOf(from));
+    expect(state.seekTargetSeconds).toBeNull();
+    return { store, video };
+  }
+
+  let requestSpy: MockInstance<typeof scrubAudioController.request>;
+  let stopSpy: MockInstance<typeof scrubAudioController.stop>;
+
+  beforeEach(() => {
+    requestSpy = vi.spyOn(scrubAudioController, "request").mockImplementation(() => {});
+    stopSpy = vi.spyOn(scrubAudioController, "stop").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    requestSpy.mockRestore();
+    stopSpy.mockRestore();
+  });
+
+  it("aims a step back at the frame before the frame of the element, with one seek", () => {
+    const { store, video } = stepThatKeepsTheFrame(100, -1);
+    const sets = video.currentTimeSets;
+    requestSpy.mockClear();
+
+    const outcome = store.getState().seekNominal(-1);
+
+    expect(outcome).toBe("stepped");
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(98), 9);
+    // The display target and the cue name the frame that the seek shows.
+    expect(store.getState().presentedFrame).toBeNull();
+    expect(store.getState().seekTargetSeconds).toBeCloseTo(frameStart(98), 9);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(requestSpy.mock.calls[0]?.[0]).toBeCloseTo(frameMiddle(98), 9);
+    expect(requestSpy.mock.calls[0]?.[1]).toBe(-1);
+
+    fireSeeked(store, key, video);
+    expect(video.currentTimeSets).toBe(sets + 1);
+    store.getState().syncPresentedFrame(key, frameStart(98), 4, video);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsOf(98));
+    expect(store.getState().seekTargetSeconds).toBeNull();
+
+    // The next step goes on from there as usual.
+    store.getState().seekNominal(-1);
+    expect(video.currentTimeSets).toBe(sets + 2);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(97), 9);
+  });
+
+  it("aims a step of ten frames back at the frame before the frame of the element", () => {
+    const { store, video } = stepThatKeepsTheFrame(100, -10);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-10)).toBe("stepped");
+
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(89), 9);
+    expect(store.getState().seekTargetSeconds).toBeCloseTo(frameStart(89), 9);
+  });
+
+  it("stops the cue for a held step back", () => {
+    const { store, video } = stepThatKeepsTheFrame(100, -1);
+    requestSpy.mockClear();
+    stopSpy.mockClear();
+
+    expect(store.getState().seekNominal(-1, { held: true })).toBe("stepped");
+
+    expect(video.currentTime).toBeCloseTo(frameMiddle(98), 9);
+    expect(requestSpy).not.toHaveBeenCalled();
+    expect(stopSpy).toHaveBeenCalled();
+  });
+
+  it("keeps the edge rule for a step forward to the position of the element", () => {
+    // The same state forward: frame 100 on screen and the element in frame 101. It is also the
+    // state of a video that ends at frame 100 while the audio goes on, where frame 101 does
+    // not exist, so the step stays an edge.
+    const { store, video } = stepThatKeepsTheFrame(100, 1);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(1)).toBe("edge");
+
+    expect(video.currentTimeSets).toBe(sets);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsOf(100));
+  });
+
+  it("keeps the edge rule for a typed frame at the position of the element", () => {
+    const { store, video } = stepThatKeepsTheFrame(100, -1);
+    const sets = video.currentTimeSets;
+
+    store.getState().seekToFrameIndex(99);
+    store.getState().seekToFrameIndex(99, { keepPlaying: true });
+
+    expect(video.currentTimeSets).toBe(sets);
+  });
+
+  it("keeps the edge rule while the element still seeks", () => {
+    // A seek that the store did not send runs to the position of the element, and its frame
+    // can still arrive.
+    const { store, video } = stepThatKeepsTheFrame(100, -1);
+    video.seeking = true;
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("edge");
+
+    expect(video.currentTimeSets).toBe(sets);
+  });
+
+  it("keeps the edge rule at the first frame, and a step forward moves the picture", () => {
+    // Frame 1 on screen and the element in frame 0: no frame lies before the frame of the
+    // element.
+    const { store, video } = stepThatKeepsTheFrame(1, -1);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("edge");
+    expect(video.currentTimeSets).toBe(sets);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsOf(1));
+
+    expect(store.getState().seekNominal(1)).toBe("stepped");
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(2), 9);
+  });
+
+  it("keeps the edge rule when the frame on screen holds the position of the element", () => {
+    // A file that reports 60 fps while its frames are uneven: a frame starts at PTS 15232, in
+    // the middle of nominal frame 59, and the element stands at that start. The frame rounds to
+    // nominal frame 60, and a step back aims at the middle of 59, its own start.
+    const { store, video } = showing(0);
+    store.getState().seekToPts("15232" as Pts);
+    fireSeeked(store, key, video);
+    store.getState().syncPresentedFrame(key, 15232 / 15360, 3, video);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("15232");
+    expect(video.currentTime).toBeCloseTo(frameMiddle(59), 9);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("edge");
+
+    expect(video.currentTimeSets).toBe(sets);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("15232");
+  });
+
+  it("keeps the edge rule for a source that plays through a MediaSource", () => {
+    // The same state on the exact grid, with a known anchor and no frame table (ADR 046).
+    const live: PlaybackSource = { ...source, mediaSource: true, anchorMediaTime: 0 };
+    const { store, video } = stepThatKeepsTheFrame(100, -1, live);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("edge");
+
+    expect(video.currentTimeSets).toBe(sets);
+  });
+
+  it("seeks once to a target away from the frame of the element", () => {
+    // The picture keeps frame 100 and the element stands in frame 99. A step forward aims at
+    // frame 101, which a direct seek reaches.
+    const { store, video } = stepThatKeepsTheFrame(100, -1);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(1)).toBe("stepped");
+
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(101), 9);
+    fireSeeked(store, key, video);
+    expect(video.currentTimeSets).toBe(sets + 1);
+  });
+
+  it("steps one frame when the frame on screen holds the position of the element", () => {
+    const { store, video } = showing(100);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("stepped");
+
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(99), 9);
+    fireSeeked(store, key, video);
+    expect(video.currentTimeSets).toBe(sets + 1);
+  });
+
+  it("steps one frame from the element while the display target is still set", () => {
+    // The seek ended without any frame callback: the step counts from the element.
+    const { store, video } = showing(100);
+    store.getState().seekNominal(-1);
+    fireSeeked(store, key, video);
+    expect(store.getState().seekTargetSeconds).toBeCloseTo(frameStart(99), 9);
+    const sets = video.currentTimeSets;
+
+    expect(store.getState().seekNominal(-1)).toBe("stepped");
+
+    expect(video.currentTimeSets).toBe(sets + 1);
+    expect(video.currentTime).toBeCloseTo(frameMiddle(98), 9);
+  });
+});

@@ -186,6 +186,65 @@ about 70% at 23.976 and 59.94 fps.
   2026-09-24.) When the probe gives the extent in ticks, a forward step on the grid that the
   end bound clamped is also the edge when it starts at the last frame of the extent (ADR 026)
   or later, and the display of a clamped step shows that frame at most.
+- **A picture that WebKit kept.** (Changed on 2026-11-24.) WKWebView can end the last seek of
+  a quick series of steps back on the frame of the seek before it. `currentTime` reports the
+  new target, but the picture and the frame callback keep the frame before, and no later
+  callback comes. That callback arrives after `seeked`, so it clears the display target. The
+  next step back then starts from the frame on screen, which lies after the frame of the
+  element. That step aims at the position of the element. The edge no-op dropped that press
+  and every press after it. The playhead stopped there, and no cue sounded. A seek to the
+  position of the element, or 3 ms from it, does not move that picture.
+
+  When all of these conditions are true, the step aims at the frame before the frame of the
+  element instead:
+  - The request is a relative step back.
+  - The source is native and on the grid.
+  - The target is at the position of the element. No bound and no direction rule moved the
+    target, and the element is inside the bounds.
+  - The element is paused and does not seek, no seek is pending, no display target is set,
+    and a frame is on screen. The step therefore starts from the frame on screen.
+  - The frame on screen starts after the position of the element. The picture and the
+    element therefore disagree.
+  - The frame before the frame of the element is inside the bounds.
+
+  The step then sends one ordinary seek to another frame, so the picture moves. The picture
+  skips the frame of the element once. The display target and the cue name the frame that
+  the seek shows. The frame callback names the frame on screen, so a mark stays exact
+  (ADR 003, ADR 026). The step adds no state. If the picture showed the frame of the element
+  and only its callback was lost, a step of one frame goes one frame back from that picture.
+  That is the correct step. A step of ten frames then goes one frame back from that picture,
+  and not ten.
+
+  The conditions keep the edge no-op in these cases:
+  - A step forward keeps the edge no-op. The same state also comes from a video that ends
+    before its audio. There the element stands after the last video frame, and that frame is
+    rightly on screen. A typed frame (`seekToFrameIndex`) keeps the edge no-op too.
+  - Off the grid no frame boundary is known. A source that plays through a MediaSource has
+    the repair of ADR 046. Its real frames can be longer than the grid, so there a target at
+    the element can lie in the frame on screen.
+  - At the first frame, no frame lies before the frame of the element. The step back stays
+    the edge no-op, and a step forward moves the picture.
+  - A file can report a constant rate while its frames are uneven. A frame that starts in the
+    middle of a nominal frame then rounds to the next nominal frame, and a step back from it
+    aims at its own start. That frame holds the position of the element, so the edge no-op
+    stays, as before this change.
+
+  A seek to the frame on screen and then to the target also moves the picture, without the
+  skip. This decision does not use it. Between the two seeks the store must keep a frame that
+  the element left. That state interacts with marks, scrub seeks, playback and the `seeked`
+  rule in rare orders of events.
+
+  These measurements came from a 60 fps MP4 with B-frames in a WKWebView, with seeks issued
+  as the store issues them:
+  - Of 28 series of steps back, with one step every 17 or 33 ms, 2 to 4 ended with the
+    picture on the frame of the step before. That frame is one frame after the target. Slow
+    single steps over the same frames never did.
+  - A seek to the position of the element, or 3 ms from it, brought a `seeked` and left the
+    same picture.
+  - A seek to the frame on screen and then to the target moved the picture to the target in
+    9 tests of 9.
+  - A seek to the frame before the target and back moved it too, and showed the frame before
+    the target for a moment. That first seek is the seek that this rule sends.
 - **Calibration lost during a step.** If the calibration leaves `ready` while a display
   target is set, the target moves to the axis of the browser timeline: the last accepted
   request, measured from the timeline start. After `play` there is no such request, so the

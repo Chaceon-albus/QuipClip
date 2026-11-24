@@ -1745,6 +1745,71 @@ export function createPlaybackStore(
         targetTime = currentBrowserTime;
       }
 
+      // WKWebView can end the last seek of a quick series of steps back on the frame of the seek
+      // before it. currentTime reports the new target, but the picture and the frame callback
+      // keep the frame before, with no later callback. That callback clears the display target,
+      // so the frame on screen starts after the element. A step back from that frame then aims
+      // at the position of the element. The first edge test below reads that target as an edge,
+      // for this press and for each later one, though the picture did not move. A seek to the
+      // position of the element, or 3 ms from it, leaves that picture in place.
+      //
+      // The step therefore aims at the frame before the frame of the element. It sends one
+      // ordinary seek to another frame, which moves the picture. The picture skips the frame of
+      // the element once. The frame callback still names the frame that the seek shows, so a
+      // mark stays exact (ADR 003, ADR 026). If the picture showed the frame of the element and
+      // only its callback was lost, a step of one frame goes one frame back from that picture.
+      //
+      // The rule takes only that case, so every other step keeps its edge rules:
+      // - A relative step back. A step forward can aim past the last video frame. When the video
+      //   ends before the audio and the probe gives no extent in ticks, the element stands after
+      //   that frame while it is rightly on screen. There the edge no-op must stay. A typed frame
+      //   (seekToFrameIndex) keeps it too.
+      // - A native source on the frame grid. Off the grid no frame boundary is known. A source
+      //   that plays through a MediaSource has its own repair (ADR 046). Its real frames can be
+      //   longer than the grid, so a target at the element can lie in the frame on screen.
+      // - A target that no bound and no direction rule moved, an element inside the bounds, and a
+      //   frame before the frame of the element inside the bounds. At the first frame the edge
+      //   rule stays, and a step forward moves the picture.
+      // - A paused element that does not seek, with no pending seek and no display target, so the
+      //   step starts from the frame on screen.
+      // - A frame on screen that starts after the position of the element, so the picture and the
+      //   element disagree. A file can report a constant rate while its frames are uneven. A
+      //   frame that starts in the middle of a nominal frame then rounds to the next nominal
+      //   frame, and a step back from it aims at its own start. That frame holds the position of
+      //   the element, so the edge no-op stays there, as before.
+      if (
+        grid !== null &&
+        gridOrigin !== null &&
+        request.kind === "relative" &&
+        direction < 0 &&
+        knownAnchor(source) === null &&
+        targetTime === unclampedTarget &&
+        currentBrowserTime === stepStart &&
+        Math.abs(targetTime - currentBrowserTime) <
+          NOMINAL_STEP_EDGE_TOLERANCE_SECONDS &&
+        !state.isPlaying &&
+        element.paused !== false &&
+        element.seeking !== true &&
+        pending === null &&
+        state.seekTargetSeconds === null &&
+        state.presentedFrame !== null &&
+        state.presentedFrame.mediaTime >
+          currentBrowserTime + SEEKED_FRAME_TOLERANCE_SECONDS
+      ) {
+        const frameBefore = grid.targetFrame - 1;
+        const targetBefore = gridOrigin + nominalFrameMiddleSeconds(frameBefore, fps);
+        if (
+          Number.isSafeInteger(frameBefore) &&
+          Number.isFinite(targetBefore) &&
+          targetBefore >= lowerBound &&
+          targetBefore <= upperBound
+        ) {
+          grid = { ...grid, targetFrame: frameBefore };
+          unclampedTarget = targetBefore;
+          targetTime = targetBefore;
+        }
+      }
+
       // A step at the first or the last frame of the source cannot move it. Such a step does
       // nothing to the position. It dispatches no seek, keeps presentedFrame and
       // seekTargetSeconds, and requests no cue. A seek that lands on the frame already on
