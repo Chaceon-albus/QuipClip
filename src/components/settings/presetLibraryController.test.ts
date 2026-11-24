@@ -2141,25 +2141,86 @@ describe("PresetLibraryController", () => {
       }
     });
 
-    it("keeps a value with more decimal places as a fraction, which reports oneDecimal", () => {
+    it("reports oneDecimal for more decimal places, and keeps the typed text in the input", () => {
       const controller = controllerWithDraft();
-      controller.updateAudioGain("-1.25");
-      const view = controller.getView();
-      expect(view.draft?.audioGainTenthsDb).toBe(-12.5);
-      expect(view.issues).toEqual([{ field: "audioGainTenthsDb", code: "oneDecimal" }]);
+      // The text decides, so a value very close to a tenth is not rounded to it, also when the
+      // number itself loses the extra digits and reads as 1. "-15.97" times 10 is not exact in
+      // floating point, and a number in the input would show -15.970000000000002.
+      for (const raw of ["-1.25", "-15.97", "1.000000000001", "1.0000000000000001"]) {
+        controller.updateAudioGain(raw);
+        const view = controller.getView();
+        expect(Number.isNaN(view.draft?.audioGainTenthsDb), raw).toBe(true);
+        expect(view.issues, raw).toEqual([
+          { field: "audioGainTenthsDb", code: "oneDecimal" },
+        ]);
+        expect(view.canSave, raw).toBe(false);
+        expect(view.audioGainText, raw).toBe(raw);
+      }
+    });
 
-      // The text decides, so a value very close to a tenth is not rounded to it.
-      controller.updateAudioGain("1.000000000001");
-      expect(controller.getView().issues).toEqual([
-        { field: "audioGainTenthsDb", code: "oneDecimal" },
-      ]);
+    it("shows the gain of a loaded draft until the user types, and again after a new load", () => {
+      const settings = createSettings({
+        presets: [
+          createPreset("p1", { audioGainTenthsDb: -15 }),
+          createPreset("p2", { audioGainTenthsDb: 0 }),
+        ],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn(),
+      });
+      expect(controller.getView().audioGainText).toBe("");
+      controller.select("p1");
+      expect(controller.getView().audioGainText).toBe("-1.5");
 
-      // Also when the number itself loses the extra digits and reads as 1.
-      controller.updateAudioGain("1.0000000000000001");
-      expect(controller.getView().issues).toEqual([
-        { field: "audioGainTenthsDb", code: "oneDecimal" },
-      ]);
-      expect(controller.getView().canSave).toBe(false);
+      // The value keeps the form the user typed, here a trailing zero.
+      controller.updateAudioGain("-1.0");
+      expect(controller.getView().audioGainText).toBe("-1.0");
+      // A number input reports "" for text that is not a number yet, such as "1.".
+      controller.updateAudioGain("");
+      expect(controller.getView().audioGainText).toBe("");
+
+      controller.select("p2");
+      expect(controller.getView().audioGainText).toBe("0");
+      controller.updateAudioGain("-3");
+      controller.cancelDraft();
+      expect(controller.getView().audioGainText).toBe("0");
+    });
+
+    it("shows the stored gain again after a save and the sync that follows it", async () => {
+      let current = createSettings({ presets: [createPreset("p1")] });
+      const controller = createPresetLibraryController({
+        getSettings: () => current,
+        saveSettings: vi.fn((next: Settings) => {
+          current = next;
+          return Promise.resolve(next);
+        }),
+      });
+      controller.select("p1");
+      controller.updateAudioGain("-1.50");
+
+      expect(await controller.saveDraft()).toBe(true);
+      // The typed text stays until the document arrives, and it gives the stored gain.
+      expect(controller.getView().audioGainText).toBe("-1.50");
+      controller.syncFromSettings(current);
+      expect(controller.getView().audioGainText).toBe("-1.5");
+      expect(controller.getView().draft?.audioGainTenthsDb).toBe(-15);
+    });
+
+    it("forgets the typed text when the selected preset is deleted", async () => {
+      const settings = createSettings({
+        presets: [createPreset("p1"), createPreset("p2")],
+      });
+      const controller = createPresetLibraryController({
+        getSettings: () => settings,
+        saveSettings: vi.fn().mockResolvedValue(settings),
+      });
+      controller.select("p1");
+      controller.updateAudioGain("-7");
+
+      expect(await controller.deletePreset("p1")).toBe(true);
+      expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().audioGainText).toBe("");
     });
 
     it("accepts trailing zeros after the one decimal place", () => {
@@ -2179,14 +2240,19 @@ describe("PresetLibraryController", () => {
 
     it("reports a value outside the range in decibels", () => {
       const controller = controllerWithDraft();
-      controller.updateAudioGain("20.1");
-      expect(controller.getView().issues).toEqual([
-        {
-          field: "audioGainTenthsDb",
-          code: "outOfRange",
-          values: { min: -20, max: 20 },
-        },
-      ]);
+      // The last two are whole numbers too large for a number. They are out of range, not a
+      // decimal problem.
+      for (const raw of ["20.1", "-1e3", "1e308", "-1e400"]) {
+        controller.updateAudioGain(raw);
+        expect(controller.getView().issues, raw).toEqual([
+          {
+            field: "audioGainTenthsDb",
+            code: "outOfRange",
+            values: { min: -20, max: 20 },
+          },
+        ]);
+        expect(controller.getView().audioGainText, raw).toBe(raw);
+      }
     });
 
     it("is a no-op when there is no draft", () => {
@@ -2196,6 +2262,7 @@ describe("PresetLibraryController", () => {
       });
       controller.updateAudioGain("-1");
       expect(controller.getView().draft).toBeNull();
+      expect(controller.getView().audioGainText).toBe("");
     });
   });
 

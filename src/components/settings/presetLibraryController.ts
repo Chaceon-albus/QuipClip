@@ -14,7 +14,10 @@
  * `saveSettings` action.
  */
 
-import { parseAudioGainField } from "@/features/settings/audioGain";
+import {
+  formatAudioGainField,
+  parseAudioGainField,
+} from "@/features/settings/audioGain";
 import {
   importOptionsText,
   renderOptionsText,
@@ -204,6 +207,20 @@ export type PresetLibraryView = {
 
   /** The notes of the last import that succeeded. Empty after an edit of the text. */
   optionsNotes: OptionSyntaxNote[];
+
+  /**
+   * The value of the audio gain input (ADR 054). A loaded draft shows its gain in decibels
+   * (`formatAudioGainField`). After an edit, it is the value that the input reported, until a
+   * draft loads again (a select, a cancel, a sync, a restore) or the selected preset is deleted.
+   * The draft stores the gain that the value gives (`parseAudioGainField`), but the input never
+   * shows that number, so a value that is not valid, such as "-15.97" or "1.0000000000000001",
+   * stays as the user typed it, with its error under the field.
+   *
+   * Text that is not a number yet, such as "-" or "1.", reaches the controller as "", the value
+   * that a number input reports for it. The input keeps its visible text, because React compares
+   * that "" with the value of the input, and the two are equal.
+   */
+  audioGainText: string;
 };
 
 /**
@@ -289,6 +306,10 @@ export class PresetLibraryController {
   private optionsErrors: OptionSyntaxError[] = [];
   private optionsNotes: OptionSyntaxNote[] = [];
 
+  // The typed text of the audio gain input, or null until the user edits it: see
+  // `PresetLibraryView.audioGainText`.
+  private audioGainText: string | null = null;
+
   constructor(options: PresetLibraryControllerOptions = {}) {
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
@@ -341,6 +362,9 @@ export class PresetLibraryController {
       optionsTextPending: this.optionsTextPending,
       optionsErrors: this.optionsErrors,
       optionsNotes: this.optionsNotes,
+      audioGainText:
+        this.audioGainText ??
+        (this.draft ? formatAudioGainField(this.draft.audioGainTenthsDb) : ""),
     };
   }
 
@@ -498,12 +522,16 @@ export class PresetLibraryController {
   }
 
   /**
-   * Parses `raw` from the audio gain input, in decibels, and stores the result in tenths of a
-   * decibel (see `parseAudioGainField`).
+   * Keeps `raw` from the audio gain input as the text of the input (`audioGainText`), parses it
+   * in decibels, and stores the result in tenths of a decibel (see `parseAudioGainField`).
    *
    * No-op when there is no draft.
    */
   updateAudioGain(raw: string): void {
+    if (!this.draft) {
+      return;
+    }
+    this.audioGainText = raw;
     this.updateDraft({ audioGainTenthsDb: parseAudioGainField(raw) });
   }
 
@@ -923,6 +951,7 @@ export class PresetLibraryController {
       this.draft = null;
       this.dirty = false;
       this.issues = [];
+      this.audioGainText = null;
     }
     this.notify();
     return true;
@@ -1088,6 +1117,8 @@ export class PresetLibraryController {
     this.optionsTextPending = false;
     this.optionsErrors = [];
     this.optionsNotes = [];
+    // The gain input shows the loaded gain again.
+    this.audioGainText = null;
     // A newly loaded draft never inherits an in-progress "choose a custom encoder" edit from
     // whatever was loaded before it. The same holds for the custom resolution and frame rate:
     // the loaded values then select their choice, if one matches.

@@ -86,6 +86,12 @@ describe("the Adjust switch of the Gain row (ADR 061)", () => {
       tenthsDb: null,
       issue: { key: "settings.field.outOfRange", values: { min: -20, max: 20 } },
     });
+    // A whole number too large for a number is out of range, and the field keeps its text.
+    expect(presentGainField("1e400", false, false)).toMatchObject({
+      text: "1e400",
+      tenthsDb: null,
+      issue: { key: "settings.field.outOfRange", values: { min: -20, max: 20 } },
+    });
     // Disabled while the measurement runs or the step does not measure, and while the save
     // panel is open.
     expect(presentGainField("0.0", true, false).disabled).toBe(true);

@@ -691,8 +691,8 @@ export function validatePresetFields(preset: Preset): PresetFieldIssue[] {
     }
   }
 
-  // 6. audioGainTenthsDb: not an integer -> oneDecimal (the editor shows decibels, and a
-  // value with more than one decimal place is the fraction it stores); outside bounds ->
+  // 6. audioGainTenthsDb: not an integer -> oneDecimal (the editor shows decibels, and it
+  // stores NaN for blank text and for text with more than one decimal place); outside bounds ->
   // outOfRange, with the bounds in decibels. The bounds lie inside the safe integer range, so a
   // whole number too large for it is out of range, not a decimal problem.
   const gainIssue = audioGainIssue(preset.audioGainTenthsDb);

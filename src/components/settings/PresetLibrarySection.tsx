@@ -96,7 +96,6 @@ import {
   presentAudioBitrateSelect,
   presentAudioBitrateValue,
   presentAudioChannelsSelect,
-  presentAudioGainField,
   presentAudioGainInput,
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
@@ -313,7 +312,7 @@ function PresetEditor({
     numberFormatter,
   );
   const channelsSelect = presentAudioChannelsSelect();
-  const gainInput = presentAudioGainInput(draft.audioGainTenthsDb);
+  const gainInput = presentAudioGainInput(view.audioGainText);
   const resolutionSelect = presentResolutionSelect();
   const frameRateSelect = presentFrameRateSelect(numberFormatter);
   // While the custom field is open, it holds the name, and the list gets no option for the
@@ -1009,7 +1008,7 @@ function PresetEditor({
             gainInput.unitKey !== undefined && ids.audioGainUnit,
             ids.audioGainHint,
           )}
-          value={presentAudioGainField(draft.audioGainTenthsDb)}
+          value={view.audioGainText}
           onChange={(e) => controller.updateAudioGain(e.target.value)}
         />
         <FieldError

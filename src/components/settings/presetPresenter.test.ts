@@ -27,7 +27,6 @@ import {
   presentAudioBitrateSelect,
   presentAudioBitrateValue,
   presentAudioChannelsSelect,
-  presentAudioGainField,
   presentAudioGainInput,
   presentAudioSampleRateSelect,
   presentAudioSampleRateValue,
@@ -1717,29 +1716,10 @@ describe("presetPresenter", () => {
     });
   });
 
-  describe("presentAudioGainField", () => {
-    it("renders NaN as an empty string", () => {
-      expect(presentAudioGainField(Number.NaN)).toBe("");
-    });
-
-    it("renders the tenths of a decibel as a number of decibels", () => {
-      expect(presentAudioGainField(0)).toBe(0);
-      expect(presentAudioGainField(-10)).toBe(-1);
-      expect(presentAudioGainField(-15)).toBe(-1.5);
-      expect(presentAudioGainField(200)).toBe(20);
-      // A fraction of a tenth is shown as the user typed it, so the field keeps the text.
-      expect(presentAudioGainField(-12.5)).toBe(-1.25);
-    });
-
-    it("keeps the sign of a negative zero, so the text -0 stays while the user types", () => {
-      expect(Object.is(presentAudioGainField(-0), -0)).toBe(true);
-    });
-  });
-
   describe("presentAudioGainInput", () => {
     it("gives the range and the step in decibels, the dB unit, and the plain hint", () => {
-      for (const gain of [-200, -10, 0, Number.NaN]) {
-        expect(presentAudioGainInput(gain)).toEqual({
+      for (const text of ["-20", "-1", "0", "-0", "", "abc", "-1.25"]) {
+        expect(presentAudioGainInput(text), text).toEqual({
           min: -20,
           max: 20,
           step: 0.1,
@@ -1749,13 +1729,12 @@ describe("presetPresenter", () => {
       }
     });
 
-    it("warns of clipping for a positive gain", () => {
-      expect(presentAudioGainInput(1).hintKey).toBe(
-        "settings.preset.audioGainBoostHint",
-      );
-      expect(presentAudioGainInput(200).hintKey).toBe(
-        "settings.preset.audioGainBoostHint",
-      );
+    it("warns of clipping for a positive gain, also while it is not valid yet", () => {
+      for (const text of ["0.1", "20", "1.25", "1e1"]) {
+        expect(presentAudioGainInput(text).hintKey, text).toBe(
+          "settings.preset.audioGainBoostHint",
+        );
+      }
     });
 
     it("names keys that both catalogs hold", () => {
