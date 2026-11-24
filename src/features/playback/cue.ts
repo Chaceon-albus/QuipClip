@@ -40,6 +40,18 @@ export function setScrubCue(cue: ScrubCue | null): void {
   activeCue = cue;
 }
 
+/**
+ * Remove `cue` from the router when it is the cue of the open source, so the element cue
+ * follows. A cue that the next source installed before this call stays. The owner of a native
+ * source removes its cue in an effect. That effect can run after the owner of the next source
+ * installed its own cue (ADR 062).
+ */
+export function clearScrubCue(cue: ScrubCue): void {
+  if (cue === activeCue) {
+    setScrubCue(null);
+  }
+}
+
 /** The router that the store calls. It passes the arguments on as they came. */
 export const scrubCue: ScrubCue = {
   request: (...args) => {

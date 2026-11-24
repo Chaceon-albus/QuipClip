@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { scrubCue, setScrubCue } from "./cue";
+import { clearScrubCue, scrubCue, setScrubCue } from "./cue";
 import { scrubAudioController } from "./scrubAudio";
 
 describe("the scrub cue router (ADR 019, ADR 046)", () => {
@@ -81,5 +81,27 @@ describe("the scrub cue router (ADR 019, ADR 046)", () => {
 
     setScrubCue(cue);
     expect(cue.stop).not.toHaveBeenCalled();
+  });
+
+  it("clears a cue only while it is the cue of the open source (ADR 062)", () => {
+    const request = vi
+      .spyOn(scrubAudioController, "request")
+      .mockImplementation(() => {});
+    vi.spyOn(scrubAudioController, "stop").mockImplementation(() => {});
+    const native = fakeCue();
+    const next = fakeCue();
+    setScrubCue(native);
+    setScrubCue(next);
+
+    // The owner of the native source releases its cue after the next source installed its own.
+    clearScrubCue(native);
+    scrubCue.request(1, 1);
+    expect(next.request).toHaveBeenCalledWith(1, 1);
+    expect(next.stop).not.toHaveBeenCalled();
+
+    clearScrubCue(next);
+    expect(next.stop).toHaveBeenCalledTimes(1);
+    scrubCue.request(2, 1);
+    expect(request).toHaveBeenCalledWith(2, 1);
   });
 });

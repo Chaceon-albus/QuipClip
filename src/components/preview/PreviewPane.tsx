@@ -34,6 +34,7 @@ import { useSequenceMediaStore } from "@/features/sequence/media";
 import { sequencePlayback } from "@/features/sequence/playback";
 import { timelineStore } from "@/features/timeline";
 import {
+  clearScrubCue,
   createVideoRefCallback,
   playbackStore,
   resolveTimecodeDisplay,
@@ -50,7 +51,7 @@ import {
   type MseSource,
 } from "@/features/playback/mse/controller";
 import { createPcmCue } from "@/features/playback/mse/pcmCue";
-import { ANCHOR_MEDIA_TIME } from "@/features/playback/mse/timeline";
+import { ANCHOR_MEDIA_TIME, videoStartSeconds } from "@/features/playback/mse/timeline";
 import { createWebAudioOutput } from "@/features/playback/mse/webAudio";
 import { openPreviewWindow } from "@/features/playback/mse/windowClient";
 import {
@@ -107,6 +108,11 @@ import {
   type MediaSourceOwner,
   type MediaSourcePaneReports,
 } from "./mediaSourceOwner";
+import {
+  createNativeCueOwner,
+  nativeMediaTimeOrigin,
+  type NativeCueOwner,
+} from "./nativeCueOwner";
 import { choosePreviewPath, mediaSourceSupport, type PreviewPath } from "./previewPath";
 import {
   addMediaSourceNotice,
@@ -242,6 +248,57 @@ const BROWSER_MSE_ENVIRONMENT: MseEnvironment = {
 };
 
 /**
+ * Calls `callback` at each pointer and key gesture of the document, so a Web Audio cue can
+ * start its AudioContext there. Returns a function that stops the calls.
+ */
+function listenForPreviewGestures(callback: () => void): () => void {
+  const options = { capture: true };
+  document.addEventListener("pointerdown", callback, options);
+  document.addEventListener("keydown", callback, options);
+  return () => {
+    document.removeEventListener("pointerdown", callback, options);
+    document.removeEventListener("keydown", callback, options);
+  };
+}
+
+/**
+ * True when a native source plays its frame step cue through Web Audio (ADR 062). In WKWebView
+ * the hidden audio element of ADR 019 stops each single burst before its sound starts.
+ * WebView2 is Chromium, whose element clock waits for the sound, so Windows keeps the element.
+ */
+const NATIVE_SOURCE_PCM_CUE = isMacOS();
+
+/** The owner of the Web Audio cue of a native source (ADR 062). */
+function createPreviewNativeCueOwner(): NativeCueOwner {
+  return createNativeCueOwner({
+    createCue: (target, gain) =>
+      createPcmCue({
+        videoStartSeconds: target.originSeconds,
+        createOutput: createWebAudioOutput,
+        gain,
+        openPcmWindow: (startSeconds, listener) =>
+          openPreviewWindow(
+            {
+              path: target.source.path,
+              size: target.source.size,
+              mtime: target.source.mtime,
+              lane: "audio",
+              container: "native",
+              start: { kind: "time", seconds: startSeconds },
+              formatStartTime: target.source.formatStartTime,
+              audio: "copy",
+              audioCodec: target.source.audioCodec,
+            },
+            listener,
+          ),
+      }),
+    setScrubCue,
+    clearScrubCue,
+    listenForGestures: listenForPreviewGestures,
+  });
+}
+
+/**
  * The owner of the MediaSource controller and the Web Audio cue of the preview (ADR 046), with
  * the browser, the window client and the playback store behind it. `pane` receives what the
  * pane shows.
@@ -277,15 +334,7 @@ function createPreviewMediaSourceOwner(pane: MediaSourcePaneReports): MediaSourc
                 ),
       }),
     setScrubCue,
-    listenForGestures: (callback) => {
-      const options = { capture: true };
-      document.addEventListener("pointerdown", callback, options);
-      document.addEventListener("keydown", callback, options);
-      return () => {
-        document.removeEventListener("pointerdown", callback, options);
-        document.removeEventListener("keydown", callback, options);
-      };
-    },
+    listenForGestures: listenForPreviewGestures,
     store: createMediaSourceStoreActions(playbackStore),
     pane,
     // WKWebView, the web view of macOS, completes a seek whose data arrived late on the wrong
@@ -556,8 +605,12 @@ export function PreviewPane() {
   // so the volume reaches it.
   const scrubAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // The elements follow the volume, and the cue of a MediaSource source follows the mute
-  // toggle and the volume through its gain (ADR 046).
+  // The Web Audio cue of a native source on macOS (ADR 062). The effect below builds the owner
+  // when it first starts a cue.
+  const nativeCueOwnerRef = useRef<NativeCueOwner | null>(null);
+
+  // The elements follow the volume, and the Web Audio cues follow the mute toggle and the
+  // volume through their gain (ADR 046, ADR 062).
   useEffect(() => {
     const volume = previewElementVolume(volumePercent);
     if (videoRef.current) {
@@ -566,9 +619,9 @@ export function PreviewPane() {
     if (scrubAudioRef.current) {
       scrubAudioRef.current.volume = volume;
     }
-    mediaSourceOwnerRef.current?.setGain(
-      previewCueGain({ muted: isMuted, volumePercent }),
-    );
+    const gain = previewCueGain({ muted: isMuted, volumePercent });
+    mediaSourceOwnerRef.current?.setGain(gain);
+    nativeCueOwnerRef.current?.setGain(gain);
   }, [isMuted, volumePercent]);
 
   // The wait follows the deferred navigation of the store, and it counts only while the
@@ -784,6 +837,66 @@ export function PreviewPane() {
     },
     [anchorWait, rescanGenerations],
   );
+
+  // The Web Audio cue of a native source on macOS (ADR 062). It needs the source time of media
+  // time 0. A native source has that time only after the calibration of ADR 003, so the cue
+  // starts when the calibration is ready. The hidden audio element below stays out of the tree
+  // while this flag holds, and it is the cue in every other case, such as a calibration that is
+  // unavailable. A new element (`elementKey`), a new source or a lost calibration stops the cue.
+  const usesNativePcmCue =
+    NATIVE_SOURCE_PCM_CUE &&
+    media !== null &&
+    media.probe.audio !== null &&
+    !isMediaSource &&
+    !decodeFailed &&
+    attachedSourceRevisionKey === sourceRevisionKey &&
+    calibrationStatus === "ready" &&
+    videoStartSeconds(media.probe.videoStartPts, media.probe.videoTimeBase) !== null;
+  useEffect(() => {
+    if (!usesNativePcmCue) {
+      return;
+    }
+    // The media and the anchor are read here, so a re-import of the open file, which keeps the
+    // key, keeps the cue that runs.
+    const current = attachedMediaStore.getState().media;
+    const element = videoRef.current;
+    if (
+      current === null ||
+      element === null ||
+      getSourceRevisionKey(current) !== sourceRevisionKey
+    ) {
+      return;
+    }
+    // The anchor, and not the frame on screen: a navigation that waited for the anchor clears
+    // the frame in the same update that makes the calibration ready.
+    const originSeconds = nativeMediaTimeOrigin(
+      playbackStore.getState().calibrationAnchorMediaTime(),
+      current.probe.videoStartPts,
+      current.probe.videoTimeBase,
+    );
+    if (originSeconds === null) {
+      return;
+    }
+    const owner = (nativeCueOwnerRef.current ??= createPreviewNativeCueOwner());
+    owner.attach(
+      element,
+      {
+        sourceRevisionKey,
+        source: {
+          path: current.path,
+          size: current.size,
+          mtime: current.mtime,
+          formatStartTime: current.probe.formatStartTime ?? null,
+          audioCodec: current.probe.audio?.codec ?? null,
+        },
+        originSeconds,
+      },
+      previewCueGain(previewMutePreferenceStore.getState()),
+    );
+    return () => {
+      owner.detach(element);
+    };
+  }, [usesNativePcmCue, sourceRevisionKey, elementKey]);
 
   // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
   // The callback identity is stable for the life of the component. The closure holds the element
@@ -1363,13 +1476,18 @@ export function PreviewPane() {
                        competing range request during that window. A source whose calibration resolves
                        straight to "unavailable" mounts at attach time, which is correct because such a
                        source has no anchor to protect.
+                    5. !usesNativePcmCue: on macOS a ready calibration starts the Web Audio cue of
+                       ADR 062 in place of this element, so the element does not load the file a
+                       second time. The element stays the cue in each case that the Web Audio cue does
+                       not cover, such as a calibration that is unavailable.
                     The element is never drawn (`hidden`), so it has no control, no context menu and no
                     picture, and it needs none of the native feature attributes of the video. */}
                 {media.probe.audio &&
                   !decodeFailed &&
                   !isMediaSource &&
                   attachedSourceRevisionKey === sourceRevisionKey &&
-                  calibrationStatus !== "calibrating" && (
+                  calibrationStatus !== "calibrating" &&
+                  !usesNativePcmCue && (
                     <audio
                       ref={scrubAudioRefCallback}
                       key={`scrub-${elementKey}`}

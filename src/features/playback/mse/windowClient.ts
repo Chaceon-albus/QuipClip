@@ -13,7 +13,8 @@ import { BACKEND_COMMANDS, invokeCommand, type InvokeFn } from "@/lib/ipc";
 import type { Rational } from "@/types/project";
 
 export type WindowLane = "video" | "audio";
-export type WindowContainer = "flv" | "mpegTs" | "matroska";
+/** `native` is a source that the web view plays itself. It opens only PCM windows (ADR 062). */
+export type WindowContainer = "flv" | "mpegTs" | "matroska" | "native";
 /** What a window does with the audio: copy it, transcode it to AAC, or leave it out. */
 export type WindowAudio = "copy" | "transcode" | "omit";
 

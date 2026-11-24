@@ -947,6 +947,45 @@ describe("Playback Store & PTS Presentation Engine", () => {
     });
   });
 
+  describe("calibrationAnchorMediaTime (ADR 062)", () => {
+    it("keeps the anchor when a navigation that waited for it clears the frame", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      expect(store.getState().calibrationAnchorMediaTime()).toBeNull();
+
+      // A seek before the first frame callback waits for the anchor (ADR 022).
+      store.getState().seekToPts("50" as Pts);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+
+      // The same update makes the calibration ready and runs the seek, which clears the frame.
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(store.getState().calibrationAnchorMediaTime()).toBe(0);
+    });
+
+    it("is null when the calibration is unavailable and after a detach", () => {
+      const store = createPlaybackStore();
+      const video = createFakeVideo();
+      store.getState().attach(sourceA, video);
+      store.getState().syncReady(identityA, video);
+      store.getState().syncPresentedFrame(identityA, 0, 1, video);
+      expect(store.getState().calibrationAnchorMediaTime()).toBe(0);
+
+      store.getState().detach(identityA, video);
+      expect(store.getState().calibrationAnchorMediaTime()).toBeNull();
+
+      const other = createFakeVideo();
+      store.getState().attach(sourceA, other);
+      store.getState().syncReady(identityA, other);
+      store.getState().syncPresentationUnavailable(identityA, other);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().calibrationAnchorMediaTime()).toBeNull();
+    });
+  });
+
   describe("dismissError", () => {
     it("clears a seek error and keeps the attachment and calibration", () => {
       const store = createPlaybackStore();

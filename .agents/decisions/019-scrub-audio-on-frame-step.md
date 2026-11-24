@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-20
 - Deciders: capric98
-- Amended by: ADR 022, ADR 046
+- Amended by: ADR 022, ADR 046, ADR 062
 
 ## Context
 
@@ -59,6 +59,13 @@ controller has four operations: attach, detach, request and stop.
 `play()`, so a burst ended about 425 ms after its request. The cue of that source plays PCM that
 FFmpeg decodes from each window, through Web Audio. The rules of this record for the burst
 length, the continuation, the stop, the backward repeat and the drag keep their behaviour.
+
+(Changed on 2026-11-24.) On macOS, a native source also plays its cue through that Web Audio
+cue while its calibration is ready (ADR 062). The cue reads PCM windows of the audio lane. In
+WKWebView, the clock of the hidden element moves from the end of the seek. AVFoundation plays
+the first sample about 250 ms later. The element therefore stopped each single burst before it
+sounded. The `played` ranges of the measurement of 2026-09-25 follow that same clock, so they
+did not show the fault. Windows keeps the hidden element.
 
 `seekNominal` is the only action that requests a burst. It requests one after it assigns
 `currentTime`. It passes the same target value it gave the preview element. Every other

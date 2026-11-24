@@ -56,6 +56,9 @@ pub enum ContainerHint {
     Flv,
     MpegTs,
     Matroska,
+    /// A source that the web view plays itself, such as an MP4. It has no video windows. On
+    /// macOS its scrub cue reads PCM windows of the audio lane (ADR 062).
+    Native,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -318,7 +321,7 @@ fn open_window(
             sink,
             pcm_sink,
         ),
-        ContainerHint::MpegTs | ContainerHint::Matroska => {
+        ContainerHint::MpegTs | ContainerHint::Matroska | ContainerHint::Native => {
             open_seek(windows, request, &media.path, &ffmpeg, ticket, handle, sink)
         }
     }
@@ -346,7 +349,10 @@ fn check_request(request: &OpenPreviewWindowRequest) -> Result<(), PreviewWindow
     let resume_on_flv = !matches!(request.start, WindowStart::Resume { .. })
         || request.container == ContainerHint::Flv;
     let pcm_lane = request.lane == Lane::Video || request.container != ContainerHint::Flv;
-    if finite && margin && resume_on_flv && pcm_lane {
+    // The web view plays a native source itself, so only its PCM comes from a window.
+    let not_native_video =
+        request.lane == Lane::Audio || request.container != ContainerHint::Native;
+    if finite && margin && resume_on_flv && pcm_lane && not_native_video {
         Ok(())
     } else {
         Err(error(PreviewWindowErrorCode::InvalidRequest))
@@ -532,6 +538,7 @@ fn open_seek(
         WindowStart::Time { seconds } => seek_of(seconds, format_start, margin),
         WindowStart::Resume { .. } => return Err(error(PreviewWindowErrorCode::InvalidRequest)),
     };
+    // Only the video lane reads the container. `check_request` keeps a native source out of it.
     let container = match request.container {
         ContainerHint::MpegTs => SeekContainer::MpegTs,
         _ => SeekContainer::Matroska,
@@ -649,9 +656,33 @@ mod tests {
         let flv_audio_lane = OpenPreviewWindowRequest {
             lane: Lane::Audio,
             container: ContainerHint::Flv,
-            ..base
+            ..base.clone()
         };
         assert!(check_request(&flv_audio_lane).is_err());
+        let native_video_lane = OpenPreviewWindowRequest {
+            container: ContainerHint::Native,
+            ..base
+        };
+        assert!(check_request(&native_video_lane).is_err());
+    }
+
+    #[test]
+    fn a_native_source_opens_only_pcm_windows_of_the_audio_lane() {
+        let parsed = request(serde_json::json!({
+            "path": "/media/a.mp4", "size": 10, "mtime": 1, "lane": "audio", "sequence": 1,
+            "container": "native", "audio": "copy", "start": {"kind": "time", "seconds": 134.5}
+        }))
+        .unwrap();
+        assert_eq!(parsed.container, ContainerHint::Native);
+        assert!(check_request(&parsed).is_ok());
+        let resume = OpenPreviewWindowRequest {
+            start: WindowStart::Resume {
+                offset: 1,
+                pts_ms: 1,
+            },
+            ..parsed
+        };
+        assert!(check_request(&resume).is_err());
     }
 
     #[test]
@@ -674,6 +705,7 @@ mod tests {
             ContainerHint::Flv,
             ContainerHint::MpegTs,
             ContainerHint::Matroska,
+            ContainerHint::Native,
         ] {
             assert!(serves_revision(Verdict::Same, container));
             assert!(!serves_revision(Verdict::Changed, container));

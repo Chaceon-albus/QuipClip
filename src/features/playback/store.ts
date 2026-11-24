@@ -4354,6 +4354,9 @@ export function createPlaybackStore(
         set({ error: null });
       },
 
+      calibrationAnchorMediaTime: () =>
+        get().calibrationStatus === "ready" ? calibratedMediaTime : null,
+
       reset: () => {
         repairLanding = null;
         issuedFastSeek = false;

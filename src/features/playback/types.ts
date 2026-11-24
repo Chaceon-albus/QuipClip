@@ -747,6 +747,14 @@ export interface PlaybackActions {
   dismissError: (code?: PlaybackErrorCode) => void;
 
   /**
+   * The media time of `videoStartPts` while the calibration is ready (ADR 003), or null. It
+   * reads the anchor and changes nothing. The anchor stays when a seek clears
+   * `presentedFrame`, so the Web Audio cue of a native source can take its origin from it
+   * (ADR 062).
+   */
+  calibrationAnchorMediaTime: () => number | null;
+
+  /**
    * Resets playback state and detaches any active media source and element.
    */
   reset: () => void;

@@ -780,6 +780,7 @@ export function createSequencePlayback(
     syncPause: (...args) => playback.getState().syncPause(...args),
     syncEnded: (...args) => playback.getState().syncEnded(...args),
     dismissError: (...args) => playback.getState().dismissError(...args),
+    calibrationAnchorMediaTime: () => playback.getState().calibrationAnchorMediaTime(),
     reset: () => playback.getState().reset(),
   }));
 

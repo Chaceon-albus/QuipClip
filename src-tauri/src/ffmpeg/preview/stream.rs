@@ -755,7 +755,8 @@ fn stream_count<R: Read>(stream: &TagStream<BufReader<Counting<R>>>) -> u64 {
 mod tests {
     use super::*;
     use crate::ffmpeg::preview::arguments::{
-        flv_pcm_arguments, flv_remux_arguments, seek_remux_arguments, AudioMode, SeekContainer,
+        flv_pcm_arguments, flv_remux_arguments, seek_pcm_arguments, seek_remux_arguments,
+        AudioMode, SeekContainer, PCM_SAMPLE_RATE,
     };
     use crate::ffmpeg::preview::registry::Lane;
     use crate::flv::test_support::TestDirectory;
@@ -1834,5 +1835,89 @@ mod tests {
         assert_eq!(end.status, EndStatus::Complete, "{:?}", end.detail);
         let bytes = sink.bytes.lock().unwrap().clone();
         assert_eq!(&bytes[4..8], b"ftyp");
+    }
+
+    /// The PCM of a seek window from `start_seconds`, as `seek_pcm_arguments` makes it.
+    fn seek_pcm(ffmpeg: &Path, path: &Path, seek: Option<f64>, start_seconds: f64) -> Vec<i16> {
+        let handle = Arc::new(WindowHandle::new(
+            1,
+            Lane::Audio,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let sink = Recorder::new();
+        *sink.handle.lock().unwrap() = Some(handle.clone());
+        start_seek_window(
+            ffmpeg,
+            &seek_pcm_arguments(path, seek, 10.0, start_seconds),
+            handle,
+            sink.clone(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        let end = sink.wait_end();
+        assert_eq!(end.status, EndStatus::Complete, "{:?}", end.detail);
+        let bytes = sink.bytes.lock().unwrap().clone();
+        let (pairs, _) = bytes.as_chunks::<2>();
+        pairs.iter().map(|pair| i16::from_le_bytes(*pair)).collect()
+    }
+
+    /// The source time of the first sample of a tone in PCM whose sample 0 is at `start_seconds`.
+    fn tone_onset(samples: &[i16], start_seconds: f64) -> f64 {
+        let index = samples
+            .iter()
+            .position(|sample| sample.unsigned_abs() > 3000)
+            .expect("the PCM holds the tone");
+        start_seconds + index as f64 / f64::from(PCM_SAMPLE_RATE)
+    }
+
+    #[test]
+    fn a_pcm_window_of_an_mp4_places_its_samples_at_their_source_time() {
+        // The scrub cue of a native source on macOS reads these windows (ADR 062). An MP4 that
+        // ffmpeg writes starts at 0, so the seek is the source time of sample 0.
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let dir = TestDirectory::new();
+        let mp4 = dir.path.join("tone.mp4");
+        let status = command_without_console(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=60",
+                "-f",
+                "lavfi",
+                "-i",
+                "aevalsrc=if(gte(t\\,3)\\,0.5*sin(2*PI*440*t)\\,0):s=44100",
+                "-t",
+                "8",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-bf",
+                "2",
+                "-g",
+                "120",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&mp4)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let whole = tone_onset(&seek_pcm(&ffmpeg, &mp4, None, 0.0), 0.0);
+        assert!((whole - 3.0).abs() < 0.005, "the tone starts at {whole}");
+        for seek in [1.5, 2.9] {
+            let onset = tone_onset(&seek_pcm(&ffmpeg, &mp4, Some(seek), seek), seek);
+            assert!(
+                (onset - whole).abs() < 0.001,
+                "the window from {seek} places the tone at {onset}, not {whole}"
+            );
+        }
     }
 }
