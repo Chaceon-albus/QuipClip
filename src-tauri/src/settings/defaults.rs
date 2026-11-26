@@ -635,7 +635,7 @@ mod tests {
 
     /// Every argument in front of `-c:v`, which only the pixel format of a seed changes: the
     /// process flags, the seek 5 s before the In point, the input, the pipe of the audio process
-    /// (ADR 043), the graph file, and the maps.
+    /// (ADR 043), the graph file, the maps, and `-map_chapters -1` (ADR 068).
     fn head() -> Vec<String> {
         [
             "-nostdin",
@@ -661,6 +661,8 @@ mod tests {
             "[v]",
             "-map",
             "1:a",
+            "-map_chapters",
+            "-1",
         ]
         .iter()
         .map(|argument| (*argument).to_owned())

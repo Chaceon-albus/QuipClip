@@ -4773,6 +4773,8 @@ pub(crate) mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -9830,6 +9832,152 @@ pub(crate) mod tests {
             &single,
         );
         assert_eq!((expected, frames), (Some(16), 16));
+    }
+
+    /// The number of chapters that ffprobe reads in `path`. ffprobe writes `"chapters": []` for a
+    /// file without a chapter, so an answer without that array fails the test.
+    fn chapter_count(ffprobe: &Path, path: &Path) -> usize {
+        let answer = crate::procutil::command_without_console(ffprobe)
+            .args(["-v", "error", "-show_chapters", "-of", "json"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(answer.status.success(), "{path:?}");
+        let value: serde_json::Value = serde_json::from_slice(&answer.stdout).unwrap();
+        value["chapters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("ffprobe gives no chapter array for {path:?}: {value}"))
+            .len()
+    }
+
+    /// The start time in seconds of the one audio stream of `path`, as ffprobe reads it.
+    fn audio_start_seconds(ffprobe: &Path, path: &Path) -> f64 {
+        let answer = crate::procutil::command_without_console(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=start_time",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(answer.status.success(), "{path:?}");
+        let text = String::from_utf8(answer.stdout).unwrap();
+        text.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("no audio start time in {path:?}: {text:?}"))
+    }
+
+    #[test]
+    fn a_real_export_of_a_source_with_chapters_writes_no_chapter() {
+        // ADR 068. Without `-map_chapters -1`, ffmpeg copied the chapters of the source into the
+        // output at their times in the source, and the movie header of an MP4 then had a wrong
+        // duration. The source has two chapters, from 0 to 4 s and from 4 to 10 s. The encoder
+        // exports two pieces of it into MP4 and into Matroska, and the copy of the audio writes
+        // one piece through the pipe and into a file with no video.
+        //
+        // Without the chapter track, ffprobe reads a different `format.duration` of an `.m4a`. The
+        // check of an export without video that copies its audio reads that duration and adds the
+        // start of the audio stream (ADR 048). So the audio of the source starts after zero, and
+        // the copy into the `.m4a` runs that check, through `real_copy_in`, with a positive start.
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let chapters = directory.path.join("chapters.txt");
+        fs::write(
+            &chapters,
+            ";FFMETADATA1\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=4000\ntitle=One\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=4000\nEND=10000\ntitle=Two\n",
+        )
+        .unwrap();
+        let source = directory.path.join("chapters.mp4");
+        write_fixture(
+            &ffmpeg,
+            &source,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30",
+                "-itsoffset",
+                "0.1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-f",
+                "ffmetadata",
+                "-i",
+                chapters.to_str().unwrap(),
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map_chapters",
+                "2",
+                "-t",
+                "10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+        );
+        assert_eq!(chapter_count(&ffprobe, &source), 2);
+        // 0.1 s less the priming of AAC, 1024 samples.
+        assert!(audio_start_seconds(&ffprobe, &source) > 0.0);
+
+        let tools = (ffmpeg.clone(), ffprobe.clone());
+        for (container, name) in [(Container::Mp4, "out.mp4"), (Container::Mkv, "out.mkv")] {
+            let output = directory.path.join(name);
+            let mut preset = sample_preset("active");
+            preset.container = container;
+            let (expected, frames) = real_export_of_pieces(
+                &tools,
+                &directory,
+                &[&source],
+                &[(0, 1_000, 2_000), (0, 5_000, 6_500)],
+                preset,
+                ExportStreams::VideoAndAudio,
+                &output,
+            );
+            assert_eq!((expected, frames), (Some(75), 75), "{name}");
+            assert_eq!(chapter_count(&ffprobe, &output), 0, "{name}");
+        }
+
+        for (streams, name) in [
+            (ExportStreams::VideoAndAudio, "copy.mp4"),
+            (ExportStreams::AudioOnly, "copy.m4a"),
+        ] {
+            let output = directory.path.join(name);
+            let (codec, _) = real_copy_in(
+                &ffmpeg,
+                &ffprobe,
+                &directory,
+                &source,
+                streams,
+                &output,
+                Container::Mp4,
+            );
+            // `real_copy_in` runs the export with its check of the output, and a refused check
+            // fails it.
+            assert_eq!(codec, "aac", "{name}");
+            assert_eq!(chapter_count(&ffprobe, &output), 0, "{name}");
+        }
+        // The check of the `.m4a` added a positive start of its audio.
+        let m4a = directory.path.join("copy.m4a");
+        assert!(audio_start_seconds(&ffprobe, &m4a) > 0.0);
     }
 
     #[test]

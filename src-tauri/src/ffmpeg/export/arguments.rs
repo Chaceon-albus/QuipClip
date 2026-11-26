@@ -278,6 +278,11 @@ pub(crate) fn command_line_length(arguments: &[String]) -> usize {
 /// did before ADR 023, so an older preset renders the same vector as before. This writes the
 /// flag for any encoder, lossless ones included: ADR 023 leaves the knowledge of which encoders
 /// take no bitrate to the editor, which clears the value for them.
+///
+/// # Chapters
+///
+/// Every command carries `-map_chapters -1` once, after the last `-map` option and before the
+/// encoder arguments, so the output has no chapter (ADR 068). See [`push_no_chapters`].
 #[must_use]
 pub fn build_arguments(
     plan: &ExportPlan,
@@ -350,6 +355,8 @@ pub fn build_arguments(
             );
         }
     }
+
+    push_no_chapters(&mut arguments);
 
     push_encoder_arguments(&mut arguments, plan.video.as_ref(), plan.audio.as_ref());
     if let Some(copied) = plan.copied_audio.as_ref() {
@@ -511,8 +518,9 @@ pub enum CopyOutput<'a> {
 /// from ADTS where the plan asks, because the muxer of the output file needs the result.
 ///
 /// For [`CopyOutput::File`], the command is the whole export of a plan without video: the flags of
-/// every export command, the conversion from ADTS, and the muxer of an audio-only export
-/// ([`muxer_of`]).
+/// every export command, `-map_chapters -1` after the map (ADR 068, [`push_no_chapters`]), the
+/// conversion from ADTS, and the muxer of an audio-only export ([`muxer_of`]). The command of the
+/// pipe has no `-map_chapters`.
 ///
 /// # Panics
 ///
@@ -561,7 +569,10 @@ pub fn build_copy_arguments(plan: &ExportPlan, output: CopyOutput<'_>) -> Option
             push_pair(&mut arguments, "-map_metadata", "-1");
             push_pair(&mut arguments, "-c:a", COPY_CODEC);
         }
-        CopyOutput::File(_) => push_copy_codec(&mut arguments, copied),
+        CopyOutput::File(_) => {
+            push_no_chapters(&mut arguments);
+            push_copy_codec(&mut arguments, copied);
+        }
     }
     push_pair(&mut arguments, "-ss", &render_time(copied.start));
     push_pair(&mut arguments, "-to", &render_time(copied.end));
@@ -581,6 +592,17 @@ pub fn build_copy_arguments(plan: &ExportPlan, output: CopyOutput<'_>) -> Option
 
 /// The name of the codec that copies packets.
 const COPY_CODEC: &str = "copy";
+
+/// Append `-map_chapters -1`, the output option that writes no chapter (ADR 068).
+///
+/// Without it, FFmpeg copies the chapters of the first input that has chapters into the output, at
+/// their times in the source. The input seek does not move them, and the length of the output does
+/// not cut them. An MP4 or MOV output then also has a wrong duration in its movie header. Each
+/// command that writes the output file carries the option. A command that writes into a pipe does
+/// not: the encoder removes a chapter that the pipe carries.
+fn push_no_chapters(arguments: &mut Vec<String>) {
+    push_pair(arguments, "-map_chapters", "-1");
+}
 
 /// Append the codec of the copied audio for the command that writes the output file:
 /// `-c:a copy`, and the conversion from ADTS when [`CopiedAudio::adts_to_asc`] asks for it.
@@ -1136,6 +1158,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1192,6 +1216,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1413,6 +1439,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "3:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1463,6 +1491,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1582,6 +1612,8 @@ mod tests {
                 "encoder.graph",
                 "-map",
                 "[v]",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1624,6 +1656,8 @@ mod tests {
                 "encoder.graph",
                 "-map",
                 "[a]",
+                "-map_chapters",
+                "-1",
                 "-c:a",
                 "aac",
                 "-movflags",
@@ -1686,6 +1720,8 @@ mod tests {
                 "encoder.graph",
                 "-map",
                 "[a]",
+                "-map_chapters",
+                "-1",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -1721,6 +1757,8 @@ mod tests {
                 "encoder.graph",
                 "-map",
                 "[a]",
+                "-map_chapters",
+                "-1",
                 "-c:a",
                 "aac",
                 "-f",
@@ -1809,6 +1847,8 @@ mod tests {
                 "encoder.graph",
                 "-map",
                 "[v]",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1860,6 +1900,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "2:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1907,6 +1949,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -1957,6 +2001,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2009,6 +2055,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "h264_nvenc",
                 "-pix_fmt",
@@ -2063,6 +2111,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2113,6 +2163,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2168,6 +2220,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2284,6 +2338,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2401,6 +2457,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -2478,6 +2536,8 @@ mod tests {
                 "[v]",
                 "-map",
                 "1:a",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "hevc_nvenc",
                 "-pix_fmt",
@@ -3982,6 +4042,8 @@ mod tests {
                 "1:a",
                 "-map_metadata:s:a:0",
                 "0:s:2",
+                "-map_chapters",
+                "-1",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -4063,6 +4125,8 @@ mod tests {
                 "/media/source.mp4",
                 "-map",
                 "0:2",
+                "-map_chapters",
+                "-1",
                 "-c:a",
                 "copy",
                 "-ss",
@@ -4206,6 +4270,119 @@ mod tests {
                 build_copy_arguments(&plan, CopyOutput::File(Path::new(OUTPUT))),
                 None
             );
+        }
+    }
+
+    /// The positions of `-map_chapters` in `arguments`.
+    fn chapter_flags(arguments: &[String]) -> Vec<usize> {
+        arguments
+            .iter()
+            .enumerate()
+            .filter(|(_, argument)| *argument == "-map_chapters")
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Assert the rule of ADR 068 for a command that writes the output file: `-map_chapters -1`
+    /// once, directly after the last `-map` or `-map_metadata` pair, and directly before the first
+    /// codec.
+    fn assert_writes_no_chapter(arguments: &[String]) {
+        let flags = chapter_flags(arguments);
+        assert_eq!(flags.len(), 1, "{arguments:?}");
+        let at = flags[0];
+        assert_eq!(arguments[at + 1], "-1", "{arguments:?}");
+        let last_map = arguments
+            .iter()
+            .rposition(|argument| argument == "-map" || argument.starts_with("-map_metadata"))
+            .expect("every command that writes the file maps a stream");
+        assert_eq!(at, last_map + 2, "{arguments:?}");
+        let first_codec = arguments
+            .iter()
+            .position(|argument| argument == "-c:v" || argument == "-c:a")
+            .expect("every command that writes the file names a codec");
+        assert_eq!(at + 2, first_codec, "{arguments:?}");
+    }
+
+    #[test]
+    fn every_command_that_writes_the_output_file_writes_no_chapter_once() {
+        // ADR 068: without `-map_chapters -1`, ffmpeg copies the chapters of the first input that
+        // has chapters, at their times in the source. Every kind of plan of the encoder: the audio
+        // in its own process (ADR 043), in the one process, copied through the pipe (ADR 048),
+        // video only, and audio only through the graph. Then the copy of an export without video,
+        // which writes the file in one command.
+        let mut one_process = fixture_plan(2);
+        one_process.sources[0]
+            .audio
+            .as_mut()
+            .unwrap()
+            .silence_layout = Some("stereo".to_owned());
+        assert!(fixture_plan(2).separate_audio_process());
+        assert!(!one_process.separate_audio_process() && one_process.audio.is_some());
+        let mut encoders: Vec<(ExportPlan, Inputs)> = guard_matrix();
+        for shape in [Inputs::PerPiece, Inputs::PerSource] {
+            encoders.push((one_process.clone(), shape));
+        }
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            for plan in [copy_plan(container), adts_copy_plan(container)] {
+                assert!(plan.separate_copy_process());
+                encoders.push((plan, Inputs::PerPiece));
+            }
+        }
+        for (plan, shape) in encoders {
+            assert_writes_no_chapter(&arguments(&plan, shape));
+        }
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            let mut adts = audio_only_copy_plan(container);
+            adts.copied_audio.as_mut().unwrap().adts_to_asc = true;
+            for plan in [audio_only_copy_plan(container), adts] {
+                assert_writes_no_chapter(&copy_to_file(&plan));
+            }
+        }
+    }
+
+    #[test]
+    fn no_command_that_writes_into_a_pipe_names_map_chapters() {
+        // These commands write no file that QuipClip publishes (ADR 068). The encoder removes a
+        // chapter that the copy pipe carries, and WAV has no chapter.
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            for plan in [copy_plan(container), adts_copy_plan(container)] {
+                let pipe = copy_process(&plan);
+                assert!(chapter_flags(&pipe).is_empty(), "{pipe:?}");
+            }
+        }
+        for shape in [Inputs::PerPiece, Inputs::PerSource] {
+            for count in [1, 3] {
+                let audio = build_audio_arguments(&fixture_plan(count), shape, AUDIO_GRAPH);
+                assert!(chapter_flags(&audio).is_empty(), "{audio:?}");
+            }
+            let plan = audio_only_plan(2, Container::Mp4);
+            let measurement = build_measurement_arguments(&plan, &shape.of(&plan), AUDIO_GRAPH);
+            assert!(chapter_flags(&measurement).is_empty(), "{measurement:?}");
+        }
+    }
+
+    #[test]
+    fn writing_no_chapter_adds_no_map_metadata() {
+        // ADR 068 keeps the tags of the file and of its streams. The encoder of a copy keeps its
+        // one `-map_metadata:s:a:0` (ADR 048), and no other command that writes the file has one.
+        let metadata = |all: &[String]| -> Vec<String> {
+            all.iter()
+                .filter(|argument| argument.starts_with("-map_metadata"))
+                .cloned()
+                .collect()
+        };
+        for (plan, shape) in guard_matrix() {
+            let all = arguments(&plan, shape);
+            assert!(metadata(&all).is_empty(), "{all:?}");
+        }
+        for container in [Container::Mp4, Container::Mov, Container::Mkv] {
+            let encoder = arguments(&copy_plan(container), Inputs::PerPiece);
+            assert_eq!(metadata(&encoder), ["-map_metadata:s:a:0"], "{encoder:?}");
+            assert!(encoder
+                .windows(2)
+                .any(|pair| pair == ["-map_metadata:s:a:0", "0:s:2"]));
+            let file = copy_to_file(&audio_only_copy_plan(container));
+            assert!(metadata(&file).is_empty(), "{file:?}");
         }
     }
 
