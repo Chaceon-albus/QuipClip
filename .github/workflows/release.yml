@@ -137,7 +137,6 @@ jobs:
           name: bundles-${{ matrix.name }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
           # A re-run of this job replaces the artifact of the failed attempt, so the draft

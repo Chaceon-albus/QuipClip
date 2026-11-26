@@ -26,8 +26,8 @@ import { checkFiles, readRepoFiles } from "./version.mjs";
 /**
  * Gives the file names of the bundles that each release must hold. The names are the
  * names that the Tauri 2 bundler writes, in this order: the macOS disk image for
- * `aarch64`, the Windows MSI package, and the Windows NSIS installer. Tauri names the
- * `x86_64` architecture `x64`. The release has no macOS `x86_64` bundle.
+ * `aarch64` and the Windows NSIS installer. Tauri names the `x86_64` architecture `x64`.
+ * The release has no macOS `x86_64` bundle, and no Windows MSI package (ADR 071).
  * @param {string} productName
  * @param {string} version
  * @returns {string[]}
@@ -35,7 +35,6 @@ import { checkFiles, readRepoFiles } from "./version.mjs";
 export function releaseAssetNames(productName, version) {
   return [
     `${productName}_${version}_aarch64.dmg`,
-    `${productName}_${version}_x64_en-US.msi`,
     `${productName}_${version}_x64-setup.exe`,
   ];
 }

@@ -50,9 +50,13 @@ then some features and keys in this file are missing from it.
 | ---------------------- | ---------------------------------- |
 | macOS on Apple silicon | `QuipClip_<version>_aarch64.dmg`   |
 | Windows x64, installer | `QuipClip_<version>_x64-setup.exe` |
-| Windows x64, MSI       | `QuipClip_<version>_x64_en-US.msi` |
 
 There is no bundle for a Mac with an Intel processor.
+
+Releases 0.2.1 and earlier also have an MSI package for Windows. If you installed QuipClip
+from an MSI package, the installer of a later release finds that copy and removes it
+first. Windows can ask for administrator rights for this step. Your settings and the
+downloaded `ffmpeg` stay.
 
 The bundles have no signature from a developer identity. On Windows, SmartScreen shows a
 warning at the first start. macOS blocks the first start. To allow it:

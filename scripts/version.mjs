@@ -29,10 +29,10 @@ const PACKAGE_JSON = path.join(ROOT, "package.json");
 export const TAG_PREFIX = "v";
 
 // A release version is MAJOR.MINOR.PATCH, with no pre-release part and no build part.
-// The Windows MSI bundle writes the version as an MSI product version. That format
-// accepts MAJOR and MINOR up to 255 and PATCH up to 65535, and it accepts a pre-release
-// part only when that part is all digits. A version outside these limits builds on macOS
-// and then fails on Windows, so this script refuses it before the release starts.
+// MAJOR and MINOR are 255 or less, and PATCH is 65535 or less. These are the limits of an
+// MSI product version. The release has no MSI package since ADR 071, and the limits stay.
+// Each version inside them also fits the version resource of the Windows executable, and
+// an MSI package can come back with no change to this rule.
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const PART_LIMITS = { major: 255, minor: 255, patch: 65535 };
 const PARTS = /** @type {const} */ (["major", "minor", "patch"]);
@@ -79,7 +79,7 @@ export function parseVersion(text) {
     if (version[part] > PART_LIMITS[part]) {
       throw new Error(
         `The ${part} part of ${text} is more than ${PART_LIMITS[part]}. ` +
-          "The Windows MSI bundle cannot hold it.",
+          "A release version stays inside the limits of an MSI product version.",
       );
     }
   }

@@ -91,6 +91,7 @@ document summarizes them and shows how the parts fit together.
 | [`068-write-no-chapter-of-a-source-into-an-export.md`](../.agents/decisions/068-write-no-chapter-of-a-source-into-an-export.md)                                         | Each command that writes the output file has `-map_chapters -1`                    |
 | [`069-export-one-frame-as-an-image.md`](../.agents/decisions/069-export-one-frame-as-an-image.md)                                                                       | Export Frame saves the frame that Mark In would mark as a PNG file                 |
 | [`070-choose-the-audio-stream-of-a-source.md`](../.agents/decisions/070-choose-the-audio-stream-of-a-source.md)                                                         | The user can choose which audio stream of a source QuipClip reads                  |
+| [`071-release-no-msi-package-for-windows.md`](../.agents/decisions/071-release-no-msi-package-for-windows.md)                                                           | The Windows build makes only the NSIS installer, and no MSI package                |
 
 ## Shape
 
@@ -824,7 +825,7 @@ TypeScript is held at 5.9, because `typescript-eslint` caps its peer range below
 
 ## Version and release
 
-See ADR 034, ADR 042, and ADR 047.
+See ADR 034, ADR 042, ADR 047, and ADR 071.
 
 `src-tauri/Cargo.toml` holds the only copy of the application version. `tauri.conf.json`
 and `package.json` have no `version` field, so Tauri reads the version from `Cargo.toml`.
@@ -838,7 +839,8 @@ About panel and the About tab of Settings show them after the version, for examp
 
 The push of a release tag starts `.github/workflows/release.yml`. It checks the tag, runs
 `ci.yml` on the tagged commit, and builds the macOS and Windows bundles with a token that
-can only read. A second job attaches the bundles to a draft release. It checks the asset
+can only read. The Windows build makes only the NSIS installer, and no MSI package
+(ADR 071). A second job attaches the bundles to a draft release. It checks the asset
 names and their SHA-256 digests against `scripts/release-assets.mjs`. The last job runs
 in the `release` environment. It checks the draft and the tag again, and publishes the
 draft as an immutable release. `tauri.macos.conf.json` gives the macOS bundle an ad-hoc

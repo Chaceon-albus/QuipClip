@@ -18,9 +18,10 @@ Do not edit the version by hand. Do not run `npm version` or `pnpm version`, bec
 add a `version` field to `package.json`.
 
 A release version is `MAJOR.MINOR.PATCH`, for example `0.2.0`. It has no pre-release part
-such as `-beta.1`. `MAJOR` and `MINOR` are 255 or less, and `PATCH` is 65535 or less,
-because the Windows MSI package cannot hold a larger value. A pre-release also has a
-release version. See [Pre-releases](#pre-releases).
+such as `-beta.1`. `MAJOR` and `MINOR` are 255 or less, and `PATCH` is 65535 or less.
+These are the limits of an MSI product version. The release has no MSI package, but the
+limits stay (ADR 071). A pre-release also has a release version. See
+[Pre-releases](#pre-releases).
 
 | Command                                       | Result                                                   |
 | --------------------------------------------- | -------------------------------------------------------- |
@@ -158,9 +159,9 @@ of [Pin the FFmpeg download](#pin-the-ffmpeg-download), and each step after step
    environment has required reviewers, the `publish` job waits. Then open the
    **Releases** page, and inspect the draft:
    - The title is `QuipClip v0.2.0`, and the draft targets the tagged commit.
-   - The draft holds three bundles: one `.dmg` for `aarch64`, one `.msi`, and one
-     `-setup.exe`. Each name has the version. GitHub also shows two source code
-     archives. They are not assets of the workflow.
+   - The draft holds two bundles: one `.dmg` for `aarch64` and one `-setup.exe`. Each
+     name has the version. GitHub also shows two source code archives. They are not
+     assets of the workflow.
    - On a Mac with Apple silicon, download the `.dmg` from the draft. Open it, and
      start QuipClip. macOS blocks the first start of an app with no Developer ID. Open
      **System Settings**, then **Privacy & Security**, and select **Open Anyway**.
@@ -285,7 +286,7 @@ git tag -d v0.2.0
 
 - The macOS bundle has an ad-hoc signature and no Developer ID, and nobody notarizes
   it. macOS blocks the first start until the user selects **Open Anyway** in
-  **Privacy & Security**. The Windows bundles have no signature, so SmartScreen warns at
+  **Privacy & Security**. The Windows installer has no signature, so SmartScreen warns at
   the first start. A published release cannot get signed bundles later, so signed bundles
   need a new version.
 - A version has no pre-release part, such as `-beta.1`. ADR 034 gives the reason. A

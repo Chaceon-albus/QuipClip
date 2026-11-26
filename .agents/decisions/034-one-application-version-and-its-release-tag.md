@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-25
 - Deciders: capric98
-- Amended by: ADR 042, ADR 047
+- Amended by: ADR 042, ADR 047, ADR 071
 
 ## Context
 
@@ -68,6 +68,9 @@ still a release version.
 (Changed on 2026-10-23.) The application shows the source of each build, its commit and
 branch, beside the version. The source is not part of the version (ADR 047).
 
+(Changed on 2026-11-26.) The Windows build makes no MSI package (ADR 071). The limits of
+the release version form stay as they are.
+
 **Release tag.** The release tag is `v` and the version, for example `v0.2.0`. It is an
 annotated tag on a commit on `main`, and the `Cargo.toml` of that commit has the version.
 
@@ -84,6 +87,8 @@ annotated tag on a commit on `main`, and the `Cargo.toml` of that commit has the
 `scripts/release-assets.mjs` holds the one list of the assets of a release: the macOS
 disk image for `aarch64`, the MSI package, and the NSIS installer. The release workflow
 uses it to check the bundles and the draft.
+
+(Changed on 2026-11-26.) The list has no MSI package (ADR 071).
 
 `pnpm version:check` and `pnpm version:bump` run the version script. Vitest tests run the
 check on the repository, so `pnpm test` fails in the gate and in CI when a second copy of

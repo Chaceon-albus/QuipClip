@@ -17,10 +17,9 @@ const PRELOAD = new URL("./entry-check-failure.mjs", import.meta.url).href;
 const NAMES = releaseAssetNames("QuipClip", "1.2.3");
 
 describe("releaseAssetNames", () => {
-  it("gives the three Tauri 2 bundle names of a version", () => {
+  it("gives the two Tauri 2 bundle names of a version", () => {
     expect(NAMES).toEqual([
       "QuipClip_1.2.3_aarch64.dmg",
-      "QuipClip_1.2.3_x64_en-US.msi",
       "QuipClip_1.2.3_x64-setup.exe",
     ]);
   });
@@ -32,17 +31,17 @@ describe("compareNames", () => {
   });
 
   it("finds a missing, an extra, and a repeated name", () => {
-    const actual = [NAMES[0], NAMES[0], NAMES[2], "QuipClip_1.2.3_x64.dmg"];
+    const actual = [NAMES[0], NAMES[0], "QuipClip_1.2.3_x64_en-US.msi"];
     expect(compareNames(NAMES, actual, "The draft")).toEqual([
       "The draft has QuipClip_1.2.3_aarch64.dmg more than one time.",
-      "The draft has QuipClip_1.2.3_x64.dmg, which is not a bundle.",
-      "The draft has no QuipClip_1.2.3_x64_en-US.msi.",
+      "The draft has QuipClip_1.2.3_x64_en-US.msi, which is not a bundle.",
+      "The draft has no QuipClip_1.2.3_x64-setup.exe.",
     ]);
   });
 
   it("refuses the bundles of a different version", () => {
     const old = releaseAssetNames("QuipClip", "1.2.2");
-    expect(compareNames(NAMES, old, "x")).toHaveLength(6);
+    expect(compareNames(NAMES, old, "x")).toHaveLength(4);
   });
 });
 
@@ -58,7 +57,7 @@ describe("checkDraftAssets", () => {
       ...changes[index],
     }));
 
-  it("accepts three uploaded bundles with the digests of the local files", () => {
+  it("accepts two uploaded bundles with the digests of the local files", () => {
     expect(checkDraftAssets(NAMES, assets(), digests)).toEqual([]);
   });
 
@@ -67,20 +66,21 @@ describe("checkDraftAssets", () => {
       checkDraftAssets(NAMES, assets([{ state: "starter" }, { size: 0 }]), digests),
     ).toEqual([
       'QuipClip_1.2.3_aarch64.dmg has the state "starter", not "uploaded".',
-      "QuipClip_1.2.3_x64_en-US.msi is empty.",
+      "QuipClip_1.2.3_x64-setup.exe is empty.",
     ]);
   });
 
-  it("refuses an asset with a different digest, or with no digest", () => {
+  it("refuses an asset with a different digest, and accepts the other asset", () => {
     expect(
-      checkDraftAssets(
-        NAMES,
-        assets([{}, { digest: "sha256:other" }, { digest: null }]),
-        digests,
-      ),
+      checkDraftAssets(NAMES, assets([{}, { digest: "sha256:other" }]), digests),
     ).toEqual([
-      "QuipClip_1.2.3_x64_en-US.msi has the digest sha256:other, but the bundle has sha256:1.",
-      "QuipClip_1.2.3_x64-setup.exe has the digest (none), but the bundle has sha256:2.",
+      "QuipClip_1.2.3_x64-setup.exe has the digest sha256:other, but the bundle has sha256:1.",
+    ]);
+  });
+
+  it("refuses an asset with no digest, and accepts the other asset", () => {
+    expect(checkDraftAssets(NAMES, assets([{ digest: null }, {}]), digests)).toEqual([
+      "QuipClip_1.2.3_aarch64.dmg has the digest (none), but the bundle has sha256:0.",
     ]);
   });
 });
@@ -130,7 +130,7 @@ describe("the command", () => {
     dir = mkdtempSync(path.join(tmpdir(), "release-assets-"));
     const names = releaseAssetNames("QuipClip", version);
     names.forEach((name, index) => {
-      const sub = path.join(dir ?? "", ["dmg", "msi", "nsis"][index]);
+      const sub = path.join(dir ?? "", ["dmg", "nsis"][index]);
       mkdirSync(sub, { recursive: true });
       writeFileSync(path.join(sub, name), "x");
     });

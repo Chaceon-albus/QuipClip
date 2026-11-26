@@ -41,9 +41,10 @@ QuipClip 目前还不能：
 | --------------------- | ---------------------------------- |
 | macOS（Apple 芯片）   | `QuipClip_<version>_aarch64.dmg`   |
 | Windows x64，安装程序 | `QuipClip_<version>_x64-setup.exe` |
-| Windows x64，MSI      | `QuipClip_<version>_x64_en-US.msi` |
 
 没有适用于 Intel 处理器 Mac 的安装包。
+
+0.2.1 及更早的发布版还提供 Windows 的 MSI 安装包。如果您曾用 MSI 安装包安装 QuipClip，之后发布版的安装程序会找到这个副本，并先将其移除。Windows 可能会为此要求管理员权限。您的设置和已下载的 `ffmpeg` 会保留。
 
 安装包没有开发者身份签名。在 Windows 上，SmartScreen 会在首次启动时显示警告。macOS 会阻止首次启动。要允许首次启动：
 

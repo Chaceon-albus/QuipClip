@@ -89,7 +89,7 @@ describe("parseVersion", () => {
   });
 
   it.each(["256.0.0", "0.256.0", "0.0.65536"])(
-    "refuses %s, which the MSI bundle cannot hold",
+    "refuses %s, which is above the MSI limits",
     (text) => {
       expect(() => parseVersion(text)).toThrow(/MSI/);
     },
