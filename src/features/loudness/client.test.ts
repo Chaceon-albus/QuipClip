@@ -17,6 +17,8 @@ const SCOPE: LoudnessScope = {
   segmentCount: 1,
   preset: createPresetDraft("p", "P"),
   streams: "videoAndAudio",
+  // Only the page reads it (ADR 070): the request below does not carry it.
+  effectiveAudio: { a: { index: 1, codec: "aac", sampleRate: 48000, channels: 2 } },
 };
 
 function deferred<T>() {
@@ -62,7 +64,13 @@ describe("the loudness client (ADR 061)", () => {
     const { calls, channel } = setup();
     expect(calls[0].cmd).toBe(BACKEND_COMMANDS.START_LOUDNESS_MEASUREMENT);
     const request = calls[0].args?.request as Record<string, unknown>;
-    expect(request).toMatchObject({ ...SCOPE });
+    expect(request).toMatchObject({
+      sources: SCOPE.sources,
+      pieces: SCOPE.pieces,
+      segmentCount: SCOPE.segmentCount,
+      preset: SCOPE.preset,
+      streams: SCOPE.streams,
+    });
     // The five fields of the scope and the number, and no other key: Rust refuses another key.
     expect(Object.keys(request).sort()).toEqual([
       "pieces",

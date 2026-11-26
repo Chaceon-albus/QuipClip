@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { ImportMediaResult } from "@/features/media/types";
+import { BACKEND_COMMANDS, type InvokeFn } from "@/lib/ipc";
 import type { Pts } from "@/types/project";
-import type { WaveformHandlers, WaveformJob } from "./client";
+import {
+  startWaveform,
+  type WaveformChannel,
+  type WaveformHandlers,
+  type WaveformJob,
+} from "./client";
 import {
   buildWaveformRequest,
   createWaveformController,
@@ -9,6 +16,7 @@ import {
 } from "./controller";
 import { createWaveformDataRegistry } from "./data";
 import { createWaveformStore, selectWaveformSource } from "./store";
+import { chunkBytes } from "./testSupport";
 import {
   NO_WAVEFORM_FLAGS,
   WaveformError,
@@ -73,6 +81,7 @@ interface FakeJob {
 
 function setup(
   sources: Record<string, ImportMediaResult> = { s1: media(), s2: media() },
+  overrides: Record<string, AudioStreamOverride> = {},
 ) {
   const jobs: FakeJob[] = [];
   const start = vi.fn((request: WaveformRequest, handlers: WaveformHandlers) => {
@@ -95,6 +104,7 @@ function setup(
     mediaStore: { getState: () => ({ sources }) },
     data,
     store,
+    audioOverrides: () => overrides,
   });
   const job = (index: number): FakeJob => {
     const found = jobs[index];
@@ -348,5 +358,206 @@ describe("createWaveformController", () => {
     controller.show("s1");
     controller.dismissNotice("s1");
     expect(source().noticeDismissed).toBe(true);
+  });
+
+  describe("the effective audio stream (ADR 070)", () => {
+    const second: AudioStreamOverride = {
+      index: 2,
+      codec: "opus",
+      sampleRate: 48000,
+      channels: 1,
+    };
+
+    it("names the effective stream in the request", () => {
+      const mkv = media({ formatNames: ["matroska", "webm"] });
+      expect(buildWaveformRequest(mkv)?.audioStreamIndex).toBe(1);
+      expect(buildWaveformRequest(mkv, second)?.audioStreamIndex).toBe(2);
+      // A source with no audio has no override and no request.
+      expect(
+        buildWaveformRequest(
+          media({ audio: null, formatNames: ["matroska"] }),
+          undefined,
+        ),
+      ).toBeNull();
+
+      const overrides: Record<string, AudioStreamOverride> = { s1: second };
+      const { controller, job } = setup({ s1: mkv, s2: mkv }, overrides);
+      controller.show("s1");
+      expect(job(0).request.audioStreamIndex).toBe(2);
+    });
+
+    it("keeps the one audio stream of an FLV, whatever override it is given", () => {
+      // The fixture is an FLV: its readers map its audio as 0:a:0 (ADR 070).
+      expect(buildWaveformRequest(media(), second)?.audioStreamIndex).toBe(1);
+      const { controller, job } = setup(undefined, { s1: second });
+      controller.show("s1");
+      expect(job(0).request.audioStreamIndex).toBe(1);
+    });
+
+    /**
+     * A controller on the real client, with `start_waveform` answered by hand, so the slot of
+     * Rust, the job id and the cancel command show as they do in the application.
+     */
+    function setupWithClient() {
+      const starts: ((reply: unknown) => void)[] = [];
+      const calls: { cmd: string; args: Record<string, unknown> | undefined }[] = [];
+      const invoke = vi.fn((cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === BACKEND_COMMANDS.START_WAVEFORM) {
+          return new Promise<unknown>((resolve) => {
+            starts.push(resolve);
+          });
+        }
+        return Promise.resolve(undefined);
+      }) as unknown as InvokeFn;
+      const channels: WaveformChannel[] = [];
+      const store = createWaveformStore({ now: () => 0 });
+      const data = createWaveformDataRegistry();
+      const controller = createWaveformController({
+        start: (request, handlers) =>
+          startWaveform(request, handlers, {
+            invoke,
+            createChannel: () => {
+              const channel: WaveformChannel = { onmessage: () => undefined };
+              channels.push(channel);
+              return channel;
+            },
+          }),
+        mediaStore: { getState: () => ({ sources: { s1: media(), s2: media() } }) },
+        data,
+        store,
+        audioOverrides: () => ({}),
+      });
+      const cancels = () =>
+        calls
+          .filter((call) => call.cmd === BACKEND_COMMANDS.CANCEL_WAVEFORM)
+          .map((call) => call.args?.jobId);
+      const reply = (index: number, jobId: number) => {
+        starts[index]?.({ jobId, cached: false, bucketRate: 100 });
+      };
+      const message = (index: number, raw: unknown) => {
+        channels[index]?.onmessage(raw);
+      };
+      return {
+        controller,
+        store,
+        data,
+        cancels,
+        reply,
+        message,
+        source: (id = "s1") => selectWaveformSource(store.getState(), id),
+      };
+    }
+
+    const CANCELED_END = {
+      type: "end",
+      status: "canceled",
+      code: null,
+      detail: null,
+      bucketCount: 0,
+      cached: false,
+      timestampsDecrease: false,
+      damaged: false,
+      truncated: false,
+      alignmentUncertain: false,
+    };
+
+    it("ends a running job as a cancel does: the envelope goes at once, the slot at the end", async () => {
+      const { controller, store, data, cancels, reply, message, source } =
+        setupWithClient();
+      controller.show("s1");
+      reply(0, 7);
+      await flush();
+      message(0, chunkBytes(0, [1, 2]));
+      expect(data.get("s1")).toBeDefined();
+
+      controller.streamChanged("s1");
+      await flush();
+      // The envelope of the old stream goes, and Rust gets the cancel of the job.
+      expect(data.get("s1")).toBeUndefined();
+      expect(cancels()).toEqual([7]);
+      // Rust still holds the slot, so no envelope can start yet, for any source.
+      expect(store.getState().runningSourceId).toBe("s1");
+      expect(controller.show("s2")).toBe(false);
+      // The data and the progress of the old job are refused.
+      message(0, chunkBytes(2, [3, 4]));
+      message(0, { type: "progress", highWater: 5, bytesRead: null, totalBytes: null });
+      expect(data.get("s1")).toBeUndefined();
+      expect(source().progress).toBeNull();
+
+      // The end of the job frees the slot, and the source is idle with no envelope.
+      message(0, CANCELED_END);
+      expect(source().phase).toBe("idle");
+      expect(store.getState().runningSourceId).toBeNull();
+      expect(data.get("s1")).toBeUndefined();
+      expect(controller.show("s2")).toBe(true);
+    });
+
+    it("cancels a job whose start reply is still pending when the stream changes", async () => {
+      const { controller, store, data, cancels, reply, message, source } =
+        setupWithClient();
+      controller.show("s1");
+      // A cache hit can send its data before the reply of the start.
+      message(0, chunkBytes(0, [1, 2]));
+      controller.streamChanged("s1");
+      await flush();
+      expect(data.get("s1")).toBeUndefined();
+      // No job id yet: the client keeps the cancel until the reply names the job.
+      expect(cancels()).toEqual([]);
+      expect(store.getState().runningSourceId).toBe("s1");
+      expect(controller.show("s1")).toBe(false);
+      message(0, chunkBytes(2, [3, 4]));
+      expect(data.get("s1")).toBeUndefined();
+
+      reply(0, 9);
+      await flush();
+      expect(cancels()).toEqual([9]);
+      expect(store.getState().runningSourceId).toBe("s1");
+
+      message(0, CANCELED_END);
+      expect(source().phase).toBe("idle");
+      expect(store.getState().runningSourceId).toBeNull();
+      // The source can show its envelope again, for the new stream.
+      expect(controller.show("s1")).toBe(true);
+    });
+
+    it("shows no envelope and no failure for the end of a job of the old stream", () => {
+      const { controller, data, job, source } = setup();
+      controller.show("s1");
+      controller.streamChanged("s1");
+      job(0).handlers.onChunk(chunk(0, [1, 2]));
+      job(0).handlers.onEnd(end());
+      expect(source().phase).toBe("idle");
+      expect(data.get("s1")).toBeUndefined();
+
+      controller.show("s2");
+      controller.streamChanged("s2");
+      job(1).handlers.onEnd(end({ status: "failed", code: "decodeFailed" }));
+      expect(source("s2").phase).toBe("idle");
+      expect(source("s2").errorCode).toBeNull();
+    });
+
+    it("removes the envelope that the timeline shows for the source", () => {
+      const { controller, data, job, source } = setup();
+      controller.show("s1");
+      job(0).handlers.onChunk(chunk(0, [1, 2]));
+      job(0).handlers.onEnd(end());
+      expect(source().phase).toBe("ready");
+
+      controller.streamChanged("s1");
+      expect(source().phase).toBe("idle");
+      expect(data.get("s1")).toBeUndefined();
+      // A source with no envelope stays as it is.
+      controller.streamChanged("s2");
+      expect(source("s2").phase).toBe("idle");
+    });
+
+    it("does not touch the job of another source", () => {
+      const { controller, job, source } = setup();
+      controller.show("s1");
+      controller.streamChanged("s2");
+      expect(job(0).close).not.toHaveBeenCalled();
+      expect(source().phase).toBe("running");
+    });
   });
 });

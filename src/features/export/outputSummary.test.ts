@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { MediaProbe } from "@/features/media/types";
 import type { SequenceSource } from "@/features/timeline/sequence";
 import type { Pts, SequenceSegment } from "@/types/project";
+import { canCopyAudio } from "./audioCopy";
 import { displaySize, exportSourceFacts, outputSummarySource } from "./outputSummary";
 
 function probe(overrides: Partial<MediaProbe>): MediaProbe {
@@ -183,5 +185,102 @@ describe("exportSourceFacts (ADR 053)", () => {
       imported,
     });
     expect(result).toEqual({ output: loud, copyProbe: null, copySegmentCount: 0 });
+  });
+});
+
+describe("exportSourceFacts with the effective audio stream (ADR 070)", () => {
+  const facts = (id: string): SequenceSource => ({
+    id,
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: "0" as Pts,
+    videoEndPts: "5000" as Pts,
+    videoDurationTicks: null,
+    approximateDurationSeconds: null,
+  });
+  // The preferred stream is AAC at 48 kHz in stereo, and stream 2 is Opus at 24 kHz in mono.
+  const source = probe({ formatNames: ["mov", "mp4"] });
+  const opus: AudioStreamOverride = {
+    index: 2,
+    codec: "opus",
+    sampleRate: 24000,
+    channels: 1,
+  };
+  const clips = [
+    { id: "a1", sourceId: "A" },
+    { id: "b1", sourceId: "B" },
+  ];
+  const sources = { A: facts("A"), B: facts("B") };
+  const imported = { A: { probe: source }, B: { probe: source } };
+  const segment: SequenceSegment = {
+    id: "s1",
+    inClipId: "b1",
+    inPts: "1000" as Pts,
+    outClipId: "b1",
+    outPts: "2000" as Pts,
+  };
+  const copyOffered = (copyProbe: MediaProbe | null) =>
+    canCopyAudio({
+      probe: copyProbe,
+      container: "mp4",
+      streams: "videoAndAudio",
+      segmentCount: 1,
+    });
+
+  it("reads the override of the source of the one clip", () => {
+    const before = exportSourceFacts({
+      probe: source,
+      segmentCount: 1,
+      clips: [clips[0]],
+      segments: [],
+      sources,
+      imported,
+      audioOverrides: {},
+    });
+    expect(before.output?.audio?.sampleRate).toBe(48000);
+    expect(copyOffered(before.copyProbe)).toBe(true);
+
+    // The one clip places A, and the override of A gives the step new facts.
+    const after = exportSourceFacts({
+      probe: source,
+      segmentCount: 1,
+      clips: [clips[0]],
+      segments: [],
+      sources,
+      imported,
+      audioOverrides: { A: opus },
+    });
+    expect(after.output?.audio).toEqual(opus);
+    expect(after.copyProbe?.audio).toEqual(opus);
+    // The summary and the Copy audio switch read the Opus stream, which MP4 cannot take.
+    expect(copyOffered(after.copyProbe)).toBe(false);
+    // The probe of the import keeps its preferred stream.
+    expect(source.audio?.codec).toBe("aac");
+    // The override of another source changes nothing.
+    expect(
+      exportSourceFacts({
+        probe: source,
+        segmentCount: 1,
+        clips: [clips[0]],
+        segments: [],
+        sources,
+        imported,
+        audioOverrides: { B: opus },
+      }).output?.audio?.codec,
+    ).toBe("aac");
+  });
+
+  it("reads the override of each source of the pieces of several clips", () => {
+    const result = exportSourceFacts({
+      probe: source,
+      segmentCount: 1,
+      clips,
+      segments: [segment],
+      sources,
+      imported,
+      audioOverrides: { B: opus },
+    });
+    expect(result.output?.audio).toEqual(opus);
+    expect(result.copyProbe?.audio).toEqual(opus);
+    expect(copyOffered(result.copyProbe)).toBe(false);
   });
 });

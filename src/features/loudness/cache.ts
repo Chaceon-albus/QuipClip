@@ -2,8 +2,8 @@
  * The results of completed measurements, kept in memory for the application run (ADR 061).
  *
  * The key holds what decides the audio of an export: the path and the revision of each source,
- * the pieces in order, the sample rate and the channels of the preset, the streams, and for an
- * export with video the frame rate of the preset. The stand-in video of ADR 043 can pad the audio
+ * its effective audio stream (ADR 070), the pieces in order, the sample rate and the channels of
+ * the preset, the streams, and for an export with video the frame rate of the preset. The stand-in video of ADR 043 can pad the audio
  * of a segment with silence shorter than one frame, so another frame rate can change the true
  * peak near a join. Nothing here writes to disk.
  */
@@ -36,7 +36,17 @@ export function loudnessIdentity(scope: LoudnessScope): string {
   return identity.revised ? identity.key : `unrevised:${identity.key}`;
 }
 
-type SourceKey = readonly [string, number | null, number | null];
+/**
+ * The path, the revision and the effective audio stream of a source (ADR 070), or a null stream
+ * for a source with no audio. The effective stream, not the override, so a source with no override
+ * and a source with an override of its preferred stream have one key.
+ */
+type SourceKey = readonly [
+  string,
+  number | null,
+  number | null,
+  readonly [number, string | null, number | null, number | null] | null,
+];
 
 /** The key of the audio of `scope`, and whether every source has a revision in it. */
 function audioIdentity(scope: LoudnessScope): { key: string; revised: boolean } | null {
@@ -44,11 +54,16 @@ function audioIdentity(scope: LoudnessScope): { key: string; revised: boolean } 
   let revised = true;
   for (const source of scope.sources) {
     const revision = source.expectedRevision;
+    const stream = scope.effectiveAudio[source.id] ?? null;
+    const streamKey =
+      stream === null
+        ? null
+        : ([stream.index, stream.codec, stream.sampleRate, stream.channels] as const);
     if (revision === undefined || revision === null) {
       revised = false;
-      byId.set(source.id, [source.path, null, null]);
+      byId.set(source.id, [source.path, null, null, streamKey]);
     } else {
-      byId.set(source.id, [source.path, revision.size, revision.mtime]);
+      byId.set(source.id, [source.path, revision.size, revision.mtime, streamKey]);
     }
   }
   // The sources in the order of their first piece, and each piece by the index of its source.

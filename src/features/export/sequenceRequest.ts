@@ -7,6 +7,7 @@
  * backend sees an ordered list of source intervals and knows nothing of clips.
  */
 
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { ImportMediaResult } from "@/features/media/types";
 import { sequenceExportSegments } from "@/features/timeline/exportSegments";
 import type { SequenceSources } from "@/features/timeline/sequence";
@@ -144,6 +145,11 @@ export interface SequenceExportRequestOptions {
    * the export waited. False after "Export anyway", which checks nothing (ADR 024).
    */
   readonly checkRevisions: boolean;
+  /**
+   * The audio stream overrides of the session, by source id (ADR 070). Each source carries its
+   * override as `audioStream` when it has one. Absent means no source has an override.
+   */
+  readonly audioOverrides?: Readonly<Record<string, AudioStreamOverride>>;
 }
 
 /** The pieces and the sources of the segments on the sequence, in export order. */
@@ -192,7 +198,8 @@ export function revisionOf(media: ImportMediaResult): ExportSourceRevision {
 
 /**
  * The export request of the sequence, or null when no segment gives a piece, the output path is
- * blank, or a source of a piece has no imported media.
+ * blank, or a source of a piece has no imported media. A source with an override carries it as
+ * `audioStream` (ADR 070).
  */
 export function buildSequenceExportRequest(
   options: SequenceExportRequestOptions,
@@ -218,6 +225,10 @@ export function buildSequenceExportRequest(
     const source: ExportSource = { id, path: media.path };
     if (options.checkRevisions) {
       source.expectedRevision = revisionOf(media);
+    }
+    const audioStream = options.audioOverrides?.[id];
+    if (audioStream !== undefined) {
+      source.audioStream = { ...audioStream };
     }
     sources.push(source);
   }

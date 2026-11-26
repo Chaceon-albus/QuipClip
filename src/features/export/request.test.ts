@@ -206,6 +206,25 @@ describe("Export Request Builder", () => {
     ).not.toHaveProperty("expectedRevision");
   });
 
+  it("forwards the override of the source as its audio stream, and none without one (ADR 070)", () => {
+    const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
+    const base = {
+      preset,
+      sourcePath,
+      outputPath,
+      activeSourceId,
+      segments,
+      streams: "videoOnly" as const,
+      audioMode: "encode" as const,
+    };
+    const audioStream = { index: 2, codec: "opus", sampleRate: 48000, channels: 1 };
+    const request = buildExportRequest({ ...base, audioStream });
+    // A request that writes no audio carries the field too, and the backend does not check it.
+    expect(request?.sources[0]?.audioStream).toStrictEqual(audioStream);
+    expect(request?.sources[0]?.audioStream).not.toBe(audioStream);
+    expect(buildExportRequest(base)?.sources[0]).not.toHaveProperty("audioStream");
+  });
+
   it("forwards an adjusted gain, and sends none while the Adjust switch is off (ADR 061)", () => {
     const segments: Segment[] = [createSegment("seg-1", activeSourceId, "0", "1000")];
     // A preset with a gain of its own, which the adjusted gain must not change (ADR 049).

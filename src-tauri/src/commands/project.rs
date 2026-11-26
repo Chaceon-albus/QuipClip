@@ -595,6 +595,7 @@ mod tests {
                 avg_frame_rate: Some(Rational::new(30, 1).unwrap()),
                 r_frame_rate: Some(Rational::new(30, 1).unwrap()),
                 reported_frame_count: Some(FrameCount::new(300).unwrap()),
+                audio_stream_index: None,
             }],
             clips: vec![Clip {
                 id: "c1".to_owned(),

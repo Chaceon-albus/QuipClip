@@ -595,6 +595,7 @@ fn check_request(
         id: String::new(),
         path: request.source_path.clone(),
         expected_revision: Some(request.source_revision),
+        audio_stream: None,
     })
     .map_err(|_| FrameExportError::new(FrameExportErrorCode::SourceRevisionMismatch))
 }
@@ -780,6 +781,7 @@ mod tests {
             video_end_pts: None,
             audio: None,
             audio_streams: Vec::new(),
+            audio_stream_probes: Vec::new(),
         }
     }
 

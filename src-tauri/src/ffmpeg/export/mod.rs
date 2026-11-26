@@ -859,6 +859,13 @@ export_error_codes! {
     /// of a source differs from the revision that the request expects, so the segments may
     /// name other frames (ADR 049). The detail is the id of that source in the request (ADR 053).
     SourceRevisionMismatch => "sourceRevisionMismatch",
+    /// Produced by `commands::export::prepare_plan_with`: a source of a request that writes audio
+    /// names the audio stream that the user chose (ADR 070), and the file that the backend probed
+    /// is an FLV, which holds no override, or has no audio stream with that absolute index, or the
+    /// codec, the sample rate or the channel count of that stream differs from the request. "Export anyway" (ADR 024) does not remove
+    /// this check. The detail names the id of the source and the fact that differs, as a
+    /// diagnostic (ADR 011).
+    AudioStreamChanged => "audioStreamChanged",
     /// Produced by [`plan::build_plan`]: the destination path is empty, contains a NUL
     /// byte, has no file name, has no parent, or is not absolute.
     OutputPathInvalid => "outputPathInvalid",
@@ -1036,6 +1043,7 @@ mod tests {
                 "appDataUnavailable",
                 "audioDurationMismatch",
                 "audioGapTooLong",
+                "audioStreamChanged",
                 "canceled",
                 "commandExecutionFailed",
                 "encoderUnavailable",

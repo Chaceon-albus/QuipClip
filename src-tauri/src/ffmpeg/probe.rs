@@ -118,6 +118,28 @@ pub struct MediaProbe {
     /// listed streams.
     #[serde(default)]
     pub audio_streams: Vec<ListedAudioStream>,
+    /// The full probe of each audio stream of the file, in the order of the file (ADR 070), for
+    /// an export that reads a stream that the user chose in place of the preferred one
+    /// ([`Self::take_audio_stream`]). A stream whose index does not parse is not here, as it is
+    /// not in [`Self::audio_streams`]. Only the export reads it, so it is not on the import wire.
+    #[serde(skip)]
+    pub audio_stream_probes: Vec<AudioProbe>,
+}
+
+impl MediaProbe {
+    /// Make the audio stream with the absolute index `index` the stream that every later step of
+    /// an export reads, in place of the preferred one (ADR 070): [`Self::audio`] becomes the full
+    /// probe of that stream. Returns that probe, or `None` and changes nothing when the file has no
+    /// audio stream with that index.
+    pub fn take_audio_stream(&mut self, index: u32) -> Option<&AudioProbe> {
+        let chosen = self
+            .audio_stream_probes
+            .iter()
+            .find(|stream| stream.index == index)?
+            .clone();
+        self.audio = Some(chosen);
+        self.audio.as_ref()
+    }
 }
 
 /// The facts of one audio stream that the import lists (ADR 070), so the page can name a stream
@@ -2318,6 +2340,7 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
         video_end_pts: None,
         audio: audio.map(normalize_audio).transpose()?,
         audio_streams: list_audio_streams(&raw.streams),
+        audio_stream_probes: probe_audio_streams(&raw.streams),
     })
 }
 
@@ -2386,6 +2409,27 @@ where
 }
 
 fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
+    normalize_audio_with(raw, true)
+}
+
+/// The full probe of every audio stream of `streams` that has a valid index, in their order
+/// ([`MediaProbe::audio_stream_probes`], ADR 070).
+///
+/// A sample rate or a channel count that does not parse reads as unknown, as in
+/// [`list_audio_streams`], so the probe of a stream agrees with its entry in the list, and a
+/// stream that is not preferred never fails the probe.
+fn probe_audio_streams(streams: &[RawStream]) -> Vec<AudioProbe> {
+    streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .filter_map(|stream| normalize_audio_with(stream, false).ok())
+        .collect()
+}
+
+/// The full probe of the audio stream `raw`. With `strict`, a sample rate or a channel count that
+/// does not parse fails the probe. Without it, such a value reads as unknown. An index that does
+/// not parse always fails.
+fn normalize_audio_with(raw: &RawStream, strict: bool) -> Result<AudioProbe, ProbeDataError> {
     let stream_index = required_json_integer(raw.index.as_ref(), "streams.audio.index")?;
     let index = u32::try_from(stream_index).map_err(|_| ProbeDataError::InvalidInteger {
         field: "streams.audio.index",
@@ -2393,20 +2437,25 @@ fn normalize_audio(raw: &RawStream) -> Result<AudioProbe, ProbeDataError> {
     })?;
     let start_time = audio_start_time(raw);
     let tagged_end = parse_tag_duration(raw.tags.duration.as_deref());
+    let sample_rate =
+        parse_optional_text_i64(raw.sample_rate.as_deref(), "streams.audio.sample_rate");
+    let channels = raw
+        .channels
+        .as_ref()
+        .map(|value| json_integer(value, "streams.audio.channels"))
+        .transpose();
+    let (sample_rate, channels) = if strict {
+        (sample_rate?, channels?)
+    } else {
+        (sample_rate.ok().flatten(), channels.ok().flatten())
+    };
     Ok(AudioProbe {
         index,
         codec: raw.codec_name.clone(),
-        sample_rate: parse_optional_text_i64(
-            raw.sample_rate.as_deref(),
-            "streams.audio.sample_rate",
-        )?
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0),
-        channels: raw
-            .channels
-            .as_ref()
-            .map(|value| json_integer(value, "streams.audio.channels"))
-            .transpose()?
+        sample_rate: sample_rate
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0),
+        channels: channels
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value > 0),
         channel_layout: raw
@@ -3529,6 +3578,51 @@ mod tests {
             .map(|stream| (stream.index, stream.sample_rate, stream.channels))
             .collect();
         assert_eq!(listed, vec![(3, Some(48_000), Some(2)), (4, None, None)]);
+        // The full probes agree with the list, and a field that does not parse reads as unknown.
+        let probed: Vec<_> = probe
+            .audio_stream_probes
+            .iter()
+            .map(|stream| (stream.index, stream.sample_rate, stream.channels))
+            .collect();
+        assert_eq!(probed, listed);
+    }
+
+    #[test]
+    fn an_export_can_take_another_audio_stream_by_its_index() {
+        // ADR 070: the stream that the user chose replaces the preferred one, with its full probe.
+        let mut value = base_probe();
+        let streams = value["streams"].as_array_mut().unwrap();
+        streams.push(serde_json::json!({
+            "index": 1, "codec_type": "audio", "codec_name": "aac", "sample_rate": "48000",
+            "channels": 2, "start_pts": 0, "time_base": "1/48000", "duration_ts": 480_000,
+            "disposition": {"default": 1, "attached_pic": 0}
+        }));
+        streams.push(serde_json::json!({
+            "index": 2, "codec_type": "audio", "codec_name": "opus", "sample_rate": "44100",
+            "channels": 1, "start_pts": 441, "time_base": "1/44100", "nb_frames": "12",
+            "channel_layout": "mono", "disposition": {"default": 0, "attached_pic": 0},
+            "tags": {"DURATION": "00:00:04.000000000"}
+        }));
+        let mut probe = parse_value(value).unwrap();
+        assert_eq!(probe.audio.as_ref().unwrap().index, 1);
+        // The preferred stream has the same full probe in the list as in `audio`.
+        assert_eq!(probe.audio_stream_probes[0], probe.audio.clone().unwrap());
+
+        // No stream 9: nothing changes.
+        assert_eq!(probe.take_audio_stream(9), None);
+        assert_eq!(probe.audio.as_ref().unwrap().index, 1);
+
+        let chosen = probe.take_audio_stream(2).cloned().unwrap();
+        assert_eq!(probe.audio.as_ref(), Some(&chosen));
+        assert_eq!(chosen.codec.as_deref(), Some("opus"));
+        assert_eq!(chosen.sample_rate, Some(44_100));
+        assert_eq!(chosen.channels, Some(1));
+        assert_eq!(chosen.channel_layout.as_deref(), Some("mono"));
+        assert_eq!(chosen.reported_packets, Some(12));
+        assert_eq!(chosen.start_time, Rational::new(1, 100));
+        assert_eq!(chosen.tagged_end, Rational::new(4, 1));
+        // The list of the page does not change.
+        assert_eq!(probe.audio_streams.len(), 2);
     }
 
     /// The language and the title that the list reads from an audio stream whose tags are the

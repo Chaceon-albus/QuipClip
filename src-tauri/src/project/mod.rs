@@ -67,6 +67,27 @@ pub struct Source {
     pub avg_frame_rate: Option<Rational>,
     pub r_frame_rate: Option<Rational>,
     pub reported_frame_count: Option<FrameCount>,
+    /// The absolute index of the audio stream that the user chose for this source, or `None`
+    /// when the source has no override and uses its preferred audio stream (ADR 070). The file
+    /// has no `audioStreamIndex` field for `None`: the field is not written for `None`, and the
+    /// loader refuses `null`. A value is a non-negative integer that fits a `u32`, as the
+    /// absolute stream index of ffprobe does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_stream_index"
+    )]
+    pub audio_stream_index: Option<u32>,
+}
+
+/// Reads an `audioStreamIndex` field that is present. Only a non-negative integer that fits a
+/// `u32` is an index, so `null`, a fraction, a negative number and a string are JSON errors. An
+/// absent field is `None` through `serde(default)`, and never reaches this function.
+fn deserialize_present_stream_index<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(Some)
 }
 
 /// One placement of a source on the sequence. It stores no sequence time (ADR 052).
@@ -967,6 +988,59 @@ mod tests {
             ))
         ));
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_source_with_no_audio_override_has_no_audio_stream_index_field() {
+        let project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        assert!(project
+            .sources
+            .iter()
+            .all(|source| source.audio_stream_index.is_none()));
+        let value = serde_json::to_value(&project).unwrap();
+        for source in value["sources"].as_array().unwrap() {
+            assert!(source.get("audioStreamIndex").is_none());
+        }
+    }
+
+    #[test]
+    fn loads_and_saves_the_audio_stream_index_of_a_source() {
+        // ADR 070: the optional field of the override of a source.
+        let directory = TestDirectory::new();
+        let path = directory.path.join("override.qcproj");
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["sources"][1]["audioStreamIndex"] = serde_json::json!(3);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let project = load(&path).unwrap();
+        assert_eq!(project.sources[0].audio_stream_index, None);
+        assert_eq!(project.sources[1].audio_stream_index, Some(3));
+        save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), project);
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["sources"][1]["audioStreamIndex"], 3);
+        assert!(written["sources"][0].get("audioStreamIndex").is_none());
+        // Index 0 is a valid absolute index, and so is the largest u32.
+        value["sources"][1]["audioStreamIndex"] = serde_json::json!(0);
+        let zero: ProjectFile = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(zero.sources[1].audio_stream_index, Some(0));
+        value["sources"][1]["audioStreamIndex"] = serde_json::json!(u32::MAX);
+        let largest: ProjectFile = serde_json::from_value(value).unwrap();
+        assert_eq!(largest.sources[1].audio_stream_index, Some(u32::MAX));
+    }
+
+    #[test]
+    fn refuses_an_audio_stream_index_that_is_null_or_not_a_u32() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        for bad in [
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            value["sources"][0]["audioStreamIndex"] = bad;
+            assert_json_error(value.clone());
+        }
     }
 
     fn assert_json_error(value: serde_json::Value) {

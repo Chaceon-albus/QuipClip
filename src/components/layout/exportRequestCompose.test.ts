@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { ImportMediaResult } from "@/features/media/types";
+import { loudnessRequestId } from "@/features/loudness/store";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import { exportSegmentIds, isSequenceExport } from "@/features/timeline/exportSegments";
 import { calculateSegmentLayout } from "@/features/timeline/math";
@@ -8,7 +10,10 @@ import { createTimelineStore } from "@/features/timeline/store";
 import type { Pts, Segment, SequenceSegment } from "@/types/project";
 import {
   composeExportRequest,
+  effectiveStreamsDiffer,
+  exportSourceIds,
   measurementScope,
+  resolveEffectiveStreams,
   type ExportRequestParts,
 } from "./exportFlowController";
 
@@ -30,9 +35,18 @@ function parts(overrides: Partial<ExportRequestParts> = {}): ExportRequestParts 
     streams: "videoAndAudio",
     audioMode: "encode",
     skipSourceRevisionCheck: false,
+    audioOverrides: {},
     ...overrides,
   };
 }
+
+/** The override of stream 2 of a source (ADR 070). */
+const SECOND_STREAM: AudioStreamOverride = {
+  index: 2,
+  codec: "opus",
+  sampleRate: 48000,
+  channels: 1,
+};
 
 describe("the export request of the session", () => {
   it("carries the adjusted gain of the setup step only when it has one (ADR 061)", () => {
@@ -56,6 +70,202 @@ describe("the export request of the session", () => {
   });
 });
 
+describe("the audio stream of a source (ADR 070)", () => {
+  it("carries the override of the real source of the one clip, which the request names virtually", () => {
+    // With one clip, the request names the virtual source of the sequence.
+    const oneClip = parts({
+      timeline: {
+        clips: [{ id: "c1", sourceId: "a" }],
+        sequenceSegments: [],
+        sequenceSources: {},
+      },
+      sourceId: "sequence:1",
+      segments: SEGMENTS.map((segment) => ({ ...segment, sourceId: "sequence:1" })),
+    });
+    const plain = composeExportRequest(oneClip);
+    expect(plain?.sources[0].id).toBe("sequence:1");
+    expect(plain?.sources[0]).not.toHaveProperty("audioStream");
+    const chosen = composeExportRequest({
+      ...oneClip,
+      audioOverrides: { a: SECOND_STREAM },
+    });
+    expect(chosen?.sources[0].audioStream).toEqual(SECOND_STREAM);
+    // An override of another source does not reach the request.
+    expect(
+      composeExportRequest({ ...oneClip, audioOverrides: { b: SECOND_STREAM } })
+        ?.sources[0],
+    ).not.toHaveProperty("audioStream");
+    // "Export anyway" keeps the field: it removes only the revision (ADR 024).
+    expect(
+      composeExportRequest({
+        ...oneClip,
+        audioOverrides: { a: SECOND_STREAM },
+        skipSourceRevisionCheck: true,
+      })?.sources[0],
+    ).toEqual({ id: "sequence:1", path: "/media/a.mp4", audioStream: SECOND_STREAM });
+  });
+
+  it("keys a measurement by the effective stream, so an override of the preferred stream shares it", () => {
+    const preferred = { index: 1, codec: "aac", sampleRate: 48000, channels: 2 };
+    const oneClip = parts({
+      timeline: {
+        clips: [{ id: "c1", sourceId: "a" }],
+        sequenceSegments: [],
+        sequenceSources: {},
+      },
+      sources: {
+        a: {
+          path: "/media/a.mp4",
+          probe: { audio: preferred, formatNames: ["matroska", "webm"] },
+        } as ImportMediaResult,
+      },
+      sourceId: "sequence:1",
+      segments: SEGMENTS.map((segment) => ({ ...segment, sourceId: "sequence:1" })),
+    });
+    const plain = measurementScope(oneClip);
+    const samePreferred = measurementScope({
+      ...oneClip,
+      audioOverrides: { a: { ...preferred } },
+    });
+    const second = measurementScope({
+      ...oneClip,
+      audioOverrides: { a: SECOND_STREAM },
+    });
+    if (plain === null || samePreferred === null || second === null) {
+      throw new Error("the clip gives a request");
+    }
+    // The request names the virtual source, and its stream is the one of the real source.
+    expect(plain.effectiveAudio).toEqual({ "sequence:1": preferred });
+    // The wire field stays the override alone.
+    expect(plain.sources[0]).not.toHaveProperty("audioStream");
+    expect(samePreferred.sources[0].audioStream).toEqual(preferred);
+    expect(loudnessRequestId(samePreferred)).toBe(loudnessRequestId(plain));
+    expect(loudnessRequestId(second)).not.toBe(loudnessRequestId(plain));
+  });
+
+  it("carries the override of each source of several clips, and the measurement keys it", () => {
+    const facts = (id: string, end: string): SequenceSource => ({
+      id,
+      videoTimeBase: { n: 1, d: 1000 },
+      videoStartPts: "0" as Pts,
+      videoEndPts: end as Pts,
+      videoDurationTicks: null,
+      approximateDurationSeconds: null,
+    });
+    const imported = (path: string) =>
+      ({ path, fileName: path.slice(1), size: 1, mtime: 1 }) as ImportMediaResult;
+    const sequence = parts({
+      timeline: {
+        clips: [
+          { id: "a1", sourceId: "A" },
+          { id: "b1", sourceId: "B" },
+        ],
+        sequenceSources: { A: facts("A", "10000"), B: facts("B", "5000") },
+        sequenceSegments: [
+          {
+            id: "s1",
+            inClipId: "a1",
+            inPts: "9000" as Pts,
+            outClipId: "b1",
+            outPts: "1000" as Pts,
+          },
+        ],
+      },
+      sources: { A: imported("/a.mp4"), B: imported("/b.mp4") },
+    });
+    const withOverride = { ...sequence, audioOverrides: { B: SECOND_STREAM } };
+    expect(composeExportRequest(withOverride)?.sources).toEqual([
+      { id: "A", path: "/a.mp4", expectedRevision: { size: 1, mtime: 1 } },
+      {
+        id: "B",
+        path: "/b.mp4",
+        expectedRevision: { size: 1, mtime: 1 },
+        audioStream: SECOND_STREAM,
+      },
+    ]);
+    const scope = measurementScope(withOverride);
+    expect(scope?.sources[1].audioStream).toEqual(SECOND_STREAM);
+    const plainScope = measurementScope(sequence);
+    if (scope === null || plainScope === null) {
+      throw new Error("the sequence gives a request");
+    }
+    // The key of a kept result includes the effective stream of each source.
+    expect(loudnessRequestId(scope)).not.toBe(loudnessRequestId(plainScope));
+    expect(
+      loudnessRequestId(
+        measurementScope({
+          ...sequence,
+          audioOverrides: { B: { ...SECOND_STREAM, index: 3 } },
+        }) ?? plainScope,
+      ),
+    ).not.toBe(loudnessRequestId(scope));
+  });
+});
+
+describe("the effective streams that the confirm step compares (ADR 070)", () => {
+  it("names the real sources that a request reads", () => {
+    const request = {
+      sources: [
+        { id: "A", path: "/a.mp4" },
+        { id: "B", path: "/b.mp4" },
+      ],
+    };
+    expect(
+      exportSourceIds(
+        [
+          { id: "a1", sourceId: "A" },
+          { id: "b1", sourceId: "B" },
+        ],
+        request,
+      ),
+    ).toEqual(["A", "B"]);
+    // One clip: the request names the virtual source, and the clip names the real one.
+    expect(
+      exportSourceIds([{ id: "a1", sourceId: "A" }], {
+        sources: [{ id: "sequence:1", path: "/a.mp4" }],
+      }),
+    ).toEqual(["A"]);
+  });
+
+  it("resolves the effective stream of each source from its probe and its override", () => {
+    const probe = {
+      probe: {
+        audio: { index: 1, codec: "aac", sampleRate: 48000, channels: 2 },
+        formatNames: ["matroska", "webm"],
+      },
+    } as ImportMediaResult;
+    const silent = {
+      probe: { audio: null, formatNames: ["mov", "mp4"] },
+    } as unknown as ImportMediaResult;
+    const flv = {
+      probe: { ...probe.probe, formatNames: ["flv"] },
+    } as ImportMediaResult;
+    const probes = { A: probe, B: probe, S: silent, F: flv };
+    expect(
+      resolveEffectiveStreams(["A", "B", "S"], probes, { B: SECOND_STREAM }),
+    ).toEqual({ A: 1, B: 2, S: null });
+    // An FLV holds no override, and a source with no imported probe reads its override alone.
+    expect(
+      resolveEffectiveStreams(["F", "C"], probes, {
+        F: SECOND_STREAM,
+        C: SECOND_STREAM,
+      }),
+    ).toEqual({ F: 1, C: 2 });
+    expect(resolveEffectiveStreams(["C"], probes, {})).toEqual({ C: null });
+  });
+
+  it("finds a source whose recorded stream differs or was not recorded", () => {
+    expect(effectiveStreamsDiffer(["A"], { A: 1, B: 1 }, { A: 1 })).toBe(false);
+    expect(effectiveStreamsDiffer(["A"], { A: 1 }, { A: 2 })).toBe(true);
+    expect(effectiveStreamsDiffer(["S"], { S: null }, { S: null })).toBe(false);
+    expect(effectiveStreamsDiffer(["S"], { S: null }, { S: 1 })).toBe(true);
+    // A stream of another source does not count.
+    expect(effectiveStreamsDiffer(["A"], { A: 1, B: 1 }, { A: 1, B: 2 })).toBe(false);
+    // A source of the export that the step did not record is new, so it counts as a change.
+    expect(effectiveStreamsDiffer(["C"], { A: 1 }, { C: 1 })).toBe(true);
+  });
+});
+
 describe("the scope of the measurement (ADR 061)", () => {
   it("is the request of the export with no output path, no audio mode and no gain", () => {
     const request = composeExportRequest(parts({ audioMode: "copy" }));
@@ -66,8 +276,12 @@ describe("the scope of the measurement (ADR 061)", () => {
       segmentCount: request?.segmentCount,
       preset: request?.preset,
       streams: request?.streams,
+      // The parts have no clip, so no source of a clip gives an effective stream.
+      effectiveAudio: { a: null },
     });
+    // The five fields of the request, and the effective streams that only the page reads.
     expect(Object.keys(scope ?? {}).sort()).toEqual([
+      "effectiveAudio",
       "pieces",
       "preset",
       "segmentCount",
@@ -123,6 +337,8 @@ describe("the scope of the measurement (ADR 061)", () => {
       segmentCount: 2,
       preset: request?.preset,
       streams: "videoAndAudio",
+      // The imported results of this test carry no probe, so no source has a stream.
+      effectiveAudio: { A: null, B: null },
     });
     expect(request?.sources).toEqual([
       { id: "A", path: "/a.mp4", expectedRevision: { size: 10, mtime: 1 } },

@@ -937,6 +937,7 @@ mod tests {
                 holds_no_packets: false,
             }),
             audio_streams: Vec::new(),
+            audio_stream_probes: Vec::new(),
         };
         let segments = [SegmentBoundary {
             source: 0,

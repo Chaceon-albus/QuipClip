@@ -401,6 +401,25 @@ export const en = {
       showWaveform: "Show Waveform",
       cancelWaveform: "Cancel Waveform",
       hideWaveform: "Hide Waveform",
+      // The submenu of the audio streams of the source of a clip (ADR 070). It shows only for a
+      // file with two or more audio streams, and the item of the stream that the export uses has
+      // a mark. {{number}} is the number of the stream among the audio streams of the file, from
+      // 1. {{name}} is the title of the stream, or else its language code, such as "eng", as the
+      // file gives it. {{codec}} is the codec name of FFmpeg, such as "aac", or
+      // `audioTrackUnknownCodec`. {{count}} is the channel count.
+      audioTrack: "Audio Track",
+      audioTrackNamed_one: "Track {{number}}: {{name}} ({{codec}}, {{count}} channel)",
+      audioTrackNamed_other:
+        "Track {{number}}: {{name}} ({{codec}}, {{count}} channels)",
+      audioTrackUnnamed_one: "Track {{number}} ({{codec}}, {{count}} channel)",
+      audioTrackUnnamed_other: "Track {{number}} ({{codec}}, {{count}} channels)",
+      audioTrackNamedNoChannels: "Track {{number}}: {{name}} ({{codec}})",
+      audioTrackUnnamedNoChannels: "Track {{number}} ({{codec}})",
+      audioTrackUnknownCodec: "unknown codec",
+      // A line of text under the items of the submenu, not an item. The preview plays the audio
+      // track that the web view chooses, and QuipClip cannot control it.
+      audioTrackPreviewNote:
+        "The preview can play a different audio track from the one that the export uses.",
       moveLeft: "Move Clip Left",
       moveRight: "Move Clip Right",
       remove: "Remove Clip",
@@ -1299,6 +1318,9 @@ export const en = {
     sourceNotFile: "The selected source path is not a regular file.",
     sourceRevisionMismatch:
       "The video file on disk changed after it was opened, so the export stopped. The marked segments may no longer name the same frames.",
+    // ADR 070: the audio track that the user chose in the Audio Track menu of a clip.
+    audioStreamChanged:
+      "The audio track that you chose for a video file is not in the file now, or it changed after the file was opened. So the export stopped. Re-import the file. If the menu of its clip then has Audio Track, choose the audio track again.",
     outputPathInvalid: "The export destination path is invalid.",
     outputDirectoryMissing: "The export destination folder does not exist.",
     outputEqualsSource: "The export destination cannot be the same as the source file.",
@@ -1369,6 +1391,9 @@ export const en = {
     commandExecutionFailed: "QuipClip could not run the measurement of the audio.",
     preparationTimedOut:
       "QuipClip could not prepare the measurement in time. A drive or a network share might not be answering.",
+    // ADR 070: the audio track that the user chose in the Audio Track menu of a clip.
+    audioStreamChanged:
+      "The audio track that you chose for a video file is not in the file now, or it changed after the file was opened. Re-import the file. If the menu of its clip then has Audio Track, choose the audio track again.",
   },
   // The failures of Export Frame (ADR 069), in the notice of the preview. The image is one PNG
   // file of the frame that Mark In would mark at the playhead.

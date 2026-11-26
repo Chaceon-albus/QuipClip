@@ -200,6 +200,10 @@ describe("the Adjust switch of the Gain row (ADR 061)", () => {
     expect(loudnessErrorKey("commandExecutionFailed")).toBe(
       "loudnessError.commandExecutionFailed",
     );
+    // ADR 070: the message of the export says that the export stopped.
+    expect(loudnessErrorKey("audioStreamChanged")).toBe(
+      "loudnessError.audioStreamChanged",
+    );
   });
 
   it.each([
@@ -227,4 +231,26 @@ describe("the Adjust switch of the Gain row (ADR 061)", () => {
       expect(typeof lookup(catalog, key), key).toBe("string");
     }
   });
+
+  it.each([
+    ["en", en],
+    ["zh-CN", zhCN],
+  ] as const)(
+    "tells the user to re-import, and to choose a track only when the menu has Audio Track, in %s (ADR 070)",
+    (_language, catalog) => {
+      // A re-import makes a new source. Its clip menu has the submenu only for a file with two or
+      // more audio tracks that is not an FLV, so the message names the submenu, not a count.
+      const term = catalog.export.action.reimport.replace("…", "");
+      const submenu = catalog.timeline.clip.audioTrack;
+      for (const message of [
+        catalog.exportError.audioStreamChanged,
+        catalog.loudnessError.audioStreamChanged,
+      ]) {
+        expect(message).toContain(term);
+        expect(message).toContain(submenu);
+        expect(message).not.toMatch(/Open the file again|重新打开/);
+        expect(message).not.toMatch(/two or more|两条或更多/);
+      }
+    },
+  );
 });

@@ -113,6 +113,9 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   sourceNotFile: null,
   // The open step checks the file again and offers Re-import and Export anyway.
   sourceRevisionMismatch: BACK_TO_SETUP,
+  // The audio track that the user chose is not in the file as the import found it (ADR 070). An
+  // export of the video only does not read it, and a new import of the file has no override.
+  audioStreamChanged: BACK_TO_SETUP,
   sourceFrameRateUnknown: null,
   sourceAudioRateUnknown: null,
 

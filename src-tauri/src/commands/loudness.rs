@@ -501,10 +501,12 @@ mod tests {
     use super::*;
     use crate::app_cache::work::EXPORT_WORK_DIRECTORY;
     use crate::commands::export::tests::{
-        first_packet_unread, no_audio_gaps, real_tools, sample_preset, sample_probe,
-        sample_probe_with_a_missed_audio_start, sample_rate_not_read, slash_graph_file,
-        TestDirectory,
+        first_packet_unread, flv_probe_with_two_audio_streams, no_audio_gaps, real_tools,
+        revision_of, sample_preset, sample_probe, sample_probe_with_a_missed_audio_start,
+        sample_probe_with_two_audio_streams, sample_rate_not_read, second_stream_override,
+        slash_graph_file, write_two_audio_streams, TestDirectory,
     };
+    use crate::commands::export::AudioStreamWire;
     use crate::ffmpeg::loudness::job::{EndStatus, RunCode};
     use crate::ffmpeg::waveform::registry::WaveformJobs;
     use crate::ffmpeg::ExecutableOrigin;
@@ -522,6 +524,7 @@ mod tests {
                 id: "source".to_owned(),
                 path: path.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -743,6 +746,99 @@ mod tests {
         assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
     }
 
+    #[test]
+    fn the_measurement_refuses_an_override_of_an_flv() {
+        // ADR 070: an FLV holds no override, also after "Export anyway".
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            for export_anyway in [false, true] {
+                let directory = TestDirectory::new();
+                let source = source_in(&directory);
+                let mut request = request_of(&source, streams);
+                request.sources[0].audio_stream = Some(second_stream_override());
+                if !export_anyway {
+                    request.sources[0].expected_revision = Some(revision_of(&source));
+                }
+                let error =
+                    prepare(&directory, &request, flv_probe_with_two_audio_streams()).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    ExportErrorCode::AudioStreamChanged,
+                    "{streams:?}"
+                );
+                assert!(error.detail.unwrap().contains("FLV"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_measurement_reads_the_chosen_stream_and_refuses_one_that_changed() {
+        // ADR 070: the measurement prepares as an export does, with the same field.
+        let directory = TestDirectory::new();
+        let source = source_in(&directory);
+        let mut request = request_of(&source, ExportStreams::AudioOnly);
+        request.sources[0].audio_stream = Some(second_stream_override());
+        let prepared =
+            prepare(&directory, &request, sample_probe_with_two_audio_streams()).unwrap();
+        let graph = fs::read_to_string(prepared.work.file_path(AUDIO_GRAPH_FILE)).unwrap();
+        assert!(graph.contains("[0:2]aformat=r=44100,"), "{graph}");
+        assert!(!graph.contains("[0:1]"), "{graph}");
+
+        // Without the field, the preferred stream 1.
+        let mut preferred = request.clone();
+        preferred.sources[0].audio_stream = None;
+        let prepared = prepare(
+            &directory,
+            &preferred,
+            sample_probe_with_two_audio_streams(),
+        )
+        .unwrap();
+        let graph = fs::read_to_string(prepared.work.file_path(AUDIO_GRAPH_FILE)).unwrap();
+        assert!(graph.contains("[0:1]aformat=r=48000,"), "{graph}");
+
+        // A stream that the file no longer has is refused, as for an export.
+        let mut changed = request.clone();
+        changed.sources[0].audio_stream.as_mut().unwrap().channels = Some(6);
+        let error =
+            prepare(&directory, &changed, sample_probe_with_two_audio_streams()).unwrap_err();
+        assert_eq!(error.code, ExportErrorCode::AudioStreamChanged);
+        assert_eq!(
+            finish_measurement(
+                &WaveformJobs::default().begin(1).unwrap(),
+                Err(error),
+                &Recorder::default(),
+                |_: &JobHandle, _: &RunRequest<'_>, _: &dyn LoudnessSink| -> RunOutcome {
+                    panic!("the run must not start")
+                },
+            )
+            .code,
+            Some(EndCode::Preparation(ExportErrorCode::AudioStreamChanged))
+        );
+    }
+
+    #[test]
+    fn the_request_of_a_measurement_carries_the_audio_stream_of_a_source() {
+        let mut value = serde_json::to_value(serde_json::json!({
+            "sources": [{
+                "id": "source",
+                "path": "/media/a.mp4",
+                "audioStream": { "index": 2, "codec": "aac", "sampleRate": 44_100, "channels": 1 },
+            }],
+            "pieces": [{ "sourceId": "source", "inPts": "0", "outPts": "90000" }],
+            "segmentCount": 1,
+            "preset": sample_preset("active"),
+            "streams": "audioOnly",
+            "sequence": 1,
+        }))
+        .unwrap();
+        let request: StartLoudnessRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            request.sources[0].audio_stream,
+            Some(second_stream_override())
+        );
+        value["sources"][0]["audioStream"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<StartLoudnessRequest>(value).is_err());
+    }
+
     /// A sink that keeps what it gets.
     #[derive(Default)]
     struct Recorder {
@@ -953,6 +1049,67 @@ mod tests {
         // The work directories went with the measurements.
         let work = directory.path.join("cache").join("work");
         assert!(!work.exists() || names_in(&work).is_empty(), "{work:?}");
+    }
+
+    #[test]
+    fn a_real_measurement_with_an_override_reads_the_chosen_stream() {
+        // ADR 070: the preferred stream of the file is silence, and the chosen stream 2 is a sine.
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("two.mkv");
+        write_two_audio_streams(&ffmpeg, &source);
+        let probe = ffmpeg::probe_media(&ffprobe, &source).unwrap();
+        let second = probe.audio_streams[1].clone();
+        let tb = probe.video_time_base;
+        let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        let jobs = WaveformJobs::default();
+        let mut loudness = Vec::new();
+        for stream in [
+            Some(AudioStreamWire {
+                index: second.index,
+                codec: second.codec.clone(),
+                sample_rate: second.sample_rate,
+                channels: second.channels,
+            }),
+            None,
+        ] {
+            let mut request = request_of(&source, ExportStreams::AudioOnly);
+            request.sources[0].audio_stream = stream;
+            request.pieces[0].in_pts = at(500);
+            request.pieces[0].out_pts = at(2_500);
+            let prepared = prepare_measurement_with(
+                MeasurementPreparation {
+                    scope: request.plan_scope(),
+                    app_data_directory: &directory.path.join("app"),
+                    cache_directory: &directory.path.join("cache"),
+                    cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
+                    stage: &PreparationStageCell::default(),
+                    graph_file: &probe_graph_file_option,
+                },
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: ffmpeg.clone(),
+                        ffprobe: ffprobe.clone(),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                ffmpeg::probe_media_until_canceled,
+                ffmpeg::probe_first_audio_packet,
+                ffmpeg::probe_audio_sample_rate_at,
+                ffmpeg::probe_audio_gaps,
+            );
+            let handle = jobs.begin(1).unwrap();
+            let end = finish_measurement(&handle, prepared, &Recorder::default(), job::run);
+            jobs.finish(handle.id);
+            assert_eq!(end.status, EndStatus::Complete, "{end:?}");
+            loudness.push(end.integrated_lufs);
+        }
+        // The sine has a loudness, and the silence of the preferred stream has none.
+        assert!(loudness[0].is_some_and(|lufs| lufs > -60.0), "{loudness:?}");
+        assert_eq!(loudness[1], None, "{loudness:?}");
     }
 
     #[test]

@@ -62,6 +62,10 @@ file gives one, its codec and its channel count. The menus of two clips of one s
 set the same override. A source with one audio stream, or with none, has no such submenu, and
 nothing else in the interface changes for it.
 
+A source that is an FLV has no such submenu and no override, also when the probe lists two or
+more audio streams. QuipClip reads one audio stream of an FLV (ADR 046), and each reader of an
+FLV keeps its own mapping.
+
 ### The export and the loudness measurement
 
 The source of a request carries the optional field `audioStream` when the source has an
@@ -69,9 +73,9 @@ override: the recorded index, codec, sample rate and channel count.
 
 - After its own probe, the backend takes the audio stream with that index in place of the
   preferred one. It refuses the request with `audioStreamChanged` when the file has no audio
-  stream with that index, or when the codec, the sample rate or the channel count of that
-  stream differs from the request. This also holds after "Export anyway" (ADR 024), which
-  removes only the check of the revision.
+  stream with that index, when the codec, the sample rate or the channel count of that stream
+  differs from the request, or when the file is now an FLV. This also holds after "Export
+  anyway" (ADR 024), which removes only the check of the revision.
 - Each later step uses the full probe of that stream, as it used the preferred one: the first
   packet, the gaps, the plan, the copy of the audio and its tags.
 - A request that writes no audio carries the field too, and the backend does not check it.
@@ -139,6 +143,12 @@ stream only where the PCM cue is active.
 - For a native source with several audio streams, the sound of the playback can differ from the
   sound of the export, the envelope and the PCM cue, as it could before. The note says so. A
   later record can set the audio track of the element, after a test of the two web views.
+- A stream with no packets and with no sample rate in the probe stops an export that writes
+  audio with `sourceAudioRateUnknown`, before the rule of the silence applies. A preferred
+  stream of that kind did so before. The user can now choose such a stream.
+- An override that names the preferred stream is an override: the request carries it, and the
+  backend checks it. The loudness measurement keeps one result for it and for no override,
+  because the effective stream is the same.
 - An override lasts for the session, until a version saves the project.
 - A change of the override of a `MediaSource` source loads the preview again, so the preview
   shows a short wait and stops a playback.

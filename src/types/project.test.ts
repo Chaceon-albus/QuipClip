@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   PROJECT_SCHEMA_VERSION,
+  hasValidAudioStreamIndexField,
+  isValidAudioStreamIndex,
   toPersistedSource,
   type PersistedSource,
   type FrameCount,
@@ -202,6 +204,59 @@ describe("project type definitions and schema", () => {
       expect(persisted.rFrameRate).toBeNull();
       expect(persisted.reportedFrameCount).toBeNull();
       expect("proxy" in persisted).toBe(false);
+      // No override, so no field (ADR 070).
+      expect("audioStreamIndex" in persisted).toBe(false);
+    });
+
+    it("keeps the audio stream index of a source with an override (ADR 070)", () => {
+      const runtime: Source = {
+        id: "s3",
+        path: "/media/two.mkv",
+        relPath: "two.mkv",
+        size: 1,
+        mtime: 1,
+        videoStreamIndex: 0,
+        videoTimeBase: { n: 1, d: 1000 },
+        videoStartPts: null,
+        videoEndPts: null,
+        videoDurationTicks: null,
+        approximateDurationSeconds: null,
+        avgFrameRate: null,
+        rFrameRate: null,
+        reportedFrameCount: null,
+        audioStreamIndex: 0,
+      };
+      expect(toPersistedSource(runtime).audioStreamIndex).toBe(0);
+    });
+  });
+
+  describe("the audio stream index of a persisted source (ADR 070)", () => {
+    it("accepts an absent field and a whole number from 0 to the largest u32", () => {
+      expect(hasValidAudioStreamIndexField({ id: "s1" })).toBe(true);
+      for (const index of [0, 1, 7, 4_294_967_295]) {
+        expect(isValidAudioStreamIndex(index)).toBe(true);
+        expect(
+          hasValidAudioStreamIndexField({ id: "s1", audioStreamIndex: index }),
+        ).toBe(true);
+      }
+    });
+
+    it("refuses null and every value that is not such a number", () => {
+      for (const value of [
+        null,
+        undefined,
+        -1,
+        1.5,
+        4_294_967_296,
+        Number.NaN,
+        "1",
+        true,
+      ]) {
+        expect(isValidAudioStreamIndex(value)).toBe(false);
+        expect(
+          hasValidAudioStreamIndexField({ id: "s1", audioStreamIndex: value }),
+        ).toBe(false);
+      }
     });
   });
 

@@ -39,9 +39,12 @@ import {
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
 import {
+  audioOverrideStore,
+  effectiveAudioStreamOf,
   mayHoldSourceRevision,
   mediaStore,
   readSourceRevision,
+  type AudioStreamOverride,
   type MediaSourceRevisionDescriptor,
 } from "@/features/media";
 import { settingsStore } from "@/features/settings";
@@ -55,11 +58,11 @@ import {
 } from "@/features/export/sequenceRequest";
 import { isSequenceExport, timelineStore } from "@/features/timeline";
 import type { TimelineTruth } from "@/features/timeline/types";
-import type { ImportMediaResult } from "@/features/media/types";
+import type { AudioProbe, ImportMediaResult } from "@/features/media/types";
 import { loudnessRequestId } from "@/features/loudness/store";
 import type { LoudnessScope } from "@/features/loudness/types";
 import type { Preset } from "@/features/settings/types";
-import type { Segment } from "@/types/project";
+import type { Clip, Segment } from "@/types/project";
 
 /**
  * The media facts the export flow reads: the source path, the name the default output name is
@@ -94,6 +97,11 @@ export interface ExportRequestParts {
   readonly skipSourceRevisionCheck: boolean;
   /** The gain of the Adjust switch (ADR 061), or undefined while it is off. */
   readonly adjustedAudioGainTenthsDb?: number;
+  /**
+   * The audio stream overrides of the session, by source id (ADR 070). A source with an override
+   * carries it as `audioStream`, so the export and the measurement read its effective stream.
+   */
+  readonly audioOverrides: Readonly<Record<string, AudioStreamOverride>>;
   /** The builder of the request of one clip. Defaults to `buildExportRequest`. */
   readonly buildRequest?: typeof buildExportRequest;
 }
@@ -119,6 +127,7 @@ export function composeExportRequest(parts: ExportRequestParts): ExportRequest |
       audioMode,
       adjustedAudioGainTenthsDb: parts.adjustedAudioGainTenthsDb,
       checkRevisions: !parts.skipSourceRevisionCheck,
+      audioOverrides: parts.audioOverrides,
     });
   }
   return (parts.buildRequest ?? buildExportRequest)({
@@ -134,7 +143,59 @@ export function composeExportRequest(parts: ExportRequestParts): ExportRequest |
       parts.skipSourceRevisionCheck || !media
         ? null
         : { size: media.size, mtime: media.mtime },
+    // The request names the virtual source of the sequence, and the override belongs to the real
+    // source of the one clip.
+    audioStream:
+      timeline.clips.length === 1
+        ? parts.audioOverrides[timeline.clips[0].sourceId]
+        : undefined,
   });
+}
+
+/**
+ * The ids of the real sources that `request` reads: the sources of the request for a sequence of
+ * several clips, and the source of the one clip otherwise, whose request names the virtual source
+ * of the sequence.
+ */
+export function exportSourceIds(
+  clips: readonly Clip[],
+  request: Pick<ExportRequest, "sources">,
+): string[] {
+  if (isSequenceExport(clips)) {
+    return request.sources.map((source) => source.id);
+  }
+  return clips.map((clip) => clip.sourceId);
+}
+
+/**
+ * The absolute index of the effective audio stream of each of `sourceIds` (ADR 070), resolved
+ * from `probes` and `overrides` at the call, or null for a source with no audio. A source that
+ * `probes` does not hold resolves from its override alone.
+ */
+export function resolveEffectiveStreams(
+  sourceIds: readonly string[],
+  probes: Readonly<Record<string, Pick<ImportMediaResult, "probe">>>,
+  overrides: Readonly<Record<string, AudioStreamOverride>>,
+): Record<string, number | null> {
+  const resolved: Record<string, number | null> = {};
+  for (const id of sourceIds) {
+    const probe = probes[id]?.probe ?? { audio: null, formatNames: [] };
+    resolved[id] = effectiveAudioStreamOf(probe, overrides[id])?.index ?? null;
+  }
+  return resolved;
+}
+
+/**
+ * True when one of `sourceIds` has no stream in `before`, or another stream in `after`: the
+ * effective streams that the confirm step recorded before the save panel are not the streams of
+ * the export after it (ADR 070).
+ */
+export function effectiveStreamsDiffer(
+  sourceIds: readonly string[],
+  before: Readonly<Record<string, number | null>>,
+  after: Readonly<Record<string, number | null>>,
+): boolean {
+  return sourceIds.some((id) => before[id] === undefined || before[id] !== after[id]);
 }
 
 /**
@@ -159,17 +220,46 @@ export function measurementScope(
     outputPath: MEASUREMENT_OUTPUT_PATH,
     audioMode: "encode",
   });
-  return request === null ? null : scopeOfRequest(request);
+  return request === null ? null : scopeOfRequest(request, parts);
+}
+
+/**
+ * The effective audio stream of each source of `request`, by the id that the request names it by
+ * (ADR 070). With one clip the request names the virtual source of the sequence, and the stream is
+ * the one of the real source of that clip.
+ */
+function effectiveAudioOfRequest(
+  request: ExportRequest,
+  parts: Pick<ExportRequestParts, "timeline" | "sources" | "audioOverrides">,
+): Record<string, AudioProbe | null> {
+  const { clips } = parts.timeline;
+  const sequence = isSequenceExport(clips);
+  const effective: Record<string, AudioProbe | null> = {};
+  for (const source of request.sources) {
+    const id = sequence ? source.id : clips[0]?.sourceId;
+    const probe =
+      (id === undefined ? undefined : parts.sources[id]?.probe) ??
+      ({ audio: null, formatNames: [] } as const);
+    effective[source.id] = effectiveAudioStreamOf(
+      probe,
+      id === undefined ? undefined : parts.audioOverrides[id],
+    );
+  }
+  return effective;
 }
 
 /** The scope of the measurement of the audio of `request`. */
-function scopeOfRequest(request: ExportRequest): LoudnessScope {
+function scopeOfRequest(
+  request: ExportRequest,
+  parts: Pick<ExportRequestParts, "timeline" | "sources" | "audioOverrides">,
+): LoudnessScope {
   return {
     sources: request.sources,
     pieces: request.pieces,
     segmentCount: request.segmentCount,
     preset: request.preset,
     streams: request.streams,
+    effectiveAudio: effectiveAudioOfRequest(request, parts),
   };
 }
 
@@ -324,6 +414,12 @@ export interface ExportFlowControllerOptions {
   getSettings?: () => Settings | null;
 
   /**
+   * Provider for the audio stream overrides of the session (ADR 070). Defaults to
+   * `audioOverrideStore.getState().overrides`.
+   */
+  getAudioOverrides?: () => Readonly<Record<string, AudioStreamOverride>>;
+
+  /**
    * Asynchronous settings loader. Defaults to `settingsStore.getState().loadSettings`.
    */
   loadSettings?: () => Promise<unknown>;
@@ -387,6 +483,9 @@ export class ExportFlowController {
   private readonly getSegmentsFn: () => readonly Segment[];
   private readonly getSourceIdFn: () => string | null;
   private readonly getSettingsFn: () => Settings | null;
+  private readonly getAudioOverridesFn: () => Readonly<
+    Record<string, AudioStreamOverride>
+  >;
   private readonly loadSettingsFn: () => Promise<unknown>;
   private readonly getExportStateFn: () => ExportRunLiveState;
   private readonly submitFn: (
@@ -414,6 +513,8 @@ export class ExportFlowController {
       options.getSourceId ?? (() => timelineStore.getState().sourceId);
     this.getSettingsFn =
       options.getSettings ?? (() => settingsStore.getState().settings);
+    this.getAudioOverridesFn =
+      options.getAudioOverrides ?? (() => audioOverrideStore.getState().overrides);
     this.loadSettingsFn =
       options.loadSettings ?? (() => settingsStore.getState().loadSettings());
     this.getExportStateFn =
@@ -585,7 +686,10 @@ export class ExportFlowController {
    *    request measures the same audio as the setup step measured for it. Otherwise the audio
    *    changed while the save panel was open, also from no request to a request, and the step
    *    returns false and keeps the modal open, where the setup step measures the new audio
-   *    (ADR 061).
+   *    (ADR 061). The step records the effective audio stream of each source before the save
+   *    panel opens. When the effective stream of a source of the request differs after the panel
+   *    closes, the step sends nothing, returns false and keeps the modal open on the setup step
+   *    (ADR 070). Each source with an override carries it as `audioStream`.
    * 6. Calls `setModalOpen(true)` and awaits `submit(request)`.
    *    - `refused`: no run exists. Reports the error of the result, for example
    *      `outputAlreadyQueued`, keeps the modal open, and returns false.
@@ -617,6 +721,13 @@ export class ExportFlowController {
     }
 
     const media = this.getMediaFn();
+    // ADR 070: the effective audio streams of the step, resolved and recorded with its other facts
+    // before the save panel opens. The sources of every clip hold the sources of the export.
+    const streamsBefore = resolveEffectiveStreams(
+      timelineStore.getState().clips.map((clip) => clip.sourceId),
+      mediaStore.getState().sources,
+      this.getAudioOverridesFn(),
+    );
     const extension = exportOutputExtension(preset.container, streams);
     const defaultName = media?.fileName
       ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${extension}`
@@ -654,10 +765,12 @@ export class ExportFlowController {
     const currentMedia = this.getMediaFn();
     const currentSegments = this.getSegmentsFn();
     const currentSourceId = this.getSourceIdFn();
+    const overrides = this.getAudioOverridesFn();
+    const importedSources = mediaStore.getState().sources;
 
     const request = composeExportRequest({
       timeline: timelineStore.getState(),
-      sources: mediaStore.getState().sources,
+      sources: importedSources,
       media: currentMedia,
       segments: currentSegments,
       sourceId: currentSourceId,
@@ -668,6 +781,7 @@ export class ExportFlowController {
       skipSourceRevisionCheck: this.skipSourceRevisionCheck,
       adjustedAudioGainTenthsDb:
         adjusted?.request === null ? undefined : adjusted?.tenthsDb,
+      audioOverrides: overrides,
       buildRequest: this.buildRequestFn,
     });
 
@@ -677,10 +791,30 @@ export class ExportFlowController {
       this.setModalOpen(true);
       return false;
     }
+    const exportSources = exportSourceIds(timelineStore.getState().clips, request);
+    if (
+      effectiveStreamsDiffer(
+        exportSources,
+        streamsBefore,
+        resolveEffectiveStreams(exportSources, importedSources, overrides),
+      )
+    ) {
+      // The effective audio stream of a source of the export changed while the save panel was
+      // open, as when the user chose another audio track. The setup step shows the facts of the
+      // new stream, so the export starts from there.
+      this.setModalOpen(true);
+      return false;
+    }
     if (
       adjusted !== undefined &&
       (adjusted.request === null ||
-        loudnessRequestId(scopeOfRequest(request)) !== adjusted.request)
+        loudnessRequestId(
+          scopeOfRequest(request, {
+            timeline: timelineStore.getState(),
+            sources: importedSources,
+            audioOverrides: overrides,
+          }),
+        ) !== adjusted.request)
     ) {
       // The gain belongs to the audio that the step measured, and the audio of the export
       // changed while the save panel was open.

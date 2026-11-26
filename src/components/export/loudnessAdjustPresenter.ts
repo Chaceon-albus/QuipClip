@@ -128,6 +128,7 @@ export type LoudnessLinesView = {
 const MEASUREMENT_MESSAGE_KEYS: Readonly<Partial<Record<LoudnessErrorCode, string>>> = {
   // "So the export stopped" is not true of a measurement.
   sourceRevisionMismatch: "exportError.sourceRevisionChanged",
+  audioStreamChanged: "loudnessError.audioStreamChanged",
   commandExecutionFailed: "loudnessError.commandExecutionFailed",
   preparationTimedOut: "loudnessError.preparationTimedOut",
 };

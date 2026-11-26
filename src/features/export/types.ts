@@ -5,6 +5,7 @@
  * See ADR 002, ADR 004, ADR 011, and ADR 014.
  */
 
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { Preset } from "@/features/settings/types";
 import type { Pts, Rational } from "@/types/project";
 
@@ -28,6 +29,14 @@ export type ExportSource = {
   id: string;
   path: string;
   expectedRevision?: ExportSourceRevision | null;
+  /**
+   * The audio stream that the user chose for the source (ADR 070), present only when the source
+   * has an override. The backend takes that stream in place of the preferred one, and refuses
+   * the request with `audioStreamChanged` when the file has no stream with its index, or when its
+   * codec, its sample rate or its channel count differs. A request that writes no audio carries
+   * it too, and the backend does not check it.
+   */
+  audioStream?: AudioStreamOverride;
 };
 
 /**
@@ -155,6 +164,7 @@ export const BACKEND_EXPORT_ERROR_CODES = [
   "sourceNotFound",
   "sourceNotFile",
   "sourceRevisionMismatch",
+  "audioStreamChanged",
   "outputPathInvalid",
   "outputDirectoryMissing",
   "outputEqualsSource",

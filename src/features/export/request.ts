@@ -7,6 +7,7 @@
  * - Boundary validation returning null when media or active segments are absent.
  */
 
+import type { AudioStreamOverride } from "@/features/media/audioStream";
 import type { Preset } from "@/features/settings/types";
 import { oneClipExportSegments } from "@/features/timeline/exportSegments";
 import type { Segment } from "@/types/project";
@@ -68,6 +69,13 @@ export interface BuildExportRequestOptions {
    * the user chose to export a changed file anyway (ADR 024).
    */
   expectedSourceRevision?: ExportSourceRevision | null;
+  /**
+   * The audio stream that the user chose for the source of the one clip (ADR 070), or undefined
+   * when that source has no override. The source of the request carries it as `audioStream`. The
+   * caller looks it up by the id of the real source of the clip, because `activeSourceId` can be
+   * the id of the virtual source of the sequence.
+   */
+  audioStream?: AudioStreamOverride;
 }
 
 /**
@@ -79,6 +87,7 @@ export interface BuildExportRequestOptions {
  * - Never sorts segments; array order is export order.
  * - Names one source, the active source: its id is `activeSourceId`, its path the media path,
  *   and its `expectedRevision` the `expectedSourceRevision` of the caller, when it gives one.
+ *   It carries the override `audioStream` of the caller, when it gives one (ADR 070).
  * - Maps each Segment to the piece `{ sourceId, inPts, outPts }` of that source, dropping its
  *   `id`, and counts one segment for each piece.
  * - Forwards `preset`, `streams` and `audioMode` unchanged, and `adjustedAudioGainTenthsDb` when
@@ -136,6 +145,9 @@ export function buildExportRequest(
       size: options.expectedSourceRevision.size,
       mtime: options.expectedSourceRevision.mtime,
     };
+  }
+  if (options.audioStream !== undefined) {
+    source.audioStream = { ...options.audioStream };
   }
 
   const request: ExportRequest = {

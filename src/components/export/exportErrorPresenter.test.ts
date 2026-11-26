@@ -393,6 +393,8 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   presetNotFound: OPEN_PRESETS,
   // Another gain, or the Adjust switch off, can succeed (ADR 061).
   invalidAudioGain: BACK,
+  // An export of the video only reads no audio track, and a new import has no override (ADR 070).
+  audioStreamChanged: BACK,
   ffmpegPairMissing: OPEN_FFMPEG,
   ffprobeSpawnFailed: OPEN_FFMPEG,
   ffprobeProcessFailed: null,

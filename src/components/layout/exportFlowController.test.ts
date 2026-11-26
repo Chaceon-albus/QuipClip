@@ -26,7 +26,11 @@ import {
   type ExportStreams,
   type OpenExportSaveDialogOptions,
 } from "@/features/export";
-import { mediaStore, type MediaSourceRevisionDescriptor } from "@/features/media";
+import {
+  mediaStore,
+  type AudioStreamOverride,
+  type MediaSourceRevisionDescriptor,
+} from "@/features/media";
 import type { ImportMediaResult } from "@/features/media/types";
 import { timelineStore } from "@/features/timeline";
 import type { SequenceSource } from "@/features/timeline/sequence";
@@ -2547,6 +2551,116 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
     ]);
   });
 
+  describe("the effective audio streams of the confirm step (ADR 070)", () => {
+    const preset = createPreset({ id: "p1" });
+    const second: AudioStreamOverride = {
+      index: 2,
+      codec: "aac",
+      sampleRate: 44100,
+      channels: 1,
+    };
+
+    function controllerWith(
+      overrides: () => Readonly<Record<string, AudioStreamOverride>>,
+      openSaveDialog: () => Promise<string | null>,
+    ) {
+      const submit = vi.fn().mockResolvedValue(STARTED);
+      const setModalOpen = vi.fn();
+      const reportError = vi.fn();
+      const controller = createExportFlowController({
+        setModalOpen,
+        reportError,
+        openSaveDialog,
+        submit,
+        filterName: "Video Files",
+        audioFilterName: "Audio Files",
+        getSettings: () => createSettings([preset], "p1"),
+        getMedia: () => media,
+        getSourceId: () => "sequence:1",
+        getSegments: () => [],
+        getAudioOverrides: overrides,
+      });
+      return { controller, submit, setModalOpen, reportError };
+    }
+
+    it("sends the override of each source that has one", async () => {
+      loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+      const { controller, submit } = controllerWith(
+        () => ({ B: second }),
+        () => Promise.resolve("/out.mp4"),
+      );
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
+      const request = submit.mock.calls[0][0] as ExportRequest;
+      expect(request.sources[0]).not.toHaveProperty("audioStream");
+      expect(request.sources[1].audioStream).toEqual(second);
+    });
+
+    it("returns to the setup step when an effective stream changed while the save panel was open", async () => {
+      loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+      let overrides: Readonly<Record<string, AudioStreamOverride>> = {};
+      const { controller, submit, setModalOpen, reportError } = controllerWith(
+        () => overrides,
+        () => {
+          overrides = { B: second };
+          return Promise.resolve("/out.mp4");
+        },
+      );
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      // The dialog stays on the setup step, which shows the facts of the new stream.
+      expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+    });
+
+    it("sends the export when no effective stream of its sources changed", async () => {
+      loadSequence([anchored("s1", "a1", "100", "a1", "1000")]);
+      // The override of B, which no piece reads, changes during the save panel.
+      let overrides: Readonly<Record<string, AudioStreamOverride>> = { A: second };
+      const { controller, submit } = controllerWith(
+        () => overrides,
+        () => {
+          overrides = { A: second, B: second };
+          return Promise.resolve("/out.mp4");
+        },
+      );
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(true);
+      expect(submit).toHaveBeenCalledOnce();
+    });
+
+    it("returns to the setup step when the preferred stream of a source differs after the save panel", async () => {
+      loadSequence([anchored("s1", "a1", "100", "b1", "1000")]);
+      const withPreferred = (path: string, index: number): ImportMediaResult => ({
+        ...imported(path, 10, 1),
+        probe: {
+          formatNames: ["matroska", "webm"],
+          audio: { index, codec: "aac", sampleRate: 48000, channels: 2 },
+        } as ImportMediaResult["probe"],
+      });
+      mediaStore.setState({
+        sources: { A: withPreferred("/a.mp4", 1), B: withPreferred("/b.mp4", 1) },
+      });
+      // No source has an override. The step resolves the streams before the panel opens, so a
+      // preferred stream that differs afterwards is seen.
+      const { controller, submit, setModalOpen, reportError } = controllerWith(
+        () => ({}),
+        () => {
+          mediaStore.setState({
+            sources: { A: withPreferred("/a.mp4", 1), B: withPreferred("/b.mp4", 2) },
+          });
+          return Promise.resolve("/out.mp4");
+        },
+      );
+
+      expect(await controller.confirm("p1", "videoAndAudio", "encode")).toBe(false);
+      expect(submit).not.toHaveBeenCalled();
+      expect(reportError).not.toHaveBeenCalled();
+      expect(setModalOpen).toHaveBeenCalledExactlyOnceWith(true);
+    });
+  });
+
   describe("the gain of the Adjust switch (ADR 061)", () => {
     const preset = createPreset({ id: "p1" });
 
@@ -2561,6 +2675,7 @@ describe("ExportFlowController with several clips (ADR 052, ADR 053)", () => {
         preset,
         streams: "videoAndAudio",
         skipSourceRevisionCheck: false,
+        audioOverrides: {},
       });
       if (scope === null) {
         throw new Error("the sequence gives no request");

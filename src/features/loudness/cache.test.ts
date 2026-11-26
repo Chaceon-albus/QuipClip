@@ -17,6 +17,7 @@ function scope(overrides: Partial<LoudnessScope> = {}): LoudnessScope {
     segmentCount: 2,
     preset: createPresetDraft("p", "P"),
     streams: "videoAndAudio",
+    effectiveAudio: {},
     ...overrides,
   };
 }
@@ -58,6 +59,38 @@ describe("the key of a kept measurement (ADR 061)", () => {
         scope({ preset: { ...preset, audioBitrate: 96, audioGainTenthsDb: -30 } }),
       ),
     ).toBe(base);
+  });
+
+  it("changes with the effective audio stream of a source, not with its override (ADR 070)", () => {
+    const preferred = { index: 1, codec: "aac", sampleRate: 48000, channels: 2 };
+    const second = { index: 2, codec: "opus", sampleRate: 48000, channels: 1 };
+    // Source a with its preferred stream and no override: the key of a result kept before.
+    const plain = scope({ effectiveAudio: { a: preferred, b: preferred } });
+    const base = loudnessCacheKey(plain);
+    // An override of the preferred stream measures the same audio, so it shares the result.
+    const samePreferred = scope({
+      sources: [{ ...scope().sources[0], audioStream: preferred }, scope().sources[1]],
+      effectiveAudio: { a: preferred, b: preferred },
+    });
+    expect(loudnessCacheKey(samePreferred)).toBe(base);
+    expect(loudnessIdentity(samePreferred)).toBe(loudnessIdentity(plain));
+
+    // Another effective stream is another audio.
+    const chosen = (stream: typeof second) =>
+      scope({
+        sources: [{ ...scope().sources[0], audioStream: stream }, scope().sources[1]],
+        effectiveAudio: { a: stream, b: preferred },
+      });
+    const withSecond = loudnessCacheKey(chosen(second));
+    expect(withSecond).not.toBeNull();
+    expect(withSecond).not.toBe(base);
+    expect(loudnessCacheKey(chosen({ ...second, index: 3 }))).not.toBe(withSecond);
+    expect(loudnessCacheKey(chosen({ ...second }))).toBe(withSecond);
+    expect(loudnessIdentity(chosen(second))).not.toBe(loudnessIdentity(plain));
+    // The same stream on the other source is another audio.
+    expect(
+      loudnessCacheKey(scope({ effectiveAudio: { a: preferred, b: second } })),
+    ).not.toBe(withSecond);
   });
 
   it("ignores the frame rate of an export without video", () => {

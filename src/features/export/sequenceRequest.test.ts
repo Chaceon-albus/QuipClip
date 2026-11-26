@@ -144,6 +144,40 @@ describe("sequence export request (ADR 052, ADR 053)", () => {
     expect(result.sourceIds).toEqual(["A"]);
   });
 
+  it("gives each source with an override its audio stream (ADR 070)", () => {
+    const options = {
+      clips: [a1, b1],
+      segments: [segment("s", "a1", "9000", "b1", "1000")],
+      sources,
+      media,
+      outputPath: "/out.mp4",
+      preset,
+      streams: "videoAndAudio" as const,
+      audioMode: "encode" as const,
+      checkRevisions: false,
+    };
+    const audioStream = { index: 3, codec: null, sampleRate: 44100, channels: null };
+    expect(
+      buildSequenceExportRequest({ ...options, audioOverrides: { B: audioStream } })
+        ?.sources,
+    ).toEqual([
+      { id: "A", path: "/a.mp4" },
+      { id: "B", path: "/b.mp4", audioStream },
+    ]);
+    expect(buildSequenceExportRequest(options)?.sources).toEqual([
+      { id: "A", path: "/a.mp4" },
+      { id: "B", path: "/b.mp4" },
+    ]);
+    // An override of a source that no piece reads does not reach the request.
+    expect(
+      buildSequenceExportRequest({ ...options, audioOverrides: { C: audioStream } })
+        ?.sources,
+    ).toEqual([
+      { id: "A", path: "/a.mp4" },
+      { id: "B", path: "/b.mp4" },
+    ]);
+  });
+
   it("builds the request with the revisions, or with none after Export anyway", () => {
     const options = {
       clips: [a1, b1],

@@ -14,6 +14,11 @@
  */
 
 import type { StoreApi } from "zustand/vanilla";
+import { audioOverrideStore } from "@/features/media/audioOverrideStore";
+import {
+  effectiveAudioStreamOf,
+  type AudioStreamOverride,
+} from "@/features/media/audioStream";
 import type { ImportMediaResult } from "@/features/media/types";
 import { startWaveform, type WaveformHandlers, type WaveformJob } from "./client";
 import { waveformData, type WaveformDataRegistry } from "./data";
@@ -41,6 +46,11 @@ export interface WaveformControllerDependencies {
   readonly store?: WaveformStore;
   /** Milliseconds since the Unix epoch, for the request numbers. */
   readonly now?: () => number;
+  /**
+   * The audio stream overrides of the session, by source id (ADR 070). Defaults to the override
+   * store of the page.
+   */
+  readonly audioOverrides?: () => Readonly<Record<string, AudioStreamOverride>>;
 }
 
 export interface WaveformController {
@@ -51,19 +61,35 @@ export interface WaveformController {
   /** Drops the envelope of a source that does not run, and returns it to idle. */
   hide: (sourceId: string) => void;
   dismissNotice: (sourceId: string) => void;
+  /**
+   * The effective audio stream of a source changed (ADR 070). The envelope that the timeline shows
+   * for the source goes at once, and the page refuses each later message of its job. The job ends
+   * as a cancel of the user ends it: it holds the slot until Rust sends its end, and only then is
+   * the source idle and can an envelope start again. The entries of the cache on disk stay under
+   * their keys.
+   */
+  streamChanged: (sourceId: string) => void;
 }
 
-/** The request of a source, or null when the source has no audio or no start PTS. */
-export function buildWaveformRequest(media: ImportMediaResult): WaveformRequest | null {
+/**
+ * The request of a source, or null when the source has no audio or no start PTS. It names the
+ * effective audio stream of the source (ADR 070), which the cache key on disk includes. Rust maps
+ * the audio of an FLV as `0:a:0` whatever the index.
+ */
+export function buildWaveformRequest(
+  media: ImportMediaResult,
+  override?: AudioStreamOverride,
+): WaveformRequest | null {
   const { probe } = media;
-  if (probe.audio === null || probe.videoStartPts === null) {
+  const audio = effectiveAudioStreamOf(probe, override);
+  if (audio === null || probe.videoStartPts === null) {
     return null;
   }
   return {
     path: media.path,
     size: media.size,
     mtime: media.mtime,
-    audioStreamIndex: probe.audio.index,
+    audioStreamIndex: audio.index,
     videoStartPts: probe.videoStartPts,
     videoTimeBase: probe.videoTimeBase,
     durationSeconds: probe.approximateDurationSeconds,
@@ -100,6 +126,12 @@ interface CurrentJob {
   readonly token: number;
   job: WaveformJob | null;
   cancelRequested: boolean;
+  /**
+   * The effective audio stream of the source changed while the job ran (ADR 070). The job reads
+   * the old stream, so the page refuses its data, its progress and its result. It stays the
+   * current job until its end, because Rust holds the one slot until then.
+   */
+  stale: boolean;
 }
 
 export function createWaveformController(
@@ -112,11 +144,19 @@ export function createWaveformController(
       startWaveform(request, handlers, { now }));
   const data = dependencies.data ?? waveformData;
   const store = dependencies.store ?? waveformStore;
+  const audioOverrides =
+    dependencies.audioOverrides ?? (() => audioOverrideStore.getState().overrides);
   const current = new Map<string, CurrentJob>();
   let nextToken = 0;
 
   const isCurrent = (sourceId: string, token: number): boolean =>
     current.get(sourceId)?.token === token;
+
+  /** True when a message of the job `token` may change the envelope of the source. */
+  const accepts = (sourceId: string, token: number): boolean => {
+    const entry = current.get(sourceId);
+    return entry?.token === token && !entry.stale;
+  };
 
   const end = (sourceId: string, token: number, outcome: WaveformEnd): void => {
     const entry = current.get(sourceId);
@@ -124,6 +164,12 @@ export function createWaveformController(
       return;
     }
     current.delete(sourceId);
+    // The end of a job of the old stream frees the slot and shows nothing of the job.
+    if (entry.stale) {
+      data.drop(sourceId);
+      store.getState().finish(sourceId, { phase: "idle" });
+      return;
+    }
     // A cache hit cannot be canceled in Rust, so a cancel of the user drops its data here.
     if (outcome.status === "complete" && !entry.cancelRequested) {
       store.getState().finish(sourceId, {
@@ -155,24 +201,32 @@ export function createWaveformController(
         return false;
       }
       const media = dependencies.mediaStore.getState().sources[sourceId];
-      const request = media === undefined ? null : buildWaveformRequest(media);
+      const request =
+        media === undefined
+          ? null
+          : buildWaveformRequest(media, audioOverrides()[sourceId]);
       if (request === null) {
         return false;
       }
       const token = ++nextToken;
-      const entry: CurrentJob = { token, job: null, cancelRequested: false };
+      const entry: CurrentJob = {
+        token,
+        job: null,
+        cancelRequested: false,
+        stale: false,
+      };
       current.set(sourceId, entry);
       data.reset(sourceId);
       state.begin(sourceId);
 
       const job = start(request, {
         onChunk: (chunk) => {
-          if (isCurrent(sourceId, token)) {
+          if (accepts(sourceId, token)) {
             data.write(sourceId, chunk.startBucket, chunk.pairs);
           }
         },
         onProgress: (progress) => {
-          if (isCurrent(sourceId, token)) {
+          if (accepts(sourceId, token)) {
             store
               .getState()
               .setProgress(
@@ -197,7 +251,7 @@ export function createWaveformController(
       }
       job.started.then(
         (started) => {
-          if (isCurrent(sourceId, token)) {
+          if (accepts(sourceId, token)) {
             store.getState().setCached(sourceId, started.cached);
           }
         },
@@ -246,6 +300,26 @@ export function createWaveformController(
 
     dismissNotice: (sourceId) => {
       store.getState().dismissNotice(sourceId);
+    },
+
+    streamChanged: (sourceId) => {
+      const entry = current.get(sourceId);
+      if (entry === undefined) {
+        data.drop(sourceId);
+        store.getState().reset(sourceId);
+        return;
+      }
+      // The job reads the old stream. Its envelope goes now, and the page refuses each later
+      // message of it. As for a cancel of the user, the job stays the running job until its end
+      // message, because Rust holds the one slot until then. A job whose start reply has not come
+      // gets the cancel when the reply names it (`startWaveform`), or at once in `show` when the
+      // job object does not exist yet.
+      entry.stale = true;
+      data.drop(sourceId);
+      if (!entry.cancelRequested) {
+        entry.cancelRequested = true;
+        entry.job?.cancel();
+      }
     },
   };
 }

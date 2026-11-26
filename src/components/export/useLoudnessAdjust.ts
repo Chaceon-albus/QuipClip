@@ -20,7 +20,11 @@ import {
   useLoudnessMeasurement,
 } from "@/features/loudness/store";
 import type { LoudnessScope } from "@/features/loudness/types";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
+import {
+  useAudioOverrides,
+  useMediaStore,
+  type MediaStoreState,
+} from "@/features/media";
 import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 import type { Preset } from "@/features/settings/types";
 import { useTimelineStore, type TimelineStoreState } from "@/features/timeline";
@@ -50,6 +54,9 @@ export function useMeasurementScope(
   const sourceId = useTimelineStore(selectSourceId);
   const sources = useMediaStore(selectImportedSources);
   const media = useAttachedMediaStore(selectAttachedMedia);
+  // A new override gives the scope a new identity, so a measurement of the old streams ends with
+  // no result for the step (ADR 070).
+  const audioOverrides = useAudioOverrides();
   return useMemo(
     () =>
       preset === null
@@ -63,6 +70,7 @@ export function useMeasurementScope(
             preset,
             streams,
             skipSourceRevisionCheck,
+            audioOverrides,
           }),
     [
       clips,
@@ -75,6 +83,7 @@ export function useMeasurementScope(
       preset,
       streams,
       skipSourceRevisionCheck,
+      audioOverrides,
     ],
   );
 }

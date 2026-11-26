@@ -96,10 +96,46 @@ export type PersistedSource = {
   /** Total reported frame count from stream metadata, or null if unstated. */
   reportedFrameCount: FrameCount | null;
   /**
+   * The absolute index of the audio stream that the user chose for the source, or absent when the
+   * source has no override and uses its preferred audio stream (ADR 070). The project file writes
+   * the field only for a source with an override. The loader refuses `null` and a value that
+   * `isValidAudioStreamIndex` refuses (`hasValidAudioStreamIndexField`).
+   */
+  audioStreamIndex?: number;
+  /**
    * Proxies are machine-specific caches and must not be persisted to project files (ADR 010).
    */
   proxy?: never;
 };
+
+/** The largest absolute stream index: ffprobe reports it as a `u32`. */
+const MAX_STREAM_INDEX = 4_294_967_295;
+
+/**
+ * True when `value` is an absolute audio stream index of the project file (ADR 070): an integer
+ * from 0 to 4 294 967 295, as the Rust project module reads it.
+ */
+export function isValidAudioStreamIndex(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_STREAM_INDEX
+  );
+}
+
+/**
+ * True when the persisted source `source` has no `audioStreamIndex` field, or one that holds a
+ * valid index (ADR 070). A present `null` is refused, as for the name of a segment (ADR 065): only
+ * an absent field means no override.
+ */
+export function hasValidAudioStreamIndexField(
+  source: Readonly<Record<string, unknown>>,
+): boolean {
+  return (
+    !("audioStreamIndex" in source) || isValidAudioStreamIndex(source.audioStreamIndex)
+  );
+}
 
 /**
  * State of the background ffmpeg proxy generation for a source (ADR 003, ADR 007).
@@ -136,6 +172,8 @@ export type Source = {
   avgFrameRate: Rational | null;
   rFrameRate: Rational | null;
   reportedFrameCount: FrameCount | null;
+  /** The audio stream override of the source (ADR 070), or absent for none. */
+  audioStreamIndex?: number;
   /** Optional runtime proxy information for playback when native decoding is unavailable. */
   proxy?: SourceProxy;
 };
@@ -149,7 +187,7 @@ export type Source = {
  * See ADR 007 and ADR 010.
  */
 export function toPersistedSource(source: Source): PersistedSource {
-  return {
+  const persisted: PersistedSource = {
     id: source.id,
     path: source.path,
     relPath: source.relPath,
@@ -165,6 +203,11 @@ export function toPersistedSource(source: Source): PersistedSource {
     rFrameRate: source.rFrameRate,
     reportedFrameCount: source.reportedFrameCount,
   };
+  // The file has the field only for a source with an override (ADR 070).
+  if (source.audioStreamIndex !== undefined) {
+    persisted.audioStreamIndex = source.audioStreamIndex;
+  }
+  return persisted;
 }
 
 /**

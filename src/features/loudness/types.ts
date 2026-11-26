@@ -12,6 +12,7 @@ import type {
   ExportSource,
   ExportStreams,
 } from "@/features/export/types";
+import type { AudioProbe } from "@/features/media/types";
 import type { Preset } from "@/features/settings/types";
 
 /**
@@ -27,6 +28,14 @@ export interface LoudnessScope {
   readonly preset: Preset;
   /** The streams of the export. `videoOnly` writes no audio, and Rust refuses it. */
   readonly streams: ExportStreams;
+  /**
+   * The effective audio stream of each source of `sources`, by the id that the request names it
+   * by, or null for a source with no audio (ADR 070, `effectiveAudioStreamOf`). Only the page reads
+   * it: the identity and the key of a kept result include it, so a source with no override and a
+   * source with an override of its preferred stream share a result. The request to Rust does not
+   * carry it. There a source carries its override alone, as `audioStream`.
+   */
+  readonly effectiveAudio: Readonly<Record<string, AudioProbe | null>>;
 }
 
 /** The answer of `start_loudness_measurement`. */

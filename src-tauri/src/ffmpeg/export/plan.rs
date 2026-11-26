@@ -1454,6 +1454,7 @@ mod tests {
             video_end_pts: None,
             audio: None,
             audio_streams: Vec::new(),
+            audio_stream_probes: Vec::new(),
         }
     }
 

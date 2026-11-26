@@ -8,4 +8,5 @@ export * from "./sourceIdentity";
 export * from "./validation";
 export * from "./client";
 export * from "./store";
+export * from "./audioOverrideStore";
 export * from "./dialog";

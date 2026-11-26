@@ -224,6 +224,7 @@ describe("Export Types & Wire Constants", () => {
         "sourceNotFound",
         "sourceNotFile",
         "sourceRevisionMismatch",
+        "audioStreamChanged",
         "outputPathInvalid",
         "outputDirectoryMissing",
         "outputEqualsSource",

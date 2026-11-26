@@ -14,6 +14,10 @@
  * before the graph (ADR 053).
  */
 
+import {
+  withEffectiveAudio,
+  type AudioStreamOverride,
+} from "@/features/media/audioStream";
 import type { AudioProbe, ImportMediaResult, MediaProbe } from "@/features/media/types";
 import { getNominalFrameRate } from "@/features/playback/store";
 import type { SequenceSource } from "@/features/timeline/sequence";
@@ -140,6 +144,12 @@ export interface ExportSourceFactsInput {
   readonly segments: readonly SequenceSegment[];
   readonly sources: Readonly<Record<string, SequenceSource>>;
   readonly imported: ImportedSources;
+  /**
+   * The audio stream overrides of the session, by source id (ADR 070). Each fact reads the
+   * effective audio stream of a source in place of its preferred stream. Absent means no source
+   * has an override.
+   */
+  readonly audioOverrides?: Readonly<Record<string, AudioStreamOverride>>;
 }
 
 /** The facts of the sources of an export, which the setup step and the dialog decide with. */
@@ -162,13 +172,30 @@ export interface ExportSourceFacts {
 /**
  * The facts of the sources of an export. With one clip, they are the probe of that clip and its
  * segment count, as before ADR 053. With several clips, they come from the sources of the pieces,
- * as the backend reads them (ADR 053). With no piece, the output falls back to `probe`.
+ * as the backend reads them (ADR 053). With no piece, the output falls back to `probe`. Each probe
+ * has the effective audio stream of its source (ADR 070), so the summary, the Copy audio switch,
+ * the stream switches and the checks of the preset read the stream that the export reads.
  */
 export function exportSourceFacts(input: ExportSourceFactsInput): ExportSourceFacts {
+  const overrides = input.audioOverrides ?? {};
+  // With one clip, `probe` is the probe of the source of that clip. With no clip, no menu could
+  // set an override. With several clips, `probe` only stands in for an export with no piece.
+  const onlyClip = input.clips.length === 1 ? input.clips[0] : undefined;
+  const probeOverride =
+    onlyClip === undefined ? undefined : overrides[onlyClip.sourceId];
+  const probe =
+    input.probe === null ? null : withEffectiveAudio(input.probe, probeOverride);
+  // The probe of a source, with its effective audio stream (ADR 070).
+  const probeOf = (id: string): MediaProbe | null => {
+    const source = input.imported[id];
+    return source === undefined
+      ? null
+      : withEffectiveAudio(source.probe, overrides[id]);
+  };
   if (input.clips.length <= 1) {
     return {
-      output: input.probe === null ? null : outputSummarySource([input.probe]),
-      copyProbe: input.probe,
+      output: probe === null ? null : outputSummarySource([probe]),
+      copyProbe: probe,
       copySegmentCount: input.segmentCount,
     };
   }
@@ -178,16 +205,15 @@ export function exportSourceFacts(input: ExportSourceFactsInput): ExportSourceFa
     new Map(Object.entries(input.sources)),
   );
   const probes = sourceIds.flatMap((id) => {
-    const source = input.imported[id];
-    return source === undefined ? [] : [source.probe];
+    const source = probeOf(id);
+    return source === null ? [] : [source];
   });
   const only = pieces.length === 1 ? pieces[0] : undefined;
   return {
     output:
       outputSummarySource(probes) ??
-      (input.probe === null ? null : outputSummarySource([input.probe])),
-    copyProbe:
-      only === undefined ? null : (input.imported[only.sourceId]?.probe ?? null),
+      (probe === null ? null : outputSummarySource([probe])),
+    copyProbe: only === undefined ? null : probeOf(only.sourceId),
     copySegmentCount: pieces.length,
   };
 }

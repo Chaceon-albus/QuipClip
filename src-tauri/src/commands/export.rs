@@ -144,6 +144,107 @@ pub struct ExportSourceWire {
     /// [`check_source_revision`] states what the comparison cannot see. `None` checks nothing.
     #[serde(default)]
     pub expected_revision: Option<ExpectedSourceRevisionWire>,
+    /// The audio stream that the user chose for this source (ADR 070), or `None` when the source
+    /// has no override and the export reads its preferred stream. A request that writes audio
+    /// takes this stream after its own probe, and refuses with `audioStreamChanged` when the file
+    /// has no stream with this index, or when its codec, its sample rate or its channel count
+    /// differs ([`take_requested_audio_stream`]). A request that writes no audio does not check
+    /// it.
+    ///
+    /// Only an absent key means no override. A present key must hold the object: `null` is
+    /// refused, so a page that sent a broken value does not export the preferred stream in
+    /// silence.
+    #[serde(default, deserialize_with = "present_audio_stream")]
+    pub audio_stream: Option<AudioStreamWire>,
+}
+
+/// The audio stream that the user chose for a source (ADR 070), with the facts of the probe of
+/// its import. Each key is required. The codec, the sample rate and the channel count are `null`
+/// where that probe reported none, as `ListedAudioStream` gives them to the page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioStreamWire {
+    /// The absolute stream index, as ffprobe reported it.
+    pub index: u32,
+    #[serde(deserialize_with = "required_nullable")]
+    pub codec: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub sample_rate: Option<u32>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub channels: Option<u32>,
+}
+
+/// Deserialize an `audioStream` key that is present as an object. `null` is refused.
+/// `#[serde(default)]` gives `None` to an absent key.
+fn present_audio_stream<'de, D>(deserializer: D) -> Result<Option<AudioStreamWire>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    AudioStreamWire::deserialize(deserializer).map(Some)
+}
+
+/// Deserialize a key that must be present and can be `null`. A field with `deserialize_with` and
+/// no default is required, so an absent key is refused.
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Make the audio stream that `wire` names the stream that every later step of preparation reads
+/// (ADR 070): the first packet, the gaps, the plan, the copy of the audio and its tags, and the
+/// map. The caller calls this only for a request that writes audio, after its own probe of the
+/// source, and also after "Export anyway" (ADR 024).
+///
+/// A source with no override keeps its preferred stream. A source with an override takes the
+/// full probe of the stream with that absolute index, or refuses with `audioStreamChanged` when the
+/// file is an FLV, which holds no override, when it has no such stream, or when its codec, its
+/// sample rate or its channel count differs from the request. It never takes another stream in its place, also when the chosen stream holds no
+/// packets: the plan then refuses an export with no video with `sourceHasNoAudio`, and an export
+/// with video writes silence for it, as for a preferred stream (ADR 036, ADR 053).
+fn take_requested_audio_stream(
+    probe: &mut MediaProbe,
+    wire: &ExportSourceWire,
+) -> Result<(), ExportCommandError> {
+    let Some(requested) = wire.audio_stream.as_ref() else {
+        return Ok(());
+    };
+    let changed = |detail: String| {
+        Err(ExportCommandError::with_detail(
+            ExportErrorCode::AudioStreamChanged,
+            format!("{}: {detail}", wire.id),
+        ))
+    };
+    // An FLV has one audio stream for QuipClip, and its inputs map it as `0:a:0`, so it holds no
+    // override. The page sets none for an FLV, so a request with one names a file that is now an
+    // FLV, as after "Export anyway". The test is the one of `flv_input_for`.
+    if probe.format_names.iter().any(|name| name == "flv") {
+        return changed("the file is an FLV, which holds no audio stream override".to_owned());
+    }
+    let Some(found) = probe.take_audio_stream(requested.index) else {
+        return changed(format!("no audio stream {}", requested.index));
+    };
+    if found.codec != requested.codec {
+        return changed(format!(
+            "audio stream {} has codec {:?}, the request names {:?}",
+            requested.index, found.codec, requested.codec
+        ));
+    }
+    if found.sample_rate != requested.sample_rate {
+        return changed(format!(
+            "audio stream {} has sample rate {:?}, the request names {:?}",
+            requested.index, found.sample_rate, requested.sample_rate
+        ));
+    }
+    if found.channels != requested.channels {
+        return changed(format!(
+            "audio stream {} has {:?} channels, the request names {:?}",
+            requested.index, found.channels, requested.channels
+        ));
+    }
+    Ok(())
 }
 
 /// One piece of an export request: one interval of one source, as the frontend spells it (ADR
@@ -900,6 +1001,12 @@ where
                 ProbeError::Canceled => ExportCommandError::new(ExportErrorCode::Canceled),
                 other => map_reprobe_error(other),
             })?;
+        // ADR 070: the stream that the user chose replaces the preferred one before any read of
+        // the audio, so each later step reads it. A request that writes no audio reads no stream,
+        // so it does not check the one that it names.
+        if scope.streams.writes_audio() {
+            take_requested_audio_stream(&mut source_probe, wire)?;
+        }
         let rate_readable = rate_readable_from_packets(&source_probe.format_names);
         if let Some(audio) = source_probe.audio.as_mut().filter(|audio| {
             scope.streams.writes_audio() && (audio.sample_rate.is_some() || rate_readable)
@@ -2987,6 +3094,7 @@ pub(crate) mod tests {
             video_end_pts: None,
             audio: None,
             audio_streams: Vec::new(),
+            audio_stream_probes: Vec::new(),
         }
     }
 
@@ -3381,6 +3489,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![
                 ExportPieceWire {
@@ -4047,6 +4156,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: expected,
+                audio_stream: None,
             }],
             pieces: vec![piece("source", 0, 90_000)],
             segment_count: 1,
@@ -4072,7 +4182,7 @@ pub(crate) mod tests {
     }
 
     /// The revision of `path` as the import reports it.
-    fn revision_of(path: &Path) -> ExpectedSourceRevisionWire {
+    pub(crate) fn revision_of(path: &Path) -> ExpectedSourceRevisionWire {
         let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
         ExpectedSourceRevisionWire {
             size: media.size,
@@ -4450,6 +4560,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -4531,6 +4642,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -4619,6 +4731,7 @@ pub(crate) mod tests {
                     id: "source".to_owned(),
                     path: source.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 }],
                 pieces: vec![ExportPieceWire {
                     source_id: "source".to_owned(),
@@ -4707,6 +4820,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -4853,6 +4967,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -4910,6 +5025,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -4985,6 +5101,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -5080,6 +5197,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: "/media/source.mp4".to_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -5145,6 +5263,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -5210,6 +5329,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -5316,6 +5436,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: "/media/source.mp4".to_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![piece("source", 0, 90_000)],
             segment_count: 1,
@@ -5646,6 +5767,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: segments
                 .iter()
@@ -5911,6 +6033,7 @@ pub(crate) mod tests {
                     id: "source".to_owned(),
                     path: source.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 }],
                 pieces: vec![ExportPieceWire {
                     source_id: "source".to_owned(),
@@ -6720,6 +6843,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -8185,6 +8309,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -8562,6 +8687,22 @@ pub(crate) mod tests {
         output: &Path,
         container: Container,
     ) -> (String, usize) {
+        real_copy_choosing(
+            ffmpeg, ffprobe, directory, source, streams, output, container, None,
+        )
+    }
+
+    /// [`real_copy_in`] with the audio stream `audio_stream` that the user chose (ADR 070).
+    fn real_copy_choosing(
+        ffmpeg: &Path,
+        ffprobe: &Path,
+        directory: &TestDirectory,
+        source: &Path,
+        streams: ExportStreams,
+        output: &Path,
+        container: Container,
+        audio_stream: Option<AudioStreamWire>,
+    ) -> (String, usize) {
         let probe = ffmpeg::probe_media(ffprobe, source).unwrap();
         let tb = probe.video_time_base;
         let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
@@ -8578,6 +8719,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -8849,6 +8991,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![ExportPieceWire {
                 source_id: "source".to_owned(),
@@ -9453,6 +9596,7 @@ pub(crate) mod tests {
                     id: format!("source-{index}"),
                     path: path.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 })
                 .collect(),
             pieces: pieces
@@ -9673,11 +9817,13 @@ pub(crate) mod tests {
                     id: "first".to_owned(),
                     path: first.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 },
                 ExportSourceWire {
                     id: "second".to_owned(),
                     path: second.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 },
             ],
             pieces: vec![
@@ -10044,6 +10190,7 @@ pub(crate) mod tests {
                 id: "source".to_owned(),
                 path: source.to_string_lossy().into_owned(),
                 expected_revision: None,
+                audio_stream: None,
             }],
             pieces: vec![piece("source", 0, end.num())],
             segment_count: 1,
@@ -10126,6 +10273,7 @@ pub(crate) mod tests {
                     id: (*id).to_owned(),
                     path: path.to_string_lossy().into_owned(),
                     expected_revision: None,
+                    audio_stream: None,
                 })
                 .collect(),
             pieces: pieces
@@ -10320,6 +10468,7 @@ pub(crate) mod tests {
             id: "unused".to_owned(),
             path: "/media/unused.mp4".to_owned(),
             expected_revision: None,
+            audio_stream: None,
         });
         assert_eq!(refused(unused), ExportErrorCode::InvalidSources);
 
@@ -10607,5 +10756,718 @@ pub(crate) mod tests {
         let limits = PreparationLimits::PRODUCTION.for_sources(4);
         assert_eq!(limits.grace, PREPARATION_CANCEL_GRACE);
         assert_eq!(limits.poll, PREPARATION_POLL);
+    }
+
+    // -- the audio stream that the user chose (ADR 070) ------------------------------------------
+
+    /// The full probe of an audio stream that starts at 0 and covers the 10 s of the sample probe.
+    fn stream_probe(
+        index: u32,
+        codec: &str,
+        sample_rate: u32,
+        channels: u32,
+    ) -> crate::ffmpeg::AudioProbe {
+        crate::ffmpeg::AudioProbe {
+            index,
+            codec: Some(codec.to_owned()),
+            sample_rate: Some(sample_rate),
+            channels: Some(channels),
+            channel_layout: None,
+            reported_packets: None,
+            holds_no_packets: false,
+            start_time: Some(Rational::new(0, 1).unwrap()),
+            duration: Some(Rational::new(10, 1).unwrap()),
+            tagged_end: None,
+        }
+    }
+
+    /// The sample probe with two audio streams: the preferred stream 1, AAC at 48000 Hz in
+    /// stereo, and stream 2, AAC at 44100 Hz in mono.
+    pub(crate) fn sample_probe_with_two_audio_streams() -> MediaProbe {
+        let preferred = stream_probe(1, "aac", 48_000, 2);
+        let second = stream_probe(2, "aac", 44_100, 1);
+        MediaProbe {
+            audio: Some(preferred.clone()),
+            audio_stream_probes: vec![preferred, second],
+            ..sample_probe()
+        }
+    }
+
+    /// The override of stream 2 of [`sample_probe_with_two_audio_streams`], with the facts that the
+    /// import recorded.
+    pub(crate) fn second_stream_override() -> AudioStreamWire {
+        AudioStreamWire {
+            index: 2,
+            codec: Some("aac".to_owned()),
+            sample_rate: Some(44_100),
+            channels: Some(1),
+        }
+    }
+
+    /// What the reads of preparation saw: the stream of each read of the first packet, and the
+    /// stream and the rate of each read of the gaps.
+    #[derive(Default)]
+    struct AudioReads {
+        first_packets: RefCell<Vec<u32>>,
+        gaps: RefCell<Vec<(u32, u32)>>,
+    }
+
+    /// One source with an export of 0 s to 1 s, which `adjust` can change, prepared against
+    /// `probe` with the reads of the audio recorded in `reads`. The read of the first packet
+    /// fails, so the values of the probe stand, unless `no_packet` says that it found none.
+    fn prepare_choosing(
+        directory: &TestDirectory,
+        probe: MediaProbe,
+        reads: &AudioReads,
+        no_packet: bool,
+        adjust: impl FnOnce(&mut ExportRequestWire),
+    ) -> Result<PreparedExport, ExportCommandError> {
+        let source = directory.path.join("source.mp4");
+        fs::write(&source, b"media").unwrap();
+        let mut request = ExportRequestWire {
+            sources: vec![ExportSourceWire {
+                id: "source".to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                expected_revision: None,
+                audio_stream: Some(second_stream_override()),
+            }],
+            pieces: vec![piece("source", 0, 90_000)],
+            segment_count: 1,
+            output_path: directory
+                .path
+                .join("out.mp4")
+                .to_string_lossy()
+                .into_owned(),
+            preset: sample_preset("active"),
+            streams: ExportStreams::VideoAndAudio,
+            audio_mode: ExportAudioMode::Encode,
+            new_batch: false,
+            adjusted_audio_gain_tenths_db: None,
+        };
+        adjust(&mut request);
+        prepare_export_with(
+            PrepareRequest {
+                request: &request,
+                app_data_directory: &directory.path,
+                cache_directory: &directory.path.join("cache"),
+                cancel: &AtomicBool::new(false),
+                preview_windows: &PreviewWindows::default(),
+                stage: &PreparationStageCell::default(),
+                graph_file: &slash_graph_file,
+            },
+            |_| {
+                Ok(FfmpegPaths {
+                    ffmpeg: directory.path.join("ffmpeg"),
+                    ffprobe: directory.path.join("ffprobe"),
+                    origin: ExecutableOrigin::Path,
+                })
+            },
+            move |_, _, _| Ok(probe.clone()),
+            |_: &Path, _: &Path, index: u32, _: &AtomicBool| {
+                reads.first_packets.borrow_mut().push(index);
+                if no_packet {
+                    Ok(None)
+                } else {
+                    Err(ProbeError::ProcessFailed {
+                        code: Some(1),
+                        stderr: Vec::new(),
+                    })
+                }
+            },
+            sample_rate_not_read,
+            |_: &Path, _: &Path, read: &AudioGapRead<'_>, _: &AtomicBool| {
+                reads
+                    .gaps
+                    .borrow_mut()
+                    .push((read.stream_index, read.sample_rate));
+                Ok(AudioFrames::default())
+            },
+        )
+    }
+
+    #[test]
+    fn a_source_carries_an_optional_audio_stream_and_refuses_null_or_a_missing_key() {
+        let mut value = request_json(Some(serde_json::json!("videoAndAudio")));
+        let absent: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(absent.sources[0].audio_stream, None);
+
+        value["sources"][0]["audioStream"] =
+            serde_json::json!({ "index": 2, "codec": "aac", "sampleRate": 44_100, "channels": 1 });
+        let present: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            present.sources[0].audio_stream,
+            Some(second_stream_override())
+        );
+        // The import can report no codec, no rate and no channel count for a stream.
+        value["sources"][0]["audioStream"] =
+            serde_json::json!({ "index": 0, "codec": null, "sampleRate": null, "channels": null });
+        let unknown: ExportRequestWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            unknown.sources[0].audio_stream,
+            Some(AudioStreamWire {
+                index: 0,
+                codec: None,
+                sample_rate: None,
+                channels: None,
+            })
+        );
+
+        let full =
+            serde_json::json!({ "index": 2, "codec": "aac", "sampleRate": 44_100, "channels": 1 });
+        let mut refused = vec![
+            serde_json::json!(null),
+            serde_json::json!(2),
+            serde_json::json!({ "index": -1, "codec": "aac", "sampleRate": 44_100, "channels": 1 }),
+            serde_json::json!({ "index": 1.5, "codec": "aac", "sampleRate": 44_100, "channels": 1 }),
+            serde_json::json!({ "index": 2, "codec": 7, "sampleRate": 44_100, "channels": 1 }),
+            serde_json::json!({ "index": 2, "codec": "aac", "sampleRate": "44100", "channels": 1 }),
+        ];
+        // Each key is required, also the ones that can be null.
+        for key in ["index", "codec", "sampleRate", "channels"] {
+            let mut without = full.clone();
+            without.as_object_mut().unwrap().remove(key);
+            refused.push(without);
+        }
+        let mut extra = full.clone();
+        extra["language"] = serde_json::json!("eng");
+        refused.push(extra);
+        for stream in refused {
+            value["sources"][0]["audioStream"] = stream.clone();
+            assert!(
+                serde_json::from_value::<ExportRequestWire>(value.clone()).is_err(),
+                "{stream}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_export_with_an_override_reads_the_chosen_stream_at_each_step() {
+        let directory = TestDirectory::new();
+        let reads = AudioReads::default();
+        let prepared = prepare_choosing(
+            &directory,
+            sample_probe_with_two_audio_streams(),
+            &reads,
+            false,
+            |_| {},
+        )
+        .unwrap();
+        // The first packet and the gaps read stream 2, at its own rate.
+        assert_eq!(*reads.first_packets.borrow(), vec![2]);
+        assert_eq!(*reads.gaps.borrow(), vec![(2, 44_100)]);
+        // The plan maps stream 2 by its absolute index, and cuts it at its own rate.
+        let audio = prepared.plan.sources[0].audio.as_ref().unwrap();
+        assert_eq!(audio.stream_index, 2);
+        assert_eq!(audio.sample_rate, 44_100);
+        let graph = audio_graph_of(&prepared);
+        assert!(graph.contains("[0:2]aformat=r=44100,"), "{graph}");
+        assert!(!graph.contains("[0:1]"), "{graph}");
+
+        // Without an override, every step reads the preferred stream 1, as before.
+        let directory = TestDirectory::new();
+        let reads = AudioReads::default();
+        let prepared = prepare_choosing(
+            &directory,
+            sample_probe_with_two_audio_streams(),
+            &reads,
+            false,
+            |request| request.sources[0].audio_stream = None,
+        )
+        .unwrap();
+        assert_eq!(*reads.first_packets.borrow(), vec![1]);
+        assert_eq!(*reads.gaps.borrow(), vec![(1, 48_000)]);
+        assert_eq!(
+            prepared.plan.sources[0]
+                .audio
+                .as_ref()
+                .unwrap()
+                .stream_index,
+            1
+        );
+    }
+
+    #[test]
+    fn the_copy_decision_reads_the_chosen_stream() {
+        // The preferred AAC stream passes the codec check and fails later, for want of frames.
+        // A chosen Opus stream fails the codec check: the decision read the chosen stream.
+        let copy = |request: &mut ExportRequestWire| request.audio_mode = ExportAudioMode::Copy;
+        let directory = TestDirectory::new();
+        let preferred = prepare_choosing(
+            &directory,
+            sample_probe_with_two_audio_streams(),
+            &AudioReads::default(),
+            false,
+            |request| {
+                copy(request);
+                request.sources[0].audio_stream = None;
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            preferred.plan.audio_copy_refusal,
+            Some(crate::ffmpeg::export::copy::CopyRefusal::NoFrames)
+        );
+
+        let mut probe = sample_probe_with_two_audio_streams();
+        probe.audio_stream_probes[1].codec = Some("opus".to_owned());
+        let directory = TestDirectory::new();
+        let chosen = prepare_choosing(
+            &directory,
+            probe,
+            &AudioReads::default(),
+            false,
+            |request| {
+                copy(request);
+                request.sources[0].audio_stream.as_mut().unwrap().codec = Some("opus".to_owned());
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            chosen.plan.audio_copy_refusal,
+            Some(crate::ffmpeg::export::copy::CopyRefusal::Codec)
+        );
+        assert_eq!(
+            chosen.plan.sources[0].audio.as_ref().unwrap().stream_index,
+            2
+        );
+    }
+
+    #[test]
+    fn an_override_that_the_file_does_not_match_is_refused_as_audio_stream_changed() {
+        let cases: [(&str, fn(&mut AudioStreamWire)); 4] = [
+            ("no audio stream 5", |stream| stream.index = 5),
+            ("codec", |stream| stream.codec = Some("opus".to_owned())),
+            ("sample rate", |stream| stream.sample_rate = Some(48_000)),
+            ("channels", |stream| stream.channels = Some(2)),
+        ];
+        for (fact, change) in cases {
+            for export_anyway in [false, true] {
+                let directory = TestDirectory::new();
+                let reads = AudioReads::default();
+                let error = match prepare_choosing(
+                    &directory,
+                    sample_probe_with_two_audio_streams(),
+                    &reads,
+                    false,
+                    |request| {
+                        change(request.sources[0].audio_stream.as_mut().unwrap());
+                        // "Export anyway" sends no revision (ADR 024). Otherwise the revision is
+                        // the one of the file, so only the stream can fail.
+                        if !export_anyway {
+                            request.sources[0].expected_revision =
+                                Some(revision_of(Path::new(&request.sources[0].path)));
+                        }
+                    },
+                ) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{fact}: the stream does not match"),
+                };
+                assert_eq!(error.code, ExportErrorCode::AudioStreamChanged, "{fact}");
+                let detail = error.detail.unwrap();
+                assert!(detail.starts_with("source: "), "{detail}");
+                assert!(detail.contains(fact), "{fact}: {detail}");
+                // No read of the audio ran, and nothing was reserved.
+                assert!(reads.first_packets.borrow().is_empty(), "{fact}");
+                assert!(reads.gaps.borrow().is_empty(), "{fact}");
+                assert_eq!(leftover_reservations(&directory), 0, "{fact}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_that_writes_no_audio_does_not_check_the_override() {
+        let directory = TestDirectory::new();
+        let reads = AudioReads::default();
+        let prepared = prepare_choosing(
+            &directory,
+            sample_probe_with_two_audio_streams(),
+            &reads,
+            false,
+            |request| {
+                request.streams = ExportStreams::VideoOnly;
+                request.sources[0].audio_stream.as_mut().unwrap().index = 9;
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.plan.audio, None);
+        assert!(reads.first_packets.borrow().is_empty());
+    }
+
+    /// [`sample_probe_with_two_audio_streams`] of a file that ffprobe names FLV.
+    pub(crate) fn flv_probe_with_two_audio_streams() -> MediaProbe {
+        MediaProbe {
+            format_names: vec!["flv".to_owned()],
+            format_long_name: Some("FLV (Flash Video)".to_owned()),
+            ..sample_probe_with_two_audio_streams()
+        }
+    }
+
+    #[test]
+    fn an_override_of_an_flv_is_refused_as_audio_stream_changed() {
+        // ADR 070: an FLV has one audio stream for QuipClip, and holds no override. A file that
+        // was replaced by an FLV, also after "Export anyway", is refused before any read of it.
+        for streams in [ExportStreams::VideoAndAudio, ExportStreams::AudioOnly] {
+            for export_anyway in [false, true] {
+                let directory = TestDirectory::new();
+                let reads = AudioReads::default();
+                let error = match prepare_choosing(
+                    &directory,
+                    flv_probe_with_two_audio_streams(),
+                    &reads,
+                    false,
+                    |request| {
+                        request.streams = streams;
+                        if !export_anyway {
+                            request.sources[0].expected_revision =
+                                Some(revision_of(Path::new(&request.sources[0].path)));
+                        }
+                    },
+                ) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{streams:?}: an FLV holds no override"),
+                };
+                assert_eq!(
+                    error.code,
+                    ExportErrorCode::AudioStreamChanged,
+                    "{streams:?}"
+                );
+                let detail = error.detail.unwrap();
+                assert!(detail.starts_with("source: "), "{detail}");
+                assert!(detail.contains("FLV"), "{detail}");
+                assert!(reads.first_packets.borrow().is_empty());
+                assert!(reads.gaps.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_request_of_an_flv_that_writes_no_audio_does_not_check_the_override() {
+        // The video of an FLV reads its slices from the file, which this test does not hold, so
+        // the preparation fails later, but never on the audio stream.
+        let directory = TestDirectory::new();
+        let result = prepare_choosing(
+            &directory,
+            flv_probe_with_two_audio_streams(),
+            &AudioReads::default(),
+            false,
+            |request| request.streams = ExportStreams::VideoOnly,
+        );
+        if let Err(error) = result {
+            assert_ne!(error.code, ExportErrorCode::AudioStreamChanged, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_chosen_stream_with_no_packets_is_silence_with_video_and_refused_without() {
+        // The chosen stream holds no packets, and the preferred one does. The backend never takes
+        // the preferred stream in its place (ADR 070).
+        let mut probe = sample_probe_with_two_audio_streams();
+        probe.audio_stream_probes[1].tagged_end = Some(Rational::new(0, 1).unwrap());
+
+        let directory = TestDirectory::new();
+        let reads = AudioReads::default();
+        let error = match prepare_choosing(&directory, probe.clone(), &reads, true, |request| {
+            request.streams = ExportStreams::AudioOnly;
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("the chosen stream holds no audio"),
+        };
+        assert_eq!(error.code, ExportErrorCode::SourceHasNoAudio);
+        assert_eq!(*reads.first_packets.borrow(), vec![2]);
+
+        let directory = TestDirectory::new();
+        let reads = AudioReads::default();
+        let prepared = prepare_choosing(&directory, probe, &reads, true, |_| {}).unwrap();
+        assert_eq!(*reads.first_packets.borrow(), vec![2]);
+        let audio = prepared.plan.sources[0].audio.as_ref().unwrap();
+        assert_eq!(audio.stream_index, 2);
+        assert_eq!(audio.silence_layout.as_deref(), Some("stereo"));
+        // No process reads an audio stream of the source: the encoder writes the silence.
+        assert!(prepared.audio_arguments.is_none());
+        let graph = graph_of(&prepared);
+        assert!(
+            !graph.contains("[0:1]") && !graph.contains("[0:2]"),
+            "{graph}"
+        );
+    }
+
+    /// Write a file of 3 s of 160x90 video with two audio streams: stream 1, the preferred one,
+    /// is silence at 48000 Hz in stereo, and stream 2 is a sine of 1 kHz with its peak at
+    /// -20 dBFS, at 22050 Hz in mono (ADR 070).
+    pub(crate) fn write_two_audio_streams(ffmpeg: &Path, path: &Path) {
+        write_fixture(
+            ffmpeg,
+            path,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=22050,volume=0.1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-t",
+                "3",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "flac",
+                "-disposition:a:0",
+                "default",
+                "-disposition:a:1",
+                "0",
+            ],
+        );
+    }
+
+    #[test]
+    fn a_real_export_with_an_override_writes_the_chosen_stream() {
+        let Some((ffmpeg_path, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("two.mkv");
+        write_two_audio_streams(&ffmpeg_path, &source);
+        let probe = ffmpeg::probe_media(&ffprobe, &source).unwrap();
+        assert_eq!(probe.audio.as_ref().unwrap().index, 1);
+        let second = probe.audio_streams[1].clone();
+        assert_eq!(
+            (second.index, second.sample_rate, second.channels),
+            (2, Some(22_050), Some(1))
+        );
+        let tb = probe.video_time_base;
+        let at = |millis: i64| Pts::new(millis * tb.den() / (1_000 * tb.num()));
+        // The preset keeps the rate and the channels of the source, so the output shows which
+        // stream the export read.
+        let mut preset = sample_preset("active");
+        preset.audio_sample_rate = AudioSampleRateSetting::Source;
+        preset.audio_channels = AudioChannels::Source;
+        for (stream, expected) in [
+            (
+                Some(AudioStreamWire {
+                    index: second.index,
+                    codec: second.codec.clone(),
+                    sample_rate: second.sample_rate,
+                    channels: second.channels,
+                }),
+                (Some(22_050), Some(1)),
+            ),
+            (None, (Some(48_000), Some(2))),
+        ] {
+            let output = directory.path.join(format!("out-{}.mp4", stream.is_some()));
+            let request = ExportRequestWire {
+                sources: vec![ExportSourceWire {
+                    id: "source".to_owned(),
+                    path: source.to_string_lossy().into_owned(),
+                    expected_revision: Some(revision_of(&source)),
+                    audio_stream: stream,
+                }],
+                pieces: vec![ExportPieceWire {
+                    source_id: "source".to_owned(),
+                    in_pts: at(500),
+                    out_pts: at(2_500),
+                }],
+                segment_count: 1,
+                output_path: output.to_string_lossy().into_owned(),
+                preset: preset.clone(),
+                streams: ExportStreams::VideoAndAudio,
+                audio_mode: ExportAudioMode::Encode,
+                new_batch: false,
+                adjusted_audio_gain_tenths_db: None,
+            };
+            let prepared = prepare_export_with(
+                PrepareRequest {
+                    request: &request,
+                    app_data_directory: &directory.path.join("app"),
+                    cache_directory: &directory.path.join("cache"),
+                    cancel: &AtomicBool::new(false),
+                    preview_windows: &PreviewWindows::default(),
+                    stage: &PreparationStageCell::default(),
+                    graph_file: &probe_graph_file_option,
+                },
+                |_| {
+                    Ok(FfmpegPaths {
+                        ffmpeg: ffmpeg_path.clone(),
+                        ffprobe: ffprobe.clone(),
+                        origin: ExecutableOrigin::Path,
+                    })
+                },
+                ffmpeg::probe_media_until_canceled,
+                ffmpeg::probe_first_audio_packet,
+                ffmpeg::probe_audio_sample_rate_at,
+                ffmpeg::probe_audio_gaps,
+            )
+            .unwrap();
+            let registry = Arc::new(ExportRegistry::default());
+            let slot = registry.begin("42-7").unwrap();
+            run_export_with(
+                &slot,
+                prepared,
+                "42-7",
+                |_event| {},
+                |request, on_progress| run_export_process(request, on_progress),
+                ffmpeg::probe_output_audio,
+            )
+            .unwrap();
+            let streams = read_output_streams(&ffprobe, &output);
+            assert_eq!((streams.sample_rate, streams.channels), expected);
+        }
+    }
+
+    #[test]
+    fn a_real_copy_with_an_override_writes_the_packets_and_the_tags_of_the_chosen_stream() {
+        // ADR 070 and ADR 048: two AAC streams that the copy can take, which differ in their
+        // content, their format and their title. The preferred stream 1 is silence in stereo at
+        // 48 kHz with the title "First". Stream 2 is a sine in mono at 44.1 kHz with the title
+        // "Second".
+        let Some((ffmpeg, ffprobe)) = real_tools() else {
+            return;
+        };
+        let directory = TestDirectory::new();
+        let source = directory.path.join("two.mkv");
+        write_fixture(
+            &ffmpeg,
+            &source,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-t",
+                "4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-c:a",
+                "aac",
+                "-metadata:s:a:0",
+                "title=First",
+                "-metadata:s:a:1",
+                "title=Second",
+                "-disposition:a:0",
+                "default",
+                "-disposition:a:1",
+                "0",
+            ],
+        );
+        let probe = ffmpeg::probe_media(&ffprobe, &source).unwrap();
+        assert_eq!(probe.audio.as_ref().unwrap().index, 1);
+        let second = probe.audio_streams[1].clone();
+        assert_eq!(
+            (second.index, second.sample_rate, second.channels),
+            (2, Some(44_100), Some(1))
+        );
+
+        // The packet sizes of the audio stream `selector` of `path`, and its rate, its channels
+        // and its title.
+        let packets = |path: &Path, selector: &str| -> Vec<u64> {
+            let answer = crate::procutil::command_without_console(&ffprobe)
+                .args(["-v", "error", "-select_streams", selector])
+                .args(["-show_entries", "packet=size", "-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8(answer.stdout)
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.trim().trim_end_matches(',').parse().ok())
+                .collect()
+        };
+        let format = |path: &Path| -> String {
+            let answer = crate::procutil::command_without_console(&ffprobe)
+                .args(["-v", "error", "-select_streams", "a"])
+                .args([
+                    "-show_entries",
+                    "stream=sample_rate,channels:stream_tags=title",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                ])
+                .arg(path)
+                .output()
+                .unwrap();
+            String::from_utf8(answer.stdout).unwrap()
+        };
+        let contains_run = |whole: &[u64], part: &[u64]| {
+            !part.is_empty() && whole.windows(part.len()).any(|window| window == part)
+        };
+        let first_packets = packets(&source, "a:0");
+        let second_packets = packets(&source, "a:1");
+
+        let output = directory.path.join("chosen.mkv");
+        let (codec, count) = real_copy_choosing(
+            &ffmpeg,
+            &ffprobe,
+            &directory,
+            &source,
+            ExportStreams::VideoAndAudio,
+            &output,
+            Container::Mkv,
+            Some(AudioStreamWire {
+                index: second.index,
+                codec: second.codec.clone(),
+                sample_rate: second.sample_rate,
+                channels: second.channels,
+            }),
+        );
+        // AAC, where an encode would write AC-3: the export copied the packets.
+        assert_eq!(codec, "aac");
+        let copied = packets(&output, "a");
+        assert_eq!(copied.len(), count);
+        // The packets are a run of the packets of stream 2, and not of stream 1.
+        assert!(contains_run(&second_packets, &copied), "{copied:?}");
+        assert!(!contains_run(&first_packets, &copied), "{copied:?}");
+        let written = format(&output);
+        assert!(written.contains("sample_rate=44100"), "{written}");
+        assert!(written.contains("channels=1"), "{written}");
+        assert!(written.contains("TAG:title=Second"), "{written}");
+
+        // Without the override, the copy takes the preferred stream 1, as before.
+        let output = directory.path.join("preferred.mkv");
+        let (codec, _) = real_copy_in(
+            &ffmpeg,
+            &ffprobe,
+            &directory,
+            &source,
+            ExportStreams::VideoAndAudio,
+            &output,
+            Container::Mkv,
+        );
+        assert_eq!(codec, "aac");
+        assert!(contains_run(&first_packets, &packets(&output, "a")));
+        let written = format(&output);
+        assert!(written.contains("channels=2"), "{written}");
+        assert!(written.contains("TAG:title=First"), "{written}");
     }
 }

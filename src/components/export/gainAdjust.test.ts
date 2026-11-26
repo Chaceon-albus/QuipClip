@@ -21,6 +21,7 @@ function scope(size = 10, revised = true): LoudnessScope {
     segmentCount: 1,
     preset: createPresetDraft("p", "P"),
     streams: "videoAndAudio",
+    effectiveAudio: {},
   };
 }
 

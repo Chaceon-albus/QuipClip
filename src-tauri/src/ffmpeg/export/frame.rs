@@ -546,6 +546,7 @@ mod tests {
                 tagged_end: None,
             }),
             audio_streams: Vec::new(),
+            audio_stream_probes: Vec::new(),
         }
     }
 

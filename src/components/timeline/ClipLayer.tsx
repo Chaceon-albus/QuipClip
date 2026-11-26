@@ -6,10 +6,11 @@
  * at each junction shows where one clip ends and the next one starts.
  *
  * `ClipLabels` shows the file name of each clip at the top left of its bar, with a menu that
- * shows, cancels or hides the audio envelope of the source of the clip (ADR 056), moves the
- * clip, removes it, or clears the timeline. The labels are interactive, and interactive
- * content cannot be inside the `role="slider"` element of the lane, so they are a sibling of the
- * slider, as the segment layer is.
+ * shows, cancels or hides the audio envelope of the source of the clip (ADR 056), chooses the
+ * audio track of a source with two or more audio streams (ADR 070), moves the clip, removes it,
+ * or clears the timeline. The labels are interactive, and interactive content cannot be inside
+ * the `role="slider"` element of the lane, so they are a sibling of the slider, as the segment
+ * layer is.
  *
  * Both read the place of each clip from the virtual axis of the timeline store, so they agree
  * with the segments and the playhead by construction: every position is a percent of the same
@@ -24,10 +25,21 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useMediaStore, type MediaStoreState } from "@/features/media";
+import {
+  audioOverrideStore,
+  useAudioOverrides,
+  useMediaStore,
+  type MediaStoreState,
+} from "@/features/media";
 import { useShallow } from "zustand/react/shallow";
 import {
   IDLE_WAVEFORM_SOURCE,
@@ -43,6 +55,12 @@ import {
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
+import {
+  audioTrackItemText,
+  presentAudioTrackMenu,
+  type AudioTrackMenu,
+  type AudioTrackTranslate,
+} from "./audioTrackMenu";
 import { calculateClipBarLayouts } from "./clipBarLayout";
 
 const selectVirtual = (state: TimelineStoreState) => state.virtual;
@@ -76,6 +94,57 @@ function runWaveformAction(action: WaveformMenuAction, sourceId: string): void {
       waveformController.hide(sourceId);
       return;
   }
+}
+
+/**
+ * The "Audio Track" submenu of the source of a clip (ADR 070). Each item is a radio item, and the
+ * effective stream has the mark. The note is a label under the items, not an item, so it cannot be
+ * chosen.
+ */
+function AudioTrackSubmenu({
+  sourceId,
+  menu,
+}: {
+  sourceId: string;
+  menu: AudioTrackMenu;
+}) {
+  const { t } = useTranslation();
+  const translate = t as unknown as AudioTrackTranslate;
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>{t("timeline.clip.audioTrack")}</DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="max-w-80">
+        <DropdownMenuRadioGroup
+          value={menu.checkedIndex === null ? "" : String(menu.checkedIndex)}
+          onValueChange={(value) => {
+            const item = menu.items.find(
+              (entry) => String(entry.stream.index) === value,
+            );
+            if (item !== undefined) {
+              audioOverrideStore.getState().choose(sourceId, menu.probe, item.stream);
+            }
+          }}
+        >
+          {menu.items.map((item) => (
+            <DropdownMenuRadioItem
+              key={item.stream.index}
+              value={String(item.stream.index)}
+            >
+              {audioTrackItemText(item, translate)}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        {menu.showsPreviewNote ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="font-normal whitespace-normal">
+              {t("timeline.clip.audioTrackPreviewNote")}
+            </DropdownMenuLabel>
+          </>
+        ) : null}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
 }
 
 /** The hatch of a bar: the part of a source that no segment keeps (see the source bar note). */
@@ -118,6 +187,7 @@ export function ClipLabels({
   const sources = useMediaStore(selectSources);
   const waveformPhases = useWaveformStore(useShallow(selectWaveformPhases));
   const runningSourceId = useWaveformStore(selectRunningSourceId);
+  const audioOverrides = useAudioOverrides();
   const waveformSources = Object.fromEntries(
     Object.entries(waveformPhases).map(([id, phase]) => [
       id,
@@ -140,6 +210,10 @@ export function ClipLabels({
             sources: waveformSources,
             runningSourceId,
           },
+        );
+        const audioTracks = presentAudioTrackMenu(
+          sources[layout.sourceId]?.probe,
+          audioOverrides[layout.sourceId],
         );
         return (
           <div
@@ -171,6 +245,9 @@ export function ClipLabels({
                 >
                   {t(WAVEFORM_ITEM_KEYS[waveform.action])}
                 </DropdownMenuItem>
+                {audioTracks === null ? null : (
+                  <AudioTrackSubmenu sourceId={layout.sourceId} menu={audioTracks} />
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   disabled={layout.index === 0}

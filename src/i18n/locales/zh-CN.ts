@@ -261,6 +261,13 @@ export const zhCN: TranslationCatalog = {
       showWaveform: "显示波形",
       cancelWaveform: "取消波形计算",
       hideWaveform: "隐藏波形",
+      audioTrack: "音轨",
+      audioTrackNamed_other: "音轨 {{number}}：{{name}}（{{codec}}，{{count}} 声道）",
+      audioTrackUnnamed_other: "音轨 {{number}}（{{codec}}，{{count}} 声道）",
+      audioTrackNamedNoChannels: "音轨 {{number}}：{{name}}（{{codec}}）",
+      audioTrackUnnamedNoChannels: "音轨 {{number}}（{{codec}}）",
+      audioTrackUnknownCodec: "未知编解码器",
+      audioTrackPreviewNote: "预览播放的音轨可能与导出使用的音轨不同。",
       moveLeft: "左移该视频",
       moveRight: "右移该视频",
       remove: "移除该视频",
@@ -963,6 +970,8 @@ export const zhCN: TranslationCatalog = {
     sourceNotFile: "所选源路径不是常规文件。",
     sourceRevisionMismatch:
       "打开之后，磁盘上的视频文件已更改，因此导出已停止。已标记的片段可能不再指向相同的帧。",
+    audioStreamChanged:
+      "为视频文件选择的音轨已不在该文件中，或在打开文件后已更改，因此导出已停止。请重新导入该文件。之后如果其视频的菜单中有“音轨”，请重新选择音轨。",
     outputPathInvalid: "导出目标路径无效。",
     outputDirectoryMissing: "导出目标文件夹不存在。",
     outputEqualsSource: "导出目标不能与源文件相同。",
@@ -1011,6 +1020,8 @@ export const zhCN: TranslationCatalog = {
     commandExecutionFailed: "无法运行音频测量。",
     preparationTimedOut:
       "无法在限定时间内完成测量准备。某个驱动器或共享位置可能没有响应。",
+    audioStreamChanged:
+      "为视频文件选择的音轨已不在该文件中，或在打开文件后已更改。请重新导入该文件。之后如果其视频的菜单中有“音轨”，请重新选择音轨。",
   },
   frameExportError: {
     frameExportRunning: "另一个帧导出仍在进行。请在其结束后重试。",
