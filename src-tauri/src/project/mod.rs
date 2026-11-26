@@ -1,7 +1,7 @@
 //! Persistence for versioned QuipClip project files.
 
 use crate::time::{FrameCount, Pts, Rational, TickCount};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -13,6 +13,9 @@ use std::path::Path;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// The largest number of characters (Unicode scalar values) in the name of a segment (ADR 065).
+pub const SEGMENT_NAME_MAX_CHARS: usize = 80;
 
 /// A project document stored in a `.qcproj` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +87,46 @@ pub struct Segment {
     pub in_pts: Pts,
     pub out_clip_id: String,
     pub out_pts: Pts,
+    /// The name of the segment, or `None` for a segment with no name (ADR 065). The file has no
+    /// `name` field for a segment with no name: the field is not written for `None`, and the
+    /// loader refuses `null`. `validate_project` refuses a name that `is_valid_segment_name`
+    /// refuses, when a document is read and when one is written.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_name"
+    )]
+    pub name: Option<String>,
+}
+
+/// Reads a `name` field that is present. Only a string is a name, so `null` is a JSON error. An
+/// absent field is `None` through `serde(default)`, and never reaches this function.
+fn deserialize_present_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
+/// True when the text is a valid segment name by the rule of ADR 065, the rule of
+/// `isValidSegmentName` in `src/features/timeline/segmentName.ts`:
+///
+/// - 1 to 80 characters, each one Unicode scalar value;
+/// - no character with the Unicode property `White_Space` (`char::is_whitespace`) at the start or
+///   at the end;
+/// - no control character of the general category `Cc` (`char::is_control`), no U+2028 and no
+///   U+2029.
+///
+/// A Rust string cannot hold a surrogate without its pair, so that condition needs no test here:
+/// the JSON reader refuses such a string.
+pub fn is_valid_segment_name(name: &str) -> bool {
+    let count = name.chars().count();
+    (1..=SEGMENT_NAME_MAX_CHARS).contains(&count)
+        && !name.chars().next().is_some_and(char::is_whitespace)
+        && !name.chars().next_back().is_some_and(char::is_whitespace)
+        && !name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
 }
 
 /// A failure to read, validate, or save a project document.
@@ -153,6 +196,9 @@ pub enum ProjectValidationError {
     InvalidSegmentRange {
         index: usize,
     },
+    InvalidSegmentName {
+        index: usize,
+    },
 }
 
 impl fmt::Display for ProjectValidationError {
@@ -205,6 +251,10 @@ impl fmt::Display for ProjectValidationError {
             Self::InvalidSegmentRange { index } => write!(
                 formatter,
                 "segments[{index}] must lie in its clip ranges, in sequence order, in the one form of ADR 052"
+            ),
+            Self::InvalidSegmentName { index } => write!(
+                formatter,
+                "segments[{index}].name must have 1 to {SEGMENT_NAME_MAX_CHARS} characters, no white space at either end, and no control character or line separator (ADR 065)"
             ),
         }
     }
@@ -369,6 +419,13 @@ fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError>
         }
         if !segment_ids.insert(segment.id.as_str()) {
             return Err(ProjectValidationError::DuplicateSegmentId { index });
+        }
+        if segment
+            .name
+            .as_deref()
+            .is_some_and(|name| !is_valid_segment_name(name))
+        {
+            return Err(ProjectValidationError::InvalidSegmentName { index });
         }
         validate_segment(index, segment, &clip_indexes, &clip_sources, &project.clips)?;
     }
@@ -548,6 +605,7 @@ mod tests {
             in_pts: Pts::new(in_pts),
             out_clip_id: clip.to_owned(),
             out_pts: Pts::new(out_pts),
+            name: None,
         }
     }
 
@@ -640,6 +698,7 @@ mod tests {
             in_pts: Pts::new(10),
             out_clip_id: "c3".to_owned(),
             out_pts: Pts::new(9000),
+            name: None,
         }];
         assert!(matches!(
             validate_project(&project),
@@ -769,6 +828,145 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    /// The text of a case of `src/features/timeline/segmentNameCases.json`, or `None` when the text
+    /// holds a surrogate without its pair, which a Rust string cannot hold.
+    fn shared_name_case_text(case: &serde_json::Value) -> Option<String> {
+        let base = match case.get("text") {
+            Some(text) => text.as_str().expect("a case text is a string").to_owned(),
+            None => {
+                let units: Vec<u16> = case["utf16"]
+                    .as_array()
+                    .expect("a case without text has UTF-16 units")
+                    .iter()
+                    .map(|unit| u16::try_from(unit.as_u64().expect("a unit")).expect("a unit"))
+                    .collect();
+                String::from_utf16(&units).ok()?
+            }
+        };
+        let repeat = case
+            .get("repeat")
+            .map_or(1, |repeat| repeat.as_u64().expect("a repeat count"));
+        Some(base.repeat(usize::try_from(repeat).expect("a small repeat count")))
+    }
+
+    /// The samples of `src/features/timeline/segmentNameCases.json`, which the vitest of
+    /// `isValidSegmentName` in `src/features/timeline/segmentName.test.ts` runs too, so the two
+    /// rules of ADR 065 cannot drift.
+    #[test]
+    fn segment_names_agree_with_the_shared_cases_of_the_frontend() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/features/timeline/segmentNameCases.json"
+        ))
+        .expect("the shared cases are JSON");
+        let cases = table["cases"].as_array().expect("the cases are a list");
+        assert!(cases.len() >= 30, "the shared cases were read");
+        for case in cases {
+            let label = case["name"].as_str().expect("each case has a name");
+            let valid = case["valid"]
+                .as_bool()
+                .expect("each case says whether it is valid");
+            let Some(text) = shared_name_case_text(case) else {
+                // A lone surrogate: the JSON reader refuses the document before validation.
+                assert!(!valid, "{label}: a lone surrogate is never valid");
+                let surrogate = case["utf16"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|unit| format!("\\u{:04x}", unit.as_u64().unwrap()))
+                    .collect::<String>();
+                let document = EXAMPLE.replace(
+                    r#""outPts":"27000"}"#,
+                    &format!(r#""outPts":"27000","name":"{surrogate}"}}"#),
+                );
+                assert!(
+                    serde_json::from_str::<ProjectFile>(&document).is_err(),
+                    "{label}: the reader refuses the document"
+                );
+                continue;
+            };
+            assert_eq!(is_valid_segment_name(&text), valid, "{label}");
+            let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+            project.segments[0].name = Some(text.clone());
+            let checked = validate_project(&project);
+            if valid {
+                assert!(checked.is_ok(), "{label}");
+                // The written document carries the name, and the reader gives it back.
+                let json = serde_json::to_string(&project).unwrap();
+                let read: ProjectFile = serde_json::from_str(&json).unwrap();
+                assert_eq!(
+                    read.segments[0].name.as_deref(),
+                    Some(text.as_str()),
+                    "{label}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        checked,
+                        Err(ProjectValidationError::InvalidSegmentName { index: 0 })
+                    ),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_segment_with_no_name_has_no_name_field() {
+        let project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        assert!(project
+            .segments
+            .iter()
+            .all(|segment| segment.name.is_none()));
+        let value = serde_json::to_value(&project).unwrap();
+        for segment in value["segments"].as_array().unwrap() {
+            assert!(segment.get("name").is_none());
+        }
+    }
+
+    #[test]
+    fn refuses_null_for_a_name() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["segments"][0]["name"] = serde_json::Value::Null;
+        assert_json_error(value.clone());
+        value["segments"][0]["name"] = serde_json::json!(5);
+        assert_json_error(value);
+    }
+
+    #[test]
+    fn loads_and_saves_a_named_segment_and_refuses_a_bad_name_both_ways() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("named.qcproj");
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["segments"][1]["name"] = serde_json::json!("Intro 😀");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let project = load(&path).unwrap();
+        assert_eq!(project.segments[1].name.as_deref(), Some("Intro 😀"));
+        assert_eq!(project.segments[0].name, None);
+        save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), project);
+
+        // The reader refuses a name that is not valid.
+        value["segments"][1]["name"] = serde_json::json!(" Intro");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(ProjectFileError::Validation(
+                ProjectValidationError::InvalidSegmentName { index: 1 }
+            ))
+        ));
+        // The writer refuses it too, and leaves the file as it was.
+        let before = fs::read(&path).unwrap();
+        let mut bad = project;
+        bad.segments[2].name = Some(String::new());
+        assert!(matches!(
+            save(&path, &bad),
+            Err(ProjectFileError::Validation(
+                ProjectValidationError::InvalidSegmentName { index: 2 }
+            ))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     fn assert_json_error(value: serde_json::Value) {

@@ -250,6 +250,26 @@ export interface TimelineActions {
   finishSegment: (outPts: Pts | null) => void;
 
   /**
+   * Gives a segment on the sequence a name, or removes its name, with one history entry
+   * (ADR 065). Undo and Redo restore the name with the segment.
+   *
+   * The store keeps only a valid name (`isValidSegmentName`), and a segment with no name has no
+   * `name` field. The rename dialog makes the name from the text of its field first
+   * (`normalizeSegmentNameInput`). Does nothing, with no history entry, for a name that is not
+   * valid, for an unknown identifier, for a segment that is not on the sequence, and for the name
+   * that the segment already has, which includes null for a segment with no name.
+   *
+   * The segment is named by its identifier and not through `currentSegmentId`, because the
+   * current segment can change while the rename dialog is open. After a change of the clips
+   * divided the segment, the name goes to the part that kept the identifier. The action changes
+   * neither the selection nor the pending In mark.
+   *
+   * @param segmentId Identifier of a segment on the sequence.
+   * @param name The new name, or null to remove the name.
+   */
+  renameSegment: (segmentId: string, name: string | null) => void;
+
+  /**
    * Removes every selected segment on the sequence, with one history entry, and leaves
    * nothing selected (ADR 045). Undo restores the segments and selects them again.
    * Does not select a neighbour, so the next Delete or Split cannot act on a segment the

@@ -170,6 +170,128 @@ export function resolveSegmentLabelTier(
   return "none";
 }
 
+/** The gap between the number and the name on the number line (`ml-1`). */
+export const SEGMENT_NAME_GAP_PX = 4;
+
+/**
+ * The classes of the name on the bar (ADR 065). The bar clips a name that is too long, with no
+ * ellipsis: a name can start with a character that paints nothing and is not `White_Space`, such
+ * as U+2800, and an ellipsis after it would show no letter at all.
+ */
+export const SEGMENT_BAR_NAME_CLASS =
+  "ml-1 min-w-0 overflow-hidden font-medium text-clip whitespace-nowrap";
+
+/**
+ * The horizontal margins of the label of a bar that shows a name, both sides together (`mx-1`):
+ * the margins of the number tier, in every tier. The line of the number then has one padding
+ * whatever the tier of the duration, so a name that shows at a width shows at every larger
+ * width (ADR 065).
+ */
+export const SEGMENT_NAMED_LABEL_MARGIN_PX = SEGMENT_NUMBER_LABEL_MARGIN_PX;
+
+/**
+ * True when the bar shows the name after the number (ADR 065): the segment has a name, the bar
+ * shows the number, and the line of the number has some room left after the margins of a named
+ * label (`SEGMENT_NAMED_LABEL_MARGIN_PX`), the number and the gap: more than 0 px. The room of
+ * that line alone decides, so the tier of the duration does not hide the name. The width of a
+ * name is not estimated: CSS fits a short name and clips a long one (`SEGMENT_BAR_NAME_CLASS`).
+ * The number does not shrink, so the name never pushes it out.
+ *
+ * @param tier The tier of the bar (`resolveSegmentLabelTier`).
+ * @param widthPx The width of the segment in CSS pixels.
+ * @param widths The widths of the tiers of this segment (`measureSegmentLabel`).
+ * @param name The name of the segment, or undefined for no name.
+ */
+export function showsSegmentName(
+  tier: SegmentLabelTier,
+  widthPx: number,
+  widths: SegmentLabelWidths,
+  name: string | undefined,
+): boolean {
+  if (
+    tier === "none" ||
+    name === undefined ||
+    name === "" ||
+    !Number.isFinite(widthPx)
+  ) {
+    return false;
+  }
+  const numberPx = widths.numberTierPx - SEGMENT_NUMBER_LABEL_MARGIN_PX;
+  const roomPx =
+    widthPx - SEGMENT_NAMED_LABEL_MARGIN_PX - numberPx - SEGMENT_NAME_GAP_PX;
+  return roomPx > 0;
+}
+
+/**
+ * The classes of the body of the segment tooltip. The tooltip has a largest width (`max-w-xs`),
+ * and its content is a flex row, where a child keeps the least width of its longest word unless
+ * it can shrink. `min-w-0` lets the body shrink to the tooltip, so a long name wraps inside it.
+ */
+export const SEGMENT_TOOLTIP_BODY_CLASS = "flex min-w-0 flex-col gap-1.5";
+
+/**
+ * The classes of the title of the segment tooltip: the number and the name (ADR 065). A name of
+ * 80 characters can be one word with no break, such as 80 `W`, so the title breaks anywhere
+ * (`wrap-anywhere`) and never runs out of the tooltip.
+ */
+export const SEGMENT_TOOLTIP_TITLE_CLASS = "font-semibold wrap-anywhere";
+
+/** A catalog key and its values. */
+export interface SegmentText<K extends string> {
+  readonly key: K;
+  readonly values: Readonly<Record<string, string | number>>;
+}
+
+/**
+ * The form of `t` that takes a `SegmentText`. The typed `t` of i18next checks the values of each
+ * key, and it cannot match a union of keys with their values.
+ */
+export type TranslateSegmentText = (
+  key: string,
+  values: Readonly<Record<string, string | number>>,
+) => string;
+
+/**
+ * The title of the segment tooltip: the number, and the name after it when the segment has one
+ * (ADR 065).
+ */
+export function resolveSegmentTitle(
+  number: number,
+  name: string | undefined,
+): SegmentText<"timeline.segment" | "timeline.segmentNamed"> {
+  return name === undefined
+    ? { key: "timeline.segment", values: { index: number } }
+    : { key: "timeline.segmentNamed", values: { index: number, name } };
+}
+
+/**
+ * The accessible name of a segment: the number, the name when the segment has one (ADR 065), and
+ * the In time, the Out time and the duration when they are known.
+ */
+export function resolveSegmentAccessibleName(
+  number: number,
+  name: string | undefined,
+  times: Pick<SegmentTimes, "inTime" | "outTime" | "duration"> | null,
+): SegmentText<
+  | "timeline.segment"
+  | "timeline.segmentNamed"
+  | "timeline.segmentLabel"
+  | "timeline.segmentLabelNamed"
+> {
+  if (times === null) {
+    return resolveSegmentTitle(number, name);
+  }
+  const values = {
+    index: number,
+    inTime: times.inTime,
+    outTime: times.outTime,
+    duration: times.duration,
+  };
+  return name === undefined
+    ? { key: "timeline.segmentLabel", values }
+    : { key: "timeline.segmentLabelNamed", values: { ...values, name } };
+}
+
 /** The left and the width of a tooltip anchor, as CSS percentages of the lane. */
 export interface SegmentAnchor {
   readonly left: string;

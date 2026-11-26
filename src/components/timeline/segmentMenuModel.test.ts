@@ -23,6 +23,7 @@ import { zhCN } from "@/i18n/locales/zh-CN";
 import type { Pts, Segment, TickCount } from "@/types/project";
 import {
   SEGMENT_MENU_ACTIONS,
+  SEGMENT_MENU_DIALOG_ACTIONS,
   SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY,
   SEGMENT_MENU_LABEL_KEYS,
   SEGMENT_MENU_LAYOUT,
@@ -196,14 +197,20 @@ function enabledOf(entries: readonly SegmentMenuEntry[]): Record<string, boolean
 }
 
 describe("the layout of the segment menu", () => {
-  it("holds Go to In, Go to Out, Play Segment, a separator and Delete Segment, in that order", () => {
+  it("holds Go to In, Go to Out, Play Segment, Rename… between two separators, and Delete Segment", () => {
     expect(SEGMENT_MENU_LAYOUT).toStrictEqual([
       { kind: "item", action: "goToSegmentIn" },
       { kind: "item", action: "goToSegmentOut" },
       { kind: "item", action: "playSegment" },
       { kind: "separator" },
+      { kind: "item", action: "renameSegment" },
+      { kind: "separator" },
       { kind: "item", action: "deleteSegment" },
     ]);
+  });
+
+  it("runs only Rename… after the menu closes, because it opens a dialog (ADR 065)", () => {
+    expect([...SEGMENT_MENU_DIALOG_ACTIONS]).toStrictEqual(["renameSegment"]);
   });
 
   it("names each action of the menu once, and each is an action of the key table", () => {
@@ -234,6 +241,8 @@ describe("the layout of the segment menu", () => {
     expect(lookup(en, SEGMENT_MENU_PAUSE_LABEL_KEY)).toBe("Pause");
     expect(lookup(zhCN, SEGMENT_MENU_PAUSE_LABEL_KEY)).not.toBe("");
     expect(lookup(en, SEGMENT_MENU_LABEL_KEYS.deleteSegment)).toBe("Delete Segment");
+    expect(lookup(en, SEGMENT_MENU_LABEL_KEYS.renameSegment)).toBe("Rename…");
+    expect(lookup(zhCN, SEGMENT_MENU_LABEL_KEYS.renameSegment)).toBe("重命名…");
   });
 });
 
@@ -241,7 +250,15 @@ describe("buildSegmentMenuEntries", () => {
   it("gives the entries in the order of the layout", () => {
     expect(
       build("macos").map((entry) => (entry.kind === "item" ? entry.action : "|")),
-    ).toEqual(["goToSegmentIn", "goToSegmentOut", "playSegment", "|", "deleteSegment"]);
+    ).toEqual([
+      "goToSegmentIn",
+      "goToSegmentOut",
+      "playSegment",
+      "|",
+      "renameSegment",
+      "|",
+      "deleteSegment",
+    ]);
   });
 
   it("carries the accelerator of the binding table on macOS, which AppKit draws as ⇧I and ⌫", () => {
@@ -271,6 +288,13 @@ describe("buildSegmentMenuEntries", () => {
         shortcut: "/",
         accelerator: "Slash",
       },
+      // AppKit draws the accelerator F2 as F2 (ADR 065).
+      {
+        label: "Rename…",
+        text: "Rename…",
+        shortcut: "F2",
+        accelerator: "F2",
+      },
       // The Mac key labelled delete sends Backspace, so the menu shows ⌫ (`shortcutFor`).
       {
         label: "Delete Segment",
@@ -292,6 +316,7 @@ describe("buildSegmentMenuEntries", () => {
       { text: "Go to In\tShift+I", shortcut: "Shift+I", accelerator: null },
       { text: "Go to Out\tShift+O", shortcut: "Shift+O", accelerator: null },
       { text: "Play Segment\t/", shortcut: "/", accelerator: null },
+      { text: "Rename…\tF2", shortcut: "F2", accelerator: null },
       { text: "Delete Segment\tDelete", shortcut: "Delete", accelerator: null },
     ]);
   });
@@ -303,11 +328,12 @@ describe("buildSegmentMenuEntries", () => {
       "跳转到入点\tShift+I",
       "跳转到出点\tShift+O",
       "播放片段\t/",
+      "重命名…\tF2",
       "删除片段\tDelete",
     ]);
     expect(
       items(build("macos", snapshot(), { zh: true })).map((item) => item.text),
-    ).toEqual(["跳转到入点", "跳转到出点", "播放片段", "删除片段"]);
+    ).toEqual(["跳转到入点", "跳转到出点", "播放片段", "重命名…", "删除片段"]);
   });
 
   it("doubles an ampersand, so the native menu does not read it as a mnemonic", () => {
@@ -345,6 +371,7 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentIn: true,
       goToSegmentOut: true,
       playSegment: true,
+      renameSegment: true,
       deleteSegment: true,
     });
   });
@@ -407,6 +434,7 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentIn: false,
       goToSegmentOut: true,
       playSegment: true,
+      renameSegment: true,
       deleteSegment: true,
     });
 
@@ -420,23 +448,35 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentOut: false,
       // Play Segment needs a ready calibration (ADR 026).
       playSegment: false,
+      // Rename reads no time (ADR 065).
+      renameSegment: true,
       deleteSegment: true,
     });
 
     // A drag trim locks the edit keys (ADR 030).
     expect(enabledOf(build("macos", snapshot({ isTrimDragging: true })))).toMatchObject(
       {
+        renameSegment: false,
         deleteSegment: false,
       },
     );
 
-    // With no active source, nothing can act.
+    // With no active source, nothing that reads the preview can act. Rename reads only the
+    // current segment (ADR 065), so it stays available while the preview loads a clip.
     expect(enabledOf(build("macos", snapshot({ probe: null })))).toStrictEqual({
       goToSegmentIn: false,
       goToSegmentOut: false,
       playSegment: false,
+      renameSegment: true,
       deleteSegment: false,
     });
+    expect(
+      enabledOf(build("macos", snapshot({ playback: { isReady: false } }))),
+    ).toMatchObject({ renameSegment: true, deleteSegment: false });
+    // An armed edge press locks Rename, before it becomes a trim (ADR 065).
+    expect(
+      enabledOf(build("macos", { ...snapshot(), isTrimArmed: true })),
+    ).toMatchObject({ renameSegment: false, deleteSegment: true });
   });
 
   it("names the command that each item plans", () => {
@@ -444,11 +484,12 @@ describe("buildSegmentMenuEntries", () => {
       "seekToPts",
       "seekToPts",
       "playSegment",
+      "renameSegment",
       "deleteSegment",
     ]);
     expect(
       items(build("macos", snapshot({ probe: null }))).map((item) => item.commandKind),
-    ).toStrictEqual([null, null, null, null]);
+    ).toStrictEqual([null, null, null, "renameSegment", null]);
   });
 
   describe("Play Segment while a segment plays", () => {
@@ -510,6 +551,7 @@ describe("buildSegmentMenuEntries", () => {
         ["Go to In", true],
         ["Go to Out", true],
         ["Pause", true],
+        ["Rename…", true],
         ["Delete Segment", true],
       ]);
     });
@@ -536,6 +578,9 @@ describe("planSegmentMenuCommand", () => {
     ).toStrictEqual({
       kind: "deleteSegment",
     });
+    expect(
+      planSegmentMenuCommand("renameSegment", SEGMENT_B_TARGET, state),
+    ).toStrictEqual({ kind: "renameSegment", segmentId: "b" });
     for (const action of SEGMENT_MENU_ACTIONS) {
       expect(planSegmentMenuCommand(action, SEGMENT_B_TARGET, state)).toStrictEqual(
         planShortcutCommand(action, state),
@@ -580,8 +625,8 @@ describe("planSegmentMenuCommand", () => {
     expect(
       planSegmentMenuCommand("deleteSegment", SELECTION_TARGET, state, "deleteSegment"),
     ).toStrictEqual({ kind: "deleteSegment" });
-    // Go to In and Go to Out need one current segment, and Play Segment would act on the
-    // segment at the playhead, which the menu did not name (ADR 045).
+    // Go to In, Go to Out and Rename need one current segment, and Play Segment would act on
+    // the segment at the playhead, which the menu did not name (ADR 045, ADR 065).
     for (const action of SEGMENT_MENU_ACTIONS) {
       if (action !== "deleteSegment") {
         expect(planSegmentMenuCommand(action, SELECTION_TARGET, state)).toBeNull();

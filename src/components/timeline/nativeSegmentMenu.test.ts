@@ -37,6 +37,8 @@ const tauri = vi.hoisted(() => {
   class FakeMenu {
     readonly items: readonly unknown[];
     readonly popup = vi.fn((_at?: unknown) => Promise.resolve());
+    readonly insert = vi.fn((_item: unknown, _position: number) => Promise.resolve());
+    readonly remove = vi.fn((_item: unknown) => Promise.resolve());
     readonly close = vi.fn(() => Promise.resolve());
     constructor(items: readonly unknown[]) {
       this.items = items;
@@ -523,6 +525,267 @@ describe("createTauriSegmentMenuBackend", () => {
     const backend = createTauriSegmentMenuBackend();
     await backend.show(ENTRIES, null, handlers());
     await backend.show([item("deleteSegment", "Delete Segment")], null, handlers());
+    expect(tauri.menuNew).toHaveBeenCalledTimes(2);
+    expect(menuAt(1).popup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the Rename item of each show (ADR 065)", () => {
+  // Go to In, a separator, Rename…, a separator and Delete Segment: Rename is at position 2.
+  const WITH_RENAME: readonly SegmentMenuEntry[] = [
+    item("goToSegmentIn", "Go to In", { accelerator: "Shift+KeyI" }),
+    { kind: "separator" },
+    item("renameSegment", "Rename…", { accelerator: "F2" }),
+    { kind: "separator" },
+    item("deleteSegment", "Delete Segment", { accelerator: "Backspace" }),
+  ];
+
+  beforeEach(() => {
+    tauri.state.inside = true;
+    tauri.state.failNextMenu = false;
+    tauri.state.holdNextMenu = null;
+    tauri.state.items = [];
+    tauri.state.menus = [];
+    tauri.menuItemNew.mockClear();
+    tauri.menuNew.mockClear();
+  });
+
+  /** The created items with the text `Rename…`, in the order of creation. */
+  const renameItems = () =>
+    tauri.state.items.filter((created) => created.options.text === "Rename…");
+
+  it("gives each show a new Rename item at its place, and releases the item before", async () => {
+    const backend = createTauriSegmentMenuBackend();
+    await backend.show(WITH_RENAME, null, handlers());
+    expect(renameItems()).toHaveLength(1);
+    await backend.show(WITH_RENAME, null, handlers());
+    // The menu is still built once. Only the Rename item is new.
+    expect(tauri.menuNew).toHaveBeenCalledOnce();
+    expect(tauri.menuItemNew).toHaveBeenCalledTimes(4);
+    const [first, second] = renameItems();
+    expect(second?.options).toMatchObject({
+      text: "Rename…",
+      enabled: true,
+      accelerator: "F2",
+    });
+    expect(menuAt(0).insert).toHaveBeenCalledExactlyOnceWith(second, 2);
+    expect(menuAt(0).remove).toHaveBeenCalledExactlyOnceWith(first);
+    expect(first?.close).toHaveBeenCalledOnce();
+    expect(second?.close).not.toHaveBeenCalled();
+    // The new item carries its values, so no value call goes to the Rename item.
+    expect(second?.setText).not.toHaveBeenCalled();
+    expect(second?.setEnabled).not.toHaveBeenCalled();
+    // The release of the menu frees the Rename item of the latest show.
+    backend.dispose();
+    await vi.waitFor(() => expect(second?.close).toHaveBeenCalledOnce());
+    expect(first?.close).toHaveBeenCalledOnce();
+  });
+
+  it("drops a Rename event of a menu that a later menu replaced, also after the later popup started", async () => {
+    // The user chooses Rename in the menu of A. The popup reply of A comes first, the user opens
+    // the menu of B, and the item event of A arrives after the popup of B started, at any delay.
+    const backend = createTauriSegmentMenuBackend();
+    const ofA = vi.fn();
+    const ofB = vi.fn();
+    await backend.show(WITH_RENAME, null, handlers(ofA));
+    const renameOfA = renameItems()[0];
+    await backend.show(WITH_RENAME, null, handlers(ofB));
+    renameOfA?.options.action?.("native-id");
+    expect(ofA).not.toHaveBeenCalled();
+    expect(ofB).not.toHaveBeenCalled();
+    // The choice of the menu of B still runs.
+    renameItems()[1]?.options.action?.("native-id");
+    expect(ofB).toHaveBeenCalledExactlyOnceWith("renameSegment");
+  });
+
+  it("takes a quick Rename choice in a menu after one that ended with no choice", async () => {
+    // The user dismisses the menu of A, opens the menu of B later, and chooses Rename at once.
+    const backend = createTauriSegmentMenuBackend();
+    const ofA = vi.fn();
+    const ofB = vi.fn();
+    await backend.show(WITH_RENAME, null, handlers(ofA));
+    await backend.show(WITH_RENAME, null, handlers(ofB));
+    renameItems()[1]?.options.action?.("native-id");
+    expect(ofB).toHaveBeenCalledExactlyOnceWith("renameSegment");
+    expect(ofA).not.toHaveBeenCalled();
+  });
+
+  it("gives a Rename event of the latest show to that show after its popup settled", async () => {
+    const backend = createTauriSegmentMenuBackend();
+    const select = vi.fn();
+    await backend.show(WITH_RENAME, null, handlers(select));
+    renameItems()[0]?.options.action?.("native-id");
+    renameItems()[0]?.options.action?.("native-id");
+    expect(select).toHaveBeenCalledExactlyOnceWith("renameSegment");
+  });
+
+  it("keeps the other items as they were: the same item for every show", async () => {
+    const backend = createTauriSegmentMenuBackend();
+    const ofA = vi.fn();
+    const ofB = vi.fn();
+    await backend.show(WITH_RENAME, null, handlers(ofA));
+    await backend.show(WITH_RENAME, null, handlers(ofB));
+    // Delete Segment is the item of the first build, and its event goes to the latest show.
+    const remove = tauri.state.items.find(
+      (created) => created.options.text === "Delete Segment",
+    );
+    remove?.options.action?.("native-id");
+    expect(ofB).toHaveBeenCalledExactlyOnceWith("deleteSegment");
+    expect(
+      tauri.state.items.filter((created) => created.options.text === "Delete Segment"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the Rename choice of a show after a late ordinary event reached that show", async () => {
+    // The user chooses Go to In in the menu of A. The popup reply of A comes first, the user
+    // opens the menu of B, and the Go to In event of A arrives after the popup of B started. The
+    // ordinary routing gives it to B, as before this record. The real Rename choice of B still
+    // runs, once.
+    const backend = createTauriSegmentMenuBackend();
+    const ofA = vi.fn();
+    const ofB = vi.fn<(action: SegmentMenuAction) => void>();
+    await backend.show(WITH_RENAME, null, handlers(ofA));
+    await backend.show(WITH_RENAME, null, handlers(ofB));
+    const goToIn = tauri.state.items.find(
+      (created) => created.options.text === "Go to In",
+    );
+    goToIn?.options.action?.("native-id");
+    renameItems()[1]?.options.action?.("native-id");
+    renameItems()[1]?.options.action?.("native-id");
+    expect(ofB.mock.calls.map(([action]) => action)).toStrictEqual([
+      "goToSegmentIn",
+      "renameSegment",
+    ]);
+    expect(ofA).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "evicts a menu whose swap never settles, and frees it when the swap settles (%s)",
+    async (settle) => {
+      vi.useFakeTimers();
+      try {
+        const backend = createTauriSegmentMenuBackend();
+        await backend.show(WITH_RENAME, null, handlers());
+        let finish: (ok: boolean) => void = () => {};
+        menuAt(0).insert.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              finish = (ok) => (ok ? resolve() : reject(new Error("late insert")));
+            }),
+        );
+        const hung = backend.show(WITH_RENAME, null, handlers());
+        const failed = expect(hung).rejects.toThrow("not ready in time");
+        await vi.advanceTimersByTimeAsync(SEGMENT_MENU_PREPARE_TIMEOUT_MS);
+        await failed;
+
+        // The next request does not wait behind the hung swap: it opens with a new menu.
+        await backend.show(WITH_RENAME, null, handlers());
+        expect(tauri.menuNew).toHaveBeenCalledTimes(2);
+        expect(menuAt(1).popup).toHaveBeenCalledOnce();
+        // The new menu opens again before the old reply settles. This show swaps on the queue
+        // of the new menu, which does not wait for the old one.
+        const select = vi.fn();
+        await backend.show(WITH_RENAME, null, handlers(select));
+        expect(menuAt(1).popup).toHaveBeenCalledTimes(2);
+        expect(menuAt(1).insert).toHaveBeenCalledOnce();
+
+        // The old insert settles late. The old menu and what it holds are freed, the old menu
+        // gets no remove, and the new menu does not change.
+        const pendingItem = renameItems()[1];
+        finish(settle === "resolve");
+        await vi.waitFor(() => expect(menuAt(0).close).toHaveBeenCalled());
+        expect(pendingItem?.close).toHaveBeenCalled();
+        expect(menuAt(0).remove).not.toHaveBeenCalled();
+        expect(menuAt(1).close).not.toHaveBeenCalled();
+        expect(menuAt(1).insert).toHaveBeenCalledOnce();
+        // The Rename item of the latest show still reaches its show.
+        renameItems()[3]?.options.action?.("native-id");
+        expect(select).toHaveBeenCalledExactlyOnceWith("renameSegment");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("sends no remove to a menu that a late insert finds evicted, and frees it at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createTauriSegmentMenuBackend();
+      await backend.show(WITH_RENAME, null, handlers());
+      let finish = () => {};
+      menuAt(0).insert.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      // A remove on the evicted menu would never get its reply.
+      menuAt(0).remove.mockImplementation(() => new Promise<void>(() => {}));
+      const hung = backend.show(WITH_RENAME, null, handlers());
+      const failed = expect(hung).rejects.toThrow("not ready in time");
+      await vi.advanceTimersByTimeAsync(SEGMENT_MENU_PREPARE_TIMEOUT_MS);
+      await failed;
+      await backend.show(WITH_RENAME, null, handlers());
+
+      const [oldItem, newItem] = renameItems();
+      finish();
+      await vi.waitFor(() => expect(menuAt(0).close).toHaveBeenCalledOnce());
+      expect(menuAt(0).remove).not.toHaveBeenCalled();
+      expect(newItem?.close).toHaveBeenCalled();
+      expect(oldItem?.close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not wait for a remove that never settles on an evicted menu", async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createTauriSegmentMenuBackend();
+      await backend.show(WITH_RENAME, null, handlers());
+      let finish = () => {};
+      menuAt(0).remove.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const hung = backend.show(WITH_RENAME, null, handlers());
+      const failed = expect(hung).rejects.toThrow("not ready in time");
+      await vi.advanceTimersByTimeAsync(SEGMENT_MENU_PREPARE_TIMEOUT_MS);
+      await failed;
+
+      // The replacement menu opens twice before the old remove settles. The second show swaps
+      // on the queue of the new menu, so it does not wait for the old remove.
+      await backend.show(WITH_RENAME, null, handlers());
+      await backend.show(WITH_RENAME, null, handlers());
+      expect(tauri.menuNew).toHaveBeenCalledTimes(2);
+      expect(menuAt(1).popup).toHaveBeenCalledTimes(2);
+      expect(menuAt(1).insert).toHaveBeenCalledOnce();
+      expect(menuAt(1).remove).toHaveBeenCalledOnce();
+
+      // The old remove settles late: the old menu is freed, and the new one stays.
+      finish();
+      await vi.waitFor(() => expect(menuAt(0).close).toHaveBeenCalled());
+      expect(menuAt(1).close).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("frees the menu when a swap fails, and builds it again at the next show", async () => {
+    const backend = createTauriSegmentMenuBackend();
+    await backend.show(WITH_RENAME, null, handlers());
+    menuAt(0).insert.mockImplementationOnce(() =>
+      Promise.reject(new Error("no insert")),
+    );
+    await expect(backend.show(WITH_RENAME, null, handlers())).rejects.toThrow(
+      "no insert",
+    );
+    await vi.waitFor(() => expect(menuAt(0).close).toHaveBeenCalledOnce());
+    // The item that could not go in is released too.
+    expect(renameItems()[1]?.close).toHaveBeenCalledOnce();
+    await backend.show(WITH_RENAME, null, handlers());
     expect(tauri.menuNew).toHaveBeenCalledTimes(2);
     expect(menuAt(1).popup).toHaveBeenCalledOnce();
   });

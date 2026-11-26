@@ -155,6 +155,25 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
       }),
   };
   const onError = vi.fn<(error: unknown) => void>();
+  // The timer of the dialog hand-off: the test runs the pending callbacks.
+  const timers: { callback: () => void; delayMs: number; stopped: boolean }[] = [];
+  const schedule = (callback: () => void, delayMs: number) => {
+    const entry = { callback, delayMs, stopped: false };
+    timers.push(entry);
+    return () => {
+      entry.stopped = true;
+    };
+  };
+  /** Runs every pending timer, as if its delay passed. */
+  const fireTimers = () => {
+    for (const entry of [...timers]) {
+      if (!entry.stopped) {
+        entry.stopped = true;
+        entry.callback();
+      }
+    }
+  };
+  const liveTimers = () => timers.filter((entry) => !entry.stopped);
   const menu = createSegmentContextMenu({
     timeline,
     readSnapshot,
@@ -165,6 +184,7 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     platform: "windows",
     translate,
     onError,
+    schedule,
   });
   const open = (request: Partial<SegmentContextMenuRequest> = {}) =>
     menu.open({
@@ -192,6 +212,8 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     onError,
     menu,
     open,
+    fireTimers,
+    liveTimers,
   };
 }
 
@@ -254,6 +276,8 @@ describe("createSegmentContextMenu", () => {
         "Go to In\tShift+I",
         "Go to Out\tShift+O",
         "Play Segment\t/",
+        "|",
+        "Rename…\tF2",
         "|",
         "Delete Segment\tDelete",
       ]);
@@ -562,6 +586,7 @@ describe("createSegmentContextMenu", () => {
         "goToSegmentIn",
         "goToSegmentOut",
         "playSegment",
+        "renameSegment",
       ] as const) {
         expect(itemOf(entries, action).enabled).toBe(false);
       }
@@ -595,6 +620,160 @@ describe("createSegmentContextMenu", () => {
         selectedSegmentIds: ["c"],
         currentSegmentId: "c",
       });
+    });
+  });
+
+  describe("Rename… (ADR 065)", () => {
+    const RENAME_B: ShortcutCommand = { kind: "renameSegment", segmentId: "b" };
+
+    it("opens the dialog after the menu closes, when the choice came first", async () => {
+      const harness = createHarness();
+      const menuOpenAtRun: boolean[] = [];
+      harness.runCommand.mockImplementation(() => {
+        menuOpenAtRun.push(harness.menuState.isOpen());
+      });
+      const closed = harness.open();
+      const show = harness.lastShow();
+      expect(itemOf(show.entries, "renameSegment").enabled).toBe(true);
+      show.popup();
+      show.select("renameSegment");
+      expect(harness.runCommand).not.toHaveBeenCalled();
+      show.close();
+      await closed;
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+      // The window keyboard layer has the keys back when the dialog opens.
+      expect(menuOpenAtRun).toStrictEqual([false]);
+    });
+
+    it("opens the dialog at once when the choice comes after the end of the menu", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.popup();
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+      show.select("renameSegment");
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+    });
+
+    it("opens the dialog at the first input after the grace period of a lost popup reply", () => {
+      const harness = createHarness();
+      void harness.open();
+      const lost = harness.lastShow();
+      lost.popup();
+      lost.select("renameSegment");
+      // The menu may still show within the grace period, so the dialog waits.
+      harness.input(NATIVE_CONTEXT_MENU_GRACE_MS - 1);
+      expect(harness.runCommand).not.toHaveBeenCalled();
+      harness.input(1);
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+      // The popup settles late, and nothing runs twice.
+      lost.close();
+      expect(harness.runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("opens the dialog for a late choice after the input closed a lost popup", () => {
+      const harness = createHarness();
+      void harness.open();
+      const lost = harness.lastShow();
+      lost.popup();
+      harness.input(NATIVE_CONTEXT_MENU_GRACE_MS);
+      expect(harness.menuState.isOpen()).toBe(false);
+      lost.select("renameSegment");
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+    });
+
+    it("checks its target again when the dialog would open", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.select("renameSegment");
+      // The segment of the menu is no longer current when the menu ends.
+      harness.timeline.getState().selectSegment("a");
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("opens no dialog while a dialog of the page is open when the menu ends", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.select("renameSegment");
+      harness.facts.isOverlayOpen = true;
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("does not wait for the end of the menu for an item that opens no dialog", () => {
+      const harness = createHarness();
+      void harness.open();
+      harness.lastShow().select("goToSegmentIn");
+      expect(harness.runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("does not open the dialog during a drag trim", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.select("renameSegment");
+      harness.facts.isTrimDragging = true;
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("opens the dialog when the popup reply never comes, after the grace period, once", () => {
+      const harness = createHarness();
+      void harness.open();
+      const lost = harness.lastShow();
+      lost.popup();
+      lost.select("renameSegment");
+      expect(harness.runCommand).not.toHaveBeenCalled();
+      // No input follows: the timer of the hand-off ends the wait.
+      expect(harness.liveTimers().map((entry) => entry.delayMs)).toStrictEqual([
+        NATIVE_CONTEXT_MENU_GRACE_MS,
+      ]);
+      harness.fireTimers();
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+      // The item event proved that the menu has gone, so the page has its keys back.
+      expect(harness.menuState.isOpen()).toBe(false);
+      // A popup reply after the timer changes nothing.
+      lost.close();
+      harness.fireTimers();
+      expect(harness.runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("stops the timer when the popup reply comes in time", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.popup();
+      show.select("renameSegment");
+      show.close();
+      await closed;
+      expect(harness.runCommand).toHaveBeenCalledOnce();
+      expect(harness.liveTimers()).toHaveLength(0);
+    });
+
+    it("leaves no timer of an earlier menu when a later menu opens", () => {
+      const harness = createHarness();
+      void harness.open({ segmentId: "a" });
+      const first = harness.lastShow();
+      first.popup();
+      first.select("renameSegment");
+      expect(harness.liveTimers()).toHaveLength(1);
+      // A later menu can open only after the mark of the first one closed, here by the input
+      // after the grace period. The first choice runs then, and its timer stops.
+      harness.input(NATIVE_CONTEXT_MENU_GRACE_MS);
+      expect(harness.runCommand).toHaveBeenCalledOnce();
+      expect(harness.liveTimers()).toHaveLength(0);
+      expect(harness.open({ segmentId: "b" })).not.toBeNull();
+      harness.fireTimers();
+      first.close();
+      expect(harness.runCommand).toHaveBeenCalledOnce();
     });
   });
 

@@ -1,0 +1,57 @@
+{
+  "description": "Shared samples of the rule of a segment name (ADR 065). The vitest of isValidSegmentName in segmentName.test.ts and the test of the project loader in src-tauri/src/project/mod.rs run every case. A case gives its text as `text`, or as UTF-16 code units in `utf16` when the text holds a lone surrogate, which JSON parsers of Rust refuse. `repeat` repeats the text that many times.",
+  "cases": [
+    { "name": "one letter", "text": "a", "valid": true },
+    { "name": "a word", "text": "Intro", "valid": true },
+    { "name": "a space inside", "text": "Part one", "valid": true },
+    { "name": "two spaces inside", "text": "Part  one", "valid": true },
+    { "name": "Han characters", "text": "开场白", "valid": true },
+    { "name": "80 letters", "text": "a", "repeat": 80, "valid": true },
+    {
+      "name": "80 characters outside the BMP",
+      "text": "😀",
+      "repeat": 80,
+      "valid": true
+    },
+    {
+      "name": "80 Han characters of plane 2",
+      "text": "𠀀",
+      "repeat": 80,
+      "valid": true
+    },
+    {
+      "name": "an emoji sequence with zero-width joiners",
+      "text": "👨\u200d👩\u200d👧",
+      "valid": true
+    },
+    { "name": "a no-break space inside", "text": "a\u00a0b", "valid": true },
+    { "name": "U+FEFF at the start", "text": "\ufeffA", "valid": true },
+    { "name": "a zero-width space at the start", "text": "\u200bA", "valid": true },
+    { "name": "a soft hyphen", "text": "a\u00adb", "valid": true },
+    { "name": "empty", "text": "", "valid": false },
+    { "name": "81 letters", "text": "a", "repeat": 81, "valid": false },
+    {
+      "name": "81 characters outside the BMP",
+      "text": "😀",
+      "repeat": 81,
+      "valid": false
+    },
+    { "name": "a space at the start", "text": " a", "valid": false },
+    { "name": "a space at the end", "text": "a ", "valid": false },
+    { "name": "only a space", "text": " ", "valid": false },
+    { "name": "an ideographic space at the start", "text": "\u3000a", "valid": false },
+    { "name": "a no-break space at the end", "text": "a\u00a0", "valid": false },
+    { "name": "an em space at the start", "text": "\u2003a", "valid": false },
+    { "name": "a tab inside", "text": "a\tb", "valid": false },
+    { "name": "a line feed inside", "text": "a\nb", "valid": false },
+    { "name": "a carriage return inside", "text": "a\rb", "valid": false },
+    { "name": "NUL inside", "text": "a\u0000b", "valid": false },
+    { "name": "DEL inside", "text": "a\u007fb", "valid": false },
+    { "name": "NEL inside", "text": "a\u0085b", "valid": false },
+    { "name": "U+009F inside", "text": "a\u009fb", "valid": false },
+    { "name": "U+2028 inside", "text": "a\u2028b", "valid": false },
+    { "name": "U+2029 inside", "text": "a\u2029b", "valid": false },
+    { "name": "a lone high surrogate", "utf16": [97, 55357, 98], "valid": false },
+    { "name": "a lone low surrogate", "utf16": [97, 56832], "valid": false }
+  ]
+}

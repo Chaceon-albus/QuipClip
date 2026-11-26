@@ -183,6 +183,12 @@ export type Segment = {
    * outPts is the PTS of the first excluded presented frame.
    */
   outPts: Pts;
+  /**
+   * The name of the segment, or absent for a segment with no name (ADR 065). A name is valid by
+   * `isValidSegmentName`: 1 to 80 Unicode scalar values, no `White_Space` character at either
+   * end, no control character, no U+2028 or U+2029, and no lone surrogate.
+   */
+  name?: string;
 };
 
 /**
@@ -224,6 +230,12 @@ export type SequenceSegment = {
    * that clip's range.
    */
   outPts: Pts;
+  /**
+   * The name of the segment, or absent for a segment with no name (ADR 065). The project file
+   * writes the field only when the segment has a name. The loader refuses `null` and a name that
+   * `isValidSegmentName` refuses.
+   */
+  name?: string;
 };
 
 /**

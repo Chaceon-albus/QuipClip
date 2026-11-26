@@ -1499,3 +1499,285 @@ describe("timeline store on one clip with a bounded range (ADR 052)", () => {
     expect(visible(store)).toEqual([{ id: "segment-1", inPts: "0", outPts: "898200" }]);
   });
 });
+
+describe("timeline store renameSegment (ADR 065)", () => {
+  it("names one segment with one history entry and keeps the selection", () => {
+    const store = threeSegments();
+    store.getState().selectSegment("segment-3");
+    store.getState().renameSegment("segment-2", "Intro");
+    expect(store.getState().sequenceSegments[1]).toMatchObject({
+      id: "segment-2",
+      name: "Intro",
+    });
+    expect(store.getState().segments[1]).toMatchObject({
+      id: "segment-2",
+      name: "Intro",
+    });
+    expect(store.getState()).toMatchObject({
+      canUndo: true,
+      canRedo: false,
+      currentSegmentId: "segment-3",
+      selectedSegmentIds: ["segment-3"],
+    });
+    // The bounds and the array order stay.
+    expect(shape(store)).toEqual([
+      { id: "segment-1", inPts: "0", outPts: "10" },
+      { id: "segment-2", inPts: "20", outPts: "30" },
+      { id: "segment-3", inPts: "40", outPts: "50" },
+    ]);
+  });
+
+  it("restores the name on Undo and sets it again on Redo", () => {
+    const store = threeSegments();
+    store.getState().renameSegment("segment-1", "Intro");
+    store.getState().renameSegment("segment-1", "Opening");
+    store.getState().undo();
+    expect(store.getState().segments[0]?.name).toBe("Intro");
+    store.getState().undo();
+    expect(store.getState().segments[0]).not.toHaveProperty("name");
+    expect(store.getState().sequenceSegments[0]).not.toHaveProperty("name");
+    store.getState().redo();
+    expect(store.getState().segments[0]?.name).toBe("Intro");
+    store.getState().redo();
+    expect(store.getState().segments[0]?.name).toBe("Opening");
+    expect(store.getState().canRedo).toBe(false);
+  });
+
+  it("removes the name for null, as one edit, and leaves no name field", () => {
+    const store = threeSegments();
+    store.getState().renameSegment("segment-1", "Intro");
+    store.getState().renameSegment("segment-1", null);
+    expect(store.getState().sequenceSegments[0]).not.toHaveProperty("name");
+    expect(store.getState().segments[0]).not.toHaveProperty("name");
+    store.getState().undo();
+    expect(store.getState().segments[0]?.name).toBe("Intro");
+  });
+
+  it("writes nothing for the name that the segment has, also for no name to no name", () => {
+    const store = threeSegments();
+    // `threeSegments` leaves three edits in the history. A fresh store has none.
+    const fresh = createLegacyStore(
+      {},
+      {
+        sourceId: "source-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("0"), outPts: pts("10") },
+        ],
+      },
+    );
+    const before = fresh.getState();
+    fresh.getState().renameSegment("a", null);
+    expect(fresh.getState()).toBe(before);
+    expect(fresh.getState().canUndo).toBe(false);
+
+    store.getState().renameSegment("segment-1", "Intro");
+    store.getState().undo();
+    expect(store.getState().canRedo).toBe(true);
+    store.getState().renameSegment("segment-1", "Intro");
+    const named = store.getState();
+    store.getState().renameSegment("segment-1", "Intro");
+    expect(store.getState()).toBe(named);
+    // The edit before it cleared the redo stack, and the repeated name did not add an entry.
+    store.getState().undo();
+    expect(store.getState().segments[0]).not.toHaveProperty("name");
+  });
+
+  it("keeps only a valid name", () => {
+    const store = threeSegments();
+    const before = store.getState();
+    for (const name of [
+      "",
+      " Intro",
+      "Intro ",
+      "a\nb",
+      "a\tb",
+      "a".repeat(81),
+      "a\ud800",
+    ]) {
+      store.getState().renameSegment("segment-1", name);
+    }
+    expect(store.getState()).toBe(before);
+    // 80 characters outside the BMP are a valid name.
+    store.getState().renameSegment("segment-1", "\u{1f600}".repeat(80));
+    expect(store.getState().segments[0]?.name).toBe("\u{1f600}".repeat(80));
+  });
+
+  it("changes nothing for an unknown segment or a segment that is not on the sequence", () => {
+    const store = createLegacyStore(
+      {},
+      {
+        sourceId: "source-1",
+        segments: [
+          { id: "a", sourceId: "source-1", inPts: pts("0"), outPts: pts("10") },
+          { id: "foreign", sourceId: "source-2", inPts: pts("0"), outPts: pts("10") },
+        ],
+      },
+    );
+    const before = store.getState();
+    store.getState().renameSegment("ghost", "Intro");
+    store.getState().renameSegment("foreign", "Intro");
+    expect(store.getState()).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("gives the interface a new segment and a new list for a rename alone", () => {
+    const store = threeSegments();
+    const before = store.getState().segments;
+    store.getState().renameSegment("segment-2", "Intro");
+    const after = store.getState().segments;
+    expect(after).not.toBe(before);
+    expect(after[1]).not.toBe(before[1]);
+    // The segments whose name did not change keep their objects.
+    expect(after[0]).toBe(before[0]);
+    expect(after[2]).toBe(before[2]);
+  });
+
+  it("keeps the list while the names and the bounds stay", () => {
+    const store = threeSegments();
+    store.getState().renameSegment("segment-2", "Intro");
+    const named = store.getState().segments;
+    store.getState().selectSegment("segment-1");
+    store.getState().finishSegment(null);
+    store.getState().markIn(pts("60"));
+    expect(store.getState().segments).toBe(named);
+    // A boundary move of another segment keeps the named segment object.
+    store.getState().selectSegment("segment-1");
+    store.getState().markOut(pts("12"));
+    expect(store.getState().segments).not.toBe(named);
+    expect(store.getState().segments[1]).toBe(named[1]);
+  });
+
+  it("gives both halves of a split the name of the segment", () => {
+    const store = createStore();
+    show(store, "source-1");
+    store.getState().markIn(pts("10"));
+    store.getState().markOut(pts("30"));
+    store.getState().renameSegment("segment-1", "Intro");
+    store.getState().split(pts("18"));
+    expect(
+      store.getState().sequenceSegments.map(({ id, name }) => ({ id, name })),
+    ).toEqual([
+      { id: "segment-1", name: "Intro" },
+      { id: "segment-2", name: "Intro" },
+    ]);
+    expect(store.getState().segments.map(({ name }) => name)).toEqual([
+      "Intro",
+      "Intro",
+    ]);
+    // A rename of one half leaves the other half as it is.
+    store.getState().renameSegment("segment-2", "Middle");
+    expect(store.getState().segments.map(({ name }) => name)).toEqual([
+      "Intro",
+      "Middle",
+    ]);
+  });
+
+  it("gives no name to the halves of a segment with no name", () => {
+    const store = createStore();
+    show(store, "source-1");
+    store.getState().markIn(pts("10"));
+    store.getState().markOut(pts("30"));
+    store.getState().split(pts("18"));
+    for (const segment of store.getState().sequenceSegments) {
+      expect(segment).not.toHaveProperty("name");
+    }
+  });
+});
+
+describe("timeline store names through clip operations (ADR 052, ADR 065)", () => {
+  const A: SequenceSource = {
+    id: "A",
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: pts("0"),
+    videoEndPts: pts("10000"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 10,
+  };
+  const B: SequenceSource = {
+    id: "B",
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: pts("0"),
+    videoEndPts: pts("5000"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 5,
+  };
+  const a1: Clip = { id: "a1", sourceId: "A" };
+  const b1: Clip = { id: "b1", sourceId: "B" };
+
+  /** A store of a1 and b1 with the segment `cross` from a1 into b1, named "Cross". */
+  function crossing() {
+    let nextId = 1;
+    const store = createTimelineStore(
+      { generateId: () => `segment-${nextId++}` },
+      {
+        clips: [a1, b1],
+        sequenceSources: { A, B },
+        sequenceSegments: [
+          {
+            id: "cross",
+            inClipId: "a1",
+            inPts: pts("8000"),
+            outClipId: "b1",
+            outPts: pts("2000"),
+            name: "Cross",
+          },
+        ],
+        attachedClipId: "a1",
+        generation: 1,
+      },
+    );
+    return store;
+  }
+
+  it("gives each part of a junction split the name of the segment", () => {
+    const store = crossing();
+    store.getState().moveClip(1, 0);
+    expect(
+      store.getState().sequenceSegments.map(({ id, name }) => ({ id, name })),
+    ).toEqual([
+      { id: "cross", name: "Cross" },
+      { id: "segment-1", name: "Cross" },
+    ]);
+    store.getState().undo();
+    expect(store.getState().sequenceSegments).toEqual([
+      expect.objectContaining({ id: "cross", name: "Cross", outClipId: "b1" }),
+    ]);
+  });
+
+  it("gives a later rename by id to the part that kept the id", () => {
+    const store = crossing();
+    // The rename dialog opened for "cross", and then a move of a clip divided it.
+    store.getState().moveClip(1, 0);
+    store.getState().renameSegment("cross", "First part");
+    expect(
+      store.getState().sequenceSegments.map(({ id, name }) => ({ id, name })),
+    ).toEqual([
+      { id: "cross", name: "First part" },
+      { id: "segment-1", name: "Cross" },
+    ]);
+    // A segment that left the timeline takes no name.
+    const before = store.getState();
+    store.getState().renameSegment("gone", "Name");
+    expect(store.getState()).toBe(before);
+  });
+
+  it("keeps the name of a segment that loses its part on a removed clip", () => {
+    const store = crossing();
+    store.getState().removeClip(1);
+    expect(store.getState().sequenceSegments).toEqual([
+      expect.objectContaining({ id: "cross", name: "Cross", outClipId: "a1" }),
+    ]);
+  });
+
+  it("gives each part of a split at an inserted clip the name of the segment", () => {
+    const store = crossing();
+    const C: SequenceSource = { ...B, id: "C" };
+    expect(store.getState().insertClips(1, [{ id: "c1", sourceId: "C" }], [C])).toBe(
+      true,
+    );
+    expect(store.getState().segments.map(({ name }) => name)).toEqual([
+      "Cross",
+      "Cross",
+    ]);
+  });
+});

@@ -264,6 +264,9 @@ export const zhCN: TranslationCatalog = {
     segment: "片段 {{index}}",
     segmentLabel:
       "片段 {{index}}，入点 {{inTime}}，出点 {{outTime}}，时长 {{duration}}",
+    segmentNamed: "片段 {{index}}：{{name}}",
+    segmentLabelNamed:
+      "片段 {{index}}：{{name}}，入点 {{inTime}}，出点 {{outTime}}，时长 {{duration}}",
     segmentDescription:
       "导出顺序：第 {{order}} 个，共 {{total}} 个。出点是片段后的第一帧。",
     segmentTooltip: {
@@ -294,9 +297,17 @@ export const zhCN: TranslationCatalog = {
       goToIn: "跳转到入点",
       goToOut: "跳转到出点",
       playSegment: "播放片段",
+      renameSegment: "重命名…",
       deleteSegment: "删除片段",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
       deleteSelectedSegments_other: "删除 {{count}} 个片段",
+    },
+    renameSegment: {
+      title: "重命名片段",
+      hint: "留空可移除片段名称。",
+      field: "名称",
+      confirm: "重命名",
+      tooLong: "名称有 {{length}} 个字符。名称不能超过 {{max}} 个字符。",
     },
   },
   mediaError: {

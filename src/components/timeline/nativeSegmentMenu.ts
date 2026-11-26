@@ -20,19 +20,28 @@
  * popup of the next show started. That needs a new right-click inside the delay of one IPC
  * message.
  *
+ * An item that opens a dialog (`SEGMENT_MENU_DIALOG_ACTIONS`, ADR 065) cannot accept that risk: a
+ * late event would open the dialog for the segment of another menu. Such an item therefore gets a
+ * new native item at each show, whose handler names its show (`ShowToken`). A cached show creates
+ * it, inserts it at its place in the menu, removes the item of the show before, and releases that
+ * item. An event of a show that a later show replaced runs nothing, and an event of the latest
+ * show reaches that show, also after its popup settled. Each such show keeps one more channel, a
+ * cost of one item and not of the whole menu.
+ *
  * The capability of the main window needs no new permission: `core:default` holds
- * `core:menu:default`, which allows `new`, `popup`, `set_text`, `set_enabled` and
- * `set_accelerator`.
+ * `core:menu:default`, which allows `new`, `insert`, `remove`, `popup`, `set_text`,
+ * `set_enabled` and `set_accelerator`, and `core:resources:default`, which allows `close`.
  */
 
 import { isTauri, type Resource } from "@tauri-apps/api/core";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
-import type {
-  SegmentMenuAction,
-  SegmentMenuEntry,
-  SegmentMenuItem,
-  SegmentMenuPosition,
+import {
+  SEGMENT_MENU_DIALOG_ACTIONS,
+  type SegmentMenuAction,
+  type SegmentMenuEntry,
+  type SegmentMenuItem,
+  type SegmentMenuPosition,
 } from "./segmentMenuModel";
 
 /** The handlers of one show of the menu. */
@@ -83,19 +92,45 @@ export interface TauriSegmentMenuBackend extends SegmentMenuBackend {
   readonly dispose: () => void;
 }
 
+/** The options of the backend. */
+export interface TauriSegmentMenuBackendOptions {
+  /**
+   * The actions whose item is a new native item at each show, bound to that show (see above).
+   * `SEGMENT_MENU_DIALOG_ACTIONS` by default.
+   */
+  readonly perShowActions?: ReadonlySet<SegmentMenuAction>;
+}
+
+/** One show, as the item of a per-show action names it. */
+interface ShowToken {
+  /** The selection of the show, from the start of its popup. */
+  selection: ShowSelection | null;
+  /** True once a later show started. An event of the item of this show then runs nothing. */
+  replaced: boolean;
+  /**
+   * True once the item of a per-show action of this show ran its choice. It is apart from
+   * `ShowSelection.isDone`: a late event of an ordinary item of the show before can reach the
+   * selection of this show (see above), and it must not stop the real choice of this item.
+   */
+  isDone: boolean;
+}
+
 /** The last values that the page gave to one native item. */
 interface BuiltItem {
   readonly item: MenuItem;
   text: string;
   enabled: boolean;
   accelerator: string | null;
+  /** The show that the item names, for an item of a per-show action. Null for every other item. */
+  readonly token: ShowToken | null;
 }
 
 interface BuiltMenu {
   readonly menu: Menu;
-  readonly items: ReadonlyMap<SegmentMenuAction, BuiltItem>;
-  /** Every native resource of the menu: the menu, its items and its separators. */
-  readonly resources: readonly Resource[];
+  /** The items by action. A show replaces the item of a per-show action here. */
+  readonly items: Map<SegmentMenuAction, BuiltItem>;
+  /** The separators of the menu. */
+  readonly separators: readonly Resource[];
 }
 
 /** The menu of one layout, while it is built and after. */
@@ -104,11 +139,25 @@ interface CacheEntry {
   readonly menu: Promise<BuiltMenu>;
   /** True once the build resolved or rejected. */
   isSettled: boolean;
+  /**
+   * The swaps of per-show items on this menu, one after another, so two shows never swap at
+   * once. The queue belongs to its entry: a swap that never settles blocks only the menu of this
+   * entry, which the show evicts when its preparation times out (`show`).
+   */
+  swaps: Promise<void>;
 }
 
-/** Frees the native resources of a menu. A resource that is already gone is ignored. */
+/**
+ * Frees the native resources of a menu: the menu, its items and its separators. A resource that
+ * is already gone is ignored.
+ */
 function closeMenu(built: BuiltMenu): void {
-  void Promise.all(built.resources.map((resource) => resource.close())).catch(() => {});
+  const resources: Resource[] = [
+    built.menu,
+    ...[...built.items.values()].map((entry) => entry.item),
+    ...built.separators,
+  ];
+  void Promise.all(resources.map((resource) => resource.close())).catch(() => {});
 }
 
 /**
@@ -144,8 +193,13 @@ function layoutOf(entries: readonly SegmentMenuEntry[]): string {
 }
 
 /** Creates the backend on the menu API of Tauri. */
-export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
+export function createTauriSegmentMenuBackend(
+  options: TauriSegmentMenuBackendOptions = {},
+): TauriSegmentMenuBackend {
+  const perShowActions = options.perShowActions ?? SEGMENT_MENU_DIALOG_ACTIONS;
   let cache: CacheEntry | null = null;
+  // The show that started last, as the item of a per-show action names it.
+  let latestToken: ShowToken | null = null;
   // The number of shows that started. A show that a newer show replaced before its popup shows
   // nothing.
   let showCount = 0;
@@ -162,22 +216,90 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
     current.select(action);
   };
 
-  const buildItem = async (entry: SegmentMenuItem): Promise<BuiltItem> => {
+  /**
+   * The handler of the item of a per-show action: it runs the choice of its own show, and nothing
+   * once a later show started. It runs at most once for its show, by its own state
+   * (`ShowToken.isDone`), so an ordinary event that the show took before does not stop it. It
+   * also ends the ordinary choice of the show, which then takes no later ordinary event.
+   */
+  const dispatchFor = (token: ShowToken, action: SegmentMenuAction) => (): void => {
+    const current = token.selection;
+    if (token.replaced || token.isDone || current === null) {
+      return;
+    }
+    token.isDone = true;
+    current.isDone = true;
+    current.select(action);
+  };
+
+  const buildItem = async (
+    entry: SegmentMenuItem,
+    token: ShowToken,
+  ): Promise<BuiltItem> => {
+    const perShow = perShowActions.has(entry.action);
     const item = await MenuItem.new({
       text: entry.text,
       enabled: entry.enabled,
       ...(entry.accelerator === null ? {} : { accelerator: entry.accelerator }),
-      action: () => dispatch(entry.action),
+      action: perShow ? dispatchFor(token, entry.action) : () => dispatch(entry.action),
     });
     return {
       item,
       text: entry.text,
       enabled: entry.enabled,
       accelerator: entry.accelerator,
+      token: perShow ? token : null,
     };
   };
 
-  const build = async (entries: readonly SegmentMenuEntry[]): Promise<BuiltMenu> => {
+  /**
+   * Gives each per-show action of a cached menu a new item for this show: it creates the item,
+   * inserts it at the place of the item of the show before, removes that item, and releases it.
+   * A swap that fails leaves the menu in a state that the page does not know, so the menu is freed
+   * and the next show builds it again.
+   */
+  const swapPerShowItems = async (
+    built: BuiltMenu,
+    entries: readonly SegmentMenuEntry[],
+    token: ShowToken,
+    isCurrent: () => boolean,
+  ): Promise<void> => {
+    for (const [position, entry] of entries.entries()) {
+      if (entry.kind !== "item" || !perShowActions.has(entry.action)) {
+        continue;
+      }
+      const old = built.items.get(entry.action);
+      if (old === undefined || old.token === token) {
+        continue;
+      }
+      const fresh = await buildItem(entry, token);
+      try {
+        // A show that timed out evicted the entry while a call was on its way. The evicted menu
+        // gets no further call: the new item goes now, and the menu, its items and its
+        // separators go when this swap settles, which follows at once.
+        if (!isCurrent()) {
+          void fresh.item.close().catch(() => {});
+          return;
+        }
+        await built.menu.insert(fresh.item, position);
+        if (!isCurrent()) {
+          void fresh.item.close().catch(() => {});
+          return;
+        }
+        await built.menu.remove(old.item);
+      } catch (error) {
+        void fresh.item.close().catch(() => {});
+        throw error;
+      }
+      built.items.set(entry.action, fresh);
+      void old.item.close().catch(() => {});
+    }
+  };
+
+  const build = async (
+    entries: readonly SegmentMenuEntry[],
+    token: ShowToken,
+  ): Promise<BuiltMenu> => {
     // The items are created in parallel. `Promise.all` keeps the order of the entries.
     const parts = await Promise.all(
       entries.map(async (entry) =>
@@ -185,7 +307,7 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
           ? {
               kind: "item" as const,
               action: entry.action,
-              built: await buildItem(entry),
+              built: await buildItem(entry, token),
             }
           : {
               kind: "separator" as const,
@@ -203,11 +325,10 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
         return part.built.item;
       }),
     });
-    const resources: Resource[] = [
-      menu,
-      ...parts.map((part) => (part.kind === "separator" ? part.item : part.built.item)),
-    ];
-    return { menu, items, resources };
+    const separators: Resource[] = parts.flatMap((part) =>
+      part.kind === "separator" ? [part.item] : [],
+    );
+    return { menu, items, separators };
   };
 
   /**
@@ -225,7 +346,8 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
         continue;
       }
       const target = built.items.get(entry.action);
-      if (target === undefined) {
+      // The item of a per-show action gets the values of its show when it is created.
+      if (target === undefined || perShowActions.has(entry.action)) {
         continue;
       }
       const { text, enabled, accelerator } = entry;
@@ -254,12 +376,47 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
     await Promise.all(calls);
   };
 
-  /** The built menu for the layout of the entries, with the values of the entries. */
-  const prepare = async (entries: readonly SegmentMenuEntry[]): Promise<BuiltMenu> => {
+  /**
+   * The built menu for the layout of the entries, with the values of the entries.
+   *
+   * @param progress Records the cache entry while this show waits for its swap, so a show whose
+   *   preparation times out there can evict that entry.
+   */
+  const prepare = async (
+    entries: readonly SegmentMenuEntry[],
+    token: ShowToken,
+    progress: { swapping: CacheEntry | null },
+  ): Promise<BuiltMenu> => {
     const layout = layoutOf(entries);
     if (cache !== null && cache.layout === layout) {
-      const built = await cache.menu;
+      const current = cache;
+      const built = await current.menu;
       await update(built, entries);
+      const swap = current.swaps.then(async () => {
+        // A later show swaps for itself. The menu of an evicted entry is not used any more.
+        if (token.replaced || cache !== current) {
+          return;
+        }
+        await swapPerShowItems(built, entries, token, () => cache === current);
+      });
+      // When the swap settles, a menu that is no longer the cache is freed with all that it
+      // holds, and a swap that failed frees its menu. It never changes another entry.
+      current.swaps = swap.then(
+        () => {
+          if (cache !== current) {
+            closeMenu(built);
+          }
+        },
+        () => {
+          if (cache === current) {
+            cache = null;
+          }
+          closeMenu(built);
+        },
+      );
+      progress.swapping = current;
+      await swap;
+      progress.swapping = null;
       return built;
     }
     // The code fixes the layout (`SEGMENT_MENU_LAYOUT`), so a backend builds one layout for the
@@ -270,8 +427,13 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
     if (old !== null && old.isSettled) {
       void old.menu.then(closeMenu, () => {});
     }
-    const menu = build(entries);
-    const entry: CacheEntry = { layout, menu, isSettled: false };
+    const menu = build(entries, token);
+    const entry: CacheEntry = {
+      layout,
+      menu,
+      isSettled: false,
+      swaps: Promise.resolve(),
+    };
     cache = entry;
     menu.then(
       (built) => {
@@ -301,15 +463,31 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
       showCount += 1;
       const show = showCount;
       selection = null;
+      // The item of a per-show action of the show before runs nothing from here on.
+      if (latestToken !== null) {
+        latestToken.replaced = true;
+      }
+      const token: ShowToken = { selection: null, replaced: false, isDone: false };
+      latestToken = token;
       let built: BuiltMenu;
+      const progress: { swapping: CacheEntry | null } = { swapping: null };
       try {
         // A build or an update that never settles would keep the mark of the menu open, and
         // the page without a keyboard.
-        built = await withTimeout(prepare(entries), SEGMENT_MENU_PREPARE_TIMEOUT_MS);
+        built = await withTimeout(
+          prepare(entries, token, progress),
+          SEGMENT_MENU_PREPARE_TIMEOUT_MS,
+        );
       } catch (error) {
         // A build that did not settle is built again at the next show. A value whose call did
         // not settle is not in the cache, so the next show sends it again.
         if (cache !== null && !cache.isSettled) {
+          cache = null;
+        }
+        // A swap that did not settle would block every later show behind it, so its entry
+        // goes, and the next show builds a new menu with its own queue. The swap frees the old
+        // menu when it settles.
+        if (progress.swapping !== null && cache === progress.swapping) {
           cache = null;
         }
         throw error;
@@ -318,6 +496,7 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
         return;
       }
       selection = { select: onSelect, isDone: false };
+      token.selection = selection;
       // The selection stays after the popup resolves, because the event of the chosen item can
       // arrive later.
       const popup = built.menu.popup(
@@ -330,6 +509,9 @@ export function createTauriSegmentMenuBackend(): TauriSegmentMenuBackend {
     dispose: () => {
       showCount += 1;
       selection = null;
+      if (latestToken !== null) {
+        latestToken.replaced = true;
+      }
       // A build that has not settled yet frees its menu when it settles.
       const entry = cache;
       cache = null;

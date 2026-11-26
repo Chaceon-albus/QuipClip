@@ -49,6 +49,7 @@ export const SEGMENT_MENU_ACTIONS = [
   "goToSegmentIn",
   "goToSegmentOut",
   "playSegment",
+  "renameSegment",
   "deleteSegment",
 ] as const satisfies readonly ShortcutAction[];
 
@@ -59,8 +60,17 @@ export const SEGMENT_MENU_LABEL_KEYS = {
   goToSegmentIn: "timeline.segmentMenu.goToIn",
   goToSegmentOut: "timeline.segmentMenu.goToOut",
   playSegment: "timeline.segmentMenu.playSegment",
+  renameSegment: "timeline.segmentMenu.renameSegment",
   deleteSegment: "timeline.segmentMenu.deleteSegment",
 } as const satisfies Record<SegmentMenuAction, string>;
+
+/**
+ * The items that open a dialog (ADR 065). Such an item runs after the menu closes, when both its
+ * choice and the end of the menu arrived (`menuDialogHandoff.ts`), so the dialog never opens over
+ * the menu.
+ */
+export const SEGMENT_MENU_DIALOG_ACTIONS: ReadonlySet<SegmentMenuAction> =
+  new Set<SegmentMenuAction>(["renameSegment"]);
 
 /**
  * The label of Play Segment while a segment plays toward its stop. The key `/` then pauses, as
@@ -93,9 +103,10 @@ export type SegmentMenuLabelValues = { readonly count: number };
  * - `segment`: the segment of the request. The request selected it alone, so it is current, and
  *   every item acts on it.
  * - `selection`: a selection of several segments that holds the segment of the request. The
- *   request kept the selection, and nothing is current. Only Delete Segment acts on it. Go to In
- *   and Go to Out need one current segment. Play Segment would play the segment at the playhead,
- *   which the menu did not name. So these items are disabled, also while a segment plays.
+ *   request kept the selection, and nothing is current. Only Delete Segment acts on it. Go to In,
+ *   Go to Out and Rename need one current segment (ADR 065). Play Segment would play the segment
+ *   at the playhead, which the menu did not name. So these items are disabled, also while a
+ *   segment plays.
  */
 export type SegmentMenuTarget =
   | { readonly kind: "segment"; readonly segmentId: string }
@@ -148,8 +159,9 @@ export type SegmentMenuSlot =
 
 /**
  * The menu, from top to bottom. The two moves of the playhead come first, then Play Segment.
- * Delete Segment is the one edit, and a separator keeps it apart from them, as native menus
- * keep a destructive item apart.
+ * Rename… follows between two separators (ADR 065): it edits the segment but keeps its frames.
+ * Delete Segment is last, and a separator keeps it apart, as native menus keep a destructive
+ * item apart.
  *
  * The menu holds only the actions whose operand is the segment itself. Mark In, Mark Out and
  * Split act at the playhead, which a right-click does not move (ADR 007), so they would act at a
@@ -160,6 +172,8 @@ export const SEGMENT_MENU_LAYOUT: readonly SegmentMenuSlot[] = [
   { kind: "item", action: "goToSegmentIn" },
   { kind: "item", action: "goToSegmentOut" },
   { kind: "item", action: "playSegment" },
+  { kind: "separator" },
+  { kind: "item", action: "renameSegment" },
   { kind: "separator" },
   { kind: "item", action: "deleteSegment" },
 ];

@@ -311,6 +311,40 @@ describe("segmentTrimSession: the start", () => {
   });
 });
 
+describe("segmentTrimSession: the armed edge press and the dialogs (ADR 065)", () => {
+  it("locks Rename Segment from the armed press to the end of the drag", () => {
+    const h = createHarness();
+    expect(h.session.isLocked()).toBe(false);
+    h.session.armPress({ segmentId: "a", edge: "out" });
+    expect(h.session.isPressArmed()).toBe(true);
+    expect(h.session.isLocked()).toBe(true);
+    // The press crosses the drag threshold and becomes a trim.
+    beginOut(h);
+    h.session.armPress(null);
+    expect(h.session.isPressArmed()).toBe(false);
+    expect(h.session.isLocked()).toBe(true);
+    h.session.drop();
+    expect(h.session.isLocked()).toBe(false);
+  });
+
+  it("does not let an armed press become a trim while a modal dialog is open", () => {
+    const h = createHarness();
+    const input = {
+      segmentId: "a",
+      edge: "out" as const,
+      hasActiveSource: true,
+      totalDurationSeconds: h.total,
+      probe: h.probe,
+      isModalOpen: true,
+    };
+    expect(h.session.canBegin(input)).toBe(false);
+    expect(h.session.begin(input)).toBe(false);
+    expect(h.session.isDragging()).toBe(false);
+    expect(h.timeline.getState().currentSegmentId).toBeNull();
+    expect(h.session.begin({ ...input, isModalOpen: false })).toBe(true);
+  });
+});
+
 describe("segmentTrimSession: the release", () => {
   it("seeks to the target frame and commits a frame that rounds to it, as one undo step", () => {
     const h = createHarness();

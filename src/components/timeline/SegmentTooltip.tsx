@@ -23,7 +23,11 @@ import {
 import {
   calculateSegmentWidthPx,
   calculateVisibleSegmentAnchor,
+  resolveSegmentTitle,
+  SEGMENT_TOOLTIP_BODY_CLASS,
+  SEGMENT_TOOLTIP_TITLE_CLASS,
   type SegmentAnchor,
+  type TranslateSegmentText,
   type SegmentTooltipRow,
 } from "./segmentLabels";
 import type {
@@ -42,6 +46,8 @@ export interface SegmentTooltipEntry {
   readonly id: string;
   /** The position in the export order (`numberSegmentsInExportOrder`). */
   readonly number: number;
+  /** The name of the segment, or undefined for no name (ADR 065). */
+  readonly name?: string;
   /** The left and the width of the segment in the layer, as percentages of the lane. */
   readonly leftPercent: number;
   readonly widthPercent: number;
@@ -351,10 +357,14 @@ export const SegmentTooltip = memo(function SegmentTooltip({
               {renderTooltipRow(edgeRow, t)}
             </dl>
           ) : (
-            <div className="flex flex-col gap-1.5">
+            <div className={SEGMENT_TOOLTIP_BODY_CLASS}>
               <div className="flex flex-col gap-0.5">
-                <span className="font-semibold">
-                  {t("timeline.segment", { index: entry.number })}
+                {/* The number, and the name after it (ADR 065). A long name wraps. */}
+                <span className={SEGMENT_TOOLTIP_TITLE_CLASS}>
+                  {(() => {
+                    const title = resolveSegmentTitle(entry.number, entry.name);
+                    return (t as TranslateSegmentText)(title.key, title.values);
+                  })()}
                 </span>
                 <span className="text-tooltip-foreground/70">
                   {t("timeline.segmentTooltip.exportOrder", {

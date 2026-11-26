@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { segmentRenameDialogStore } from "@/components/timeline/segmentRenameDialogStore";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
@@ -38,6 +39,7 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
     timeline: timelineStore.getState(),
     viewport: timelineViewportStore.getState(),
     isTrimDragging: segmentTrimSession.isDragging(),
+    isTrimArmed: segmentTrimSession.isPressArmed(),
   };
 }
 
@@ -91,6 +93,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       return;
     case "deleteSegment":
       timeline.deleteSelectedSegments();
+      return;
+    case "renameSegment":
+      // The dialog names the segment by its id from here on (ADR 065).
+      segmentRenameDialogStore.getState().open(command.segmentId);
       return;
     case "selectAllSegments":
       timeline.selectAllSegments();

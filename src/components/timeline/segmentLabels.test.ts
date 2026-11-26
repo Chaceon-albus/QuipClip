@@ -13,6 +13,11 @@ import type { Pts, Rational, Segment } from "@/types/project";
 import {
   SEGMENT_DURATION_CHAR_WIDTH_PX,
   SEGMENT_FULL_LABEL_MARGIN_PX,
+  SEGMENT_NAME_GAP_PX,
+  SEGMENT_BAR_NAME_CLASS,
+  SEGMENT_NAMED_LABEL_MARGIN_PX,
+  SEGMENT_TOOLTIP_BODY_CLASS,
+  SEGMENT_TOOLTIP_TITLE_CLASS,
   SEGMENT_NUMBER_DIGIT_WIDTH_PX,
   SEGMENT_NUMBER_HASH_WIDTH_PX,
   SEGMENT_NUMBER_LABEL_MARGIN_PX,
@@ -22,7 +27,10 @@ import {
   formatSegmentTimes,
   measureSegmentLabel,
   numberSegmentsInExportOrder,
+  resolveSegmentAccessibleName,
   resolveSegmentLabelTier,
+  resolveSegmentTitle,
+  showsSegmentName,
   type SegmentTimes,
 } from "./segmentLabels";
 
@@ -311,6 +319,203 @@ describe("segment messages", () => {
       expect(translate(row.labelKey)).toBe(expected[name]);
     }
     expect(translate("timeline.segmentTooltip.notIncluded")).toBe(expected.notIncluded);
+  });
+});
+
+describe("the name of a segment (ADR 065)", () => {
+  const widths = measureSegmentLabel(3, "05:00");
+  // `#3` is 13.5px, and the duration line is 30px, so the full tier needs 46px.
+  const numberPx = SEGMENT_NUMBER_HASH_WIDTH_PX + SEGMENT_NUMBER_DIGIT_WIDTH_PX;
+  // The line of the number keeps the margins of the number tier in every tier, so 8 px. At this
+  // width no room is left for the name.
+  const fullLinePx = SEGMENT_NUMBER_LABEL_MARGIN_PX + numberPx + SEGMENT_NAME_GAP_PX;
+
+  it("shows the name on the bar when the line of the number has room for some of it", () => {
+    expect(showsSegmentName("number", fullLinePx + 0.5, widths, "Intro")).toBe(true);
+    expect(showsSegmentName("full", fullLinePx + 500, widths, "Intro")).toBe(true);
+    expect(showsSegmentName("number", fullLinePx, widths, "Intro")).toBe(false);
+    expect(showsSegmentName("none", 1000, widths, "Intro")).toBe(false);
+    expect(showsSegmentName("full", 1000, widths, undefined)).toBe(false);
+    expect(showsSegmentName("full", Number.NaN, widths, "Intro")).toBe(false);
+    // The margin of the line does not change with the tier.
+    expect(SEGMENT_NAMED_LABEL_MARGIN_PX).toBe(SEGMENT_NUMBER_LABEL_MARGIN_PX);
+  });
+
+  it("shows a short name in a narrow room, with no fixed minimum", () => {
+    // `#3` named "I" on a bar of 32 px: 32 - 8 - 13.5 - 4 = 6.5 px are left for the name.
+    expect(resolveSegmentLabelTier(32, widths)).toBe("number");
+    expect(showsSegmentName("number", 32, widths, "I")).toBe(true);
+  });
+
+  it("shows a name that fits beside the number when the duration does not fit", () => {
+    // `#3` named "I" on a bar of 40 px: the full tier needs 46 px for `05:00`, so the bar shows
+    // the number tier, and its line has 40 - 8 - 13.5 - 4 = 14.5 px for the name.
+    expect(widths.fullTierPx).toBe(46);
+    const tier = resolveSegmentLabelTier(40, widths);
+    expect(tier).toBe("number");
+    expect(showsSegmentName(tier, 40, widths, "I")).toBe(true);
+  });
+
+  it("keeps the name at every width above the first width that shows it", () => {
+    for (const [number, duration] of [
+      [3, "05:00"],
+      [3, "00:00:05:00"],
+      [12, "1:05"],
+      [104, null],
+    ] as const) {
+      const measured = measureSegmentLabel(number, duration);
+      let first: number | null = null;
+      for (let width = 0; width <= 400; width += 0.5) {
+        const shows = showsSegmentName(
+          resolveSegmentLabelTier(width, measured),
+          width,
+          measured,
+          "I",
+        );
+        if (first === null && shows) {
+          first = width;
+        }
+        if (first !== null) {
+          expect(shows, `#${number} ${String(duration)} at ${width}px`).toBe(true);
+        }
+      }
+      expect(first).not.toBeNull();
+    }
+    // The case of the review: the name shows at 45, 46 and 48 px.
+    for (const width of [45, 46, 48]) {
+      expect(
+        showsSegmentName(resolveSegmentLabelTier(width, widths), width, widths, "I"),
+      ).toBe(true);
+    }
+  });
+
+  it("clips a long name on the bar with no ellipsis", () => {
+    const classes = SEGMENT_BAR_NAME_CLASS.split(" ");
+    for (const name of [
+      "min-w-0",
+      "overflow-hidden",
+      "whitespace-nowrap",
+      "text-clip",
+    ]) {
+      expect(classes).toContain(name);
+    }
+    // `truncate` adds an ellipsis, which can stand alone after a blank character.
+    expect(classes).not.toContain("truncate");
+    expect(classes).not.toContain("text-ellipsis");
+  });
+
+  it("lets a long name with no break wrap inside the tooltip", () => {
+    // The body can shrink below the least width of the name, and the title breaks anywhere.
+    expect(SEGMENT_TOOLTIP_BODY_CLASS.split(" ")).toContain("min-w-0");
+    expect(SEGMENT_TOOLTIP_TITLE_CLASS.split(" ")).toContain("wrap-anywhere");
+  });
+
+  it("puts the name after the number in the tooltip title", () => {
+    expect(resolveSegmentTitle(3, undefined)).toStrictEqual({
+      key: "timeline.segment",
+      values: { index: 3 },
+    });
+    expect(resolveSegmentTitle(3, "Intro")).toStrictEqual({
+      key: "timeline.segmentNamed",
+      values: { index: 3, name: "Intro" },
+    });
+  });
+
+  it("puts the name after the number in the accessible name", () => {
+    const times = { inTime: "00:01", outTime: "00:06", duration: "00:05" };
+    expect(resolveSegmentAccessibleName(3, undefined, times)).toStrictEqual({
+      key: "timeline.segmentLabel",
+      values: { index: 3, ...times },
+    });
+    expect(resolveSegmentAccessibleName(3, "Intro", times)).toStrictEqual({
+      key: "timeline.segmentLabelNamed",
+      values: { index: 3, ...times, name: "Intro" },
+    });
+    expect(resolveSegmentAccessibleName(3, "Intro", null)).toStrictEqual({
+      key: "timeline.segmentNamed",
+      values: { index: 3, name: "Intro" },
+    });
+    expect(resolveSegmentAccessibleName(3, undefined, null)).toStrictEqual({
+      key: "timeline.segment",
+      values: { index: 3 },
+    });
+  });
+
+  it.each([
+    [
+      "en",
+      {
+        title: "Segment 3: Intro",
+        label: "Segment 3: Intro, In 00:01, Out 00:06, duration 00:05",
+      },
+    ],
+    [
+      "zh-CN",
+      {
+        title: "片段 3：Intro",
+        label: "片段 3：Intro，入点 00:01，出点 00:06，时长 00:05",
+      },
+    ],
+  ] as const)("renders the forms with a name in %s", async (language, expected) => {
+    const instance = await createI18nInstance({
+      initialPreference: language,
+      storage: null,
+      systemLanguages: [],
+    });
+    const translate = instance.t as unknown as (
+      key: string,
+      options?: Readonly<Record<string, string | number>>,
+    ) => string;
+    const times = { inTime: "00:01", outTime: "00:06", duration: "00:05" };
+    const title = resolveSegmentTitle(3, "Intro");
+    expect(translate(title.key, title.values)).toBe(expected.title);
+    const label = resolveSegmentAccessibleName(3, "Intro", times);
+    expect(translate(label.key, label.values)).toBe(expected.label);
+    // A name with markup characters stays text: the catalogs do not escape values.
+    expect(translate(title.key, { index: 1, name: "<b>&</b>" })).toContain("<b>&</b>");
+  });
+});
+
+describe("the catalog of the rename dialog (ADR 065)", () => {
+  it.each([
+    [
+      "en",
+      {
+        title: "Rename Segment",
+        hint: "Leave the field empty to remove the name.",
+        field: "Name",
+        confirm: "Rename",
+        tooLong:
+          "The name has 81 characters. A name can have no more than 80 characters.",
+      },
+    ],
+    [
+      "zh-CN",
+      {
+        title: "重命名片段",
+        hint: "留空可移除片段名称。",
+        field: "名称",
+        confirm: "重命名",
+        tooLong: "名称有 81 个字符。名称不能超过 80 个字符。",
+      },
+    ],
+  ] as const)("names the dialog in %s", async (language, expected) => {
+    const instance = await createI18nInstance({
+      initialPreference: language,
+      storage: null,
+      systemLanguages: [],
+    });
+    const translate = instance.t as unknown as (
+      key: string,
+      options?: Readonly<Record<string, string | number>>,
+    ) => string;
+    expect(translate("timeline.renameSegment.title")).toBe(expected.title);
+    expect(translate("timeline.renameSegment.field")).toBe(expected.field);
+    expect(translate("timeline.renameSegment.confirm")).toBe(expected.confirm);
+    expect(translate("timeline.renameSegment.tooLong", { length: 81, max: 80 })).toBe(
+      expected.tooLong,
+    );
+    expect(translate("timeline.renameSegment.hint")).toBe(expected.hint);
   });
 });
 

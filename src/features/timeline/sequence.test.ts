@@ -481,6 +481,25 @@ describe("splitSegmentsAtJunctions", () => {
     );
   });
 
+  it("gives each part the name of the segment (ADR 065)", () => {
+    const named = { ...segment("long", "a1", "0", "c1", "130000"), name: "Intro" };
+    const result = splitSegmentsAtJunctions(
+      [named, segment("plain", "c1", "130000", "c1", "140000")],
+      [1, 2],
+      abc,
+      sources,
+      idGenerator(),
+    );
+    expect(result?.map((entry) => [entry.id, entry.name])).toEqual([
+      ["long", "Intro"],
+      ["new-1", "Intro"],
+      ["new-2", "Intro"],
+      ["plain", undefined],
+    ]);
+    // A segment with no name gets no `name` field.
+    expect(result?.[3]).not.toHaveProperty("name");
+  });
+
   it("does not split a segment that ends or starts on the junction", () => {
     const segments = [
       segment("ends", "a1", "0", "a1", "898200"),
@@ -704,6 +723,23 @@ describe("removeClip", () => {
         isValidSequenceSegment(entry, result.clips, sources),
       ),
     ).toBe(true);
+  });
+
+  it("keeps the name of a segment that loses the part on the clip (ADR 065)", () => {
+    const named: SequenceEdit = {
+      clips: abc,
+      segments: [
+        { ...segment("ends-in-b", "a1", "800000", "b1", "2000"), name: "End" },
+        { ...segment("starts-in-b", "b1", "4000", "c1", "129000"), name: "Start" },
+        { ...segment("across-b", "a1", "0", "c1", "130000"), name: "Across" },
+      ],
+    };
+    const result = removeClip(named, 1, sources);
+    expect(result?.segments.map((entry) => [entry.id, entry.name])).toEqual([
+      ["ends-in-b", "End"],
+      ["starts-in-b", "Start"],
+      ["across-b", "Across"],
+    ]);
   });
 
   it("refuses an index out of range", () => {

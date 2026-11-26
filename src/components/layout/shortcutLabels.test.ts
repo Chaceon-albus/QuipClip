@@ -220,6 +220,14 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Shift+O",
     ariaWindows: "Shift+O",
   },
+  // A function key shows the label of its key cap on both platforms (ADR 065).
+  {
+    id: "renameSegment:F2",
+    macos: "F2",
+    windows: "F2",
+    ariaMacos: "F2",
+    ariaWindows: "F2",
+  },
   {
     id: "deleteSegment:Delete",
     macos: "⌦",
@@ -822,6 +830,8 @@ describe("shortcutLabels", () => {
       expect(formatMenuAccelerator(binding("finishSegment", "", "Escape"))).toBe(
         "Escape",
       );
+      // The menu library reads `F2` as the function key, and AppKit draws it as F2 (ADR 065).
+      expect(formatMenuAccelerator(binding("renameSegment", "", "F2"))).toBe("F2");
     });
 
     it("names a punctuation key by its US position and a numpad key by its code", () => {

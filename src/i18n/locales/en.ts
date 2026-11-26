@@ -395,6 +395,12 @@ export const en = {
     segment: "Segment {{index}}",
     segmentLabel:
       "Segment {{index}}, In {{inTime}}, Out {{outTime}}, duration {{duration}}",
+    // The forms of `segment` and `segmentLabel` for a segment with a name (ADR 065). {{name}} is
+    // the name that the user gave the segment, such as "Intro". `segmentNamed` is the title of
+    // the segment tooltip, and the accessible name of a segment whose times are not known.
+    segmentNamed: "Segment {{index}}: {{name}}",
+    segmentLabelNamed:
+      "Segment {{index}}: {{name}}, In {{inTime}}, Out {{outTime}}, duration {{duration}}",
     segmentDescription:
       "Export order: {{order}} of {{total}}. The Out point is the first frame after the segment.",
     // `notIncluded` follows the Out time in the tooltip. The Out time is the first frame
@@ -447,11 +453,27 @@ export const en = {
       goToIn: "Go to In",
       goToOut: "Go to Out",
       playSegment: "Play Segment",
+      // Opens the dialog that gives the segment a name (ADR 065). The ellipsis says that the
+      // item opens a dialog.
+      renameSegment: "Rename…",
       deleteSegment: "Delete Segment",
       // Delete Segment in the menu of a selection of several segments (ADR 045). `count` is the
       // number of the selected segments, always 2 or more.
       deleteSelectedSegments_one: "Delete {{count}} Segment",
       deleteSelectedSegments_other: "Delete {{count}} Segments",
+    },
+    // The dialog that gives a segment a name (ADR 065). The user opens it with F2 or with the
+    // Rename… item of the segment menu. `field` is the label of the one text field. `hint` is
+    // under the title. `confirm` is the button that applies the name. `tooLong` shows under the
+    // field while the name is too long, and the confirm button does nothing then. {{length}} is
+    // the number of characters of the name, always more than {{max}}, which is 80.
+    renameSegment: {
+      title: "Rename Segment",
+      hint: "Leave the field empty to remove the name.",
+      field: "Name",
+      confirm: "Rename",
+      tooLong:
+        "The name has {{length}} characters. A name can have no more than {{max}} characters.",
     },
   },
   mediaError: {

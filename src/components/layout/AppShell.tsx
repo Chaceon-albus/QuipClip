@@ -12,6 +12,7 @@ import { useNativeMenuActions } from "@/components/layout/useNativeMenuActions";
 import { useQuitGuard } from "@/components/layout/useQuitGuard";
 import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
+import { SegmentRenameDialog } from "@/components/timeline/SegmentRenameDialog";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -79,6 +80,9 @@ export function AppShell() {
          * itself, so a drag renders the overlay and not the whole shell.
          */}
         <DropOverlay />
+        {/* The one mount of the Rename Segment dialog (ADR 065). The F2 key and the item of the
+            segment menu open it through its store. */}
+        <SegmentRenameDialog />
         {/*
          * The one mount of the quit guard dialog. Its portal opens after any dialog that is
          * already open, so it draws above the export dialog.

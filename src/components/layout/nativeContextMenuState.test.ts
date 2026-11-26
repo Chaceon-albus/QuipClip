@@ -99,6 +99,60 @@ describe("createNativeContextMenuState", () => {
   });
 });
 
+describe("the close listeners of a mark (ADR 065)", () => {
+  it("runs each listener once when the mark closes", () => {
+    const state = createNativeContextMenuState();
+    const mark = state.open();
+    const first = vi.fn();
+    const second = vi.fn();
+    mark.onClose(first);
+    mark.onClose(second);
+    expect(first).not.toHaveBeenCalled();
+    mark.close();
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    // The listener sees the mark closed already.
+    mark.close();
+    expect(first).toHaveBeenCalledOnce();
+  });
+
+  it("finds the state closed when the listener runs", () => {
+    const state = createNativeContextMenuState();
+    const mark = state.open();
+    let isOpen: boolean | null = null;
+    mark.onClose(() => {
+      isOpen = state.isOpen();
+    });
+    mark.close();
+    expect(isOpen).toBe(false);
+  });
+
+  it("runs a listener at once on a mark that is already closed", () => {
+    const state = createNativeContextMenuState();
+    const mark = state.open();
+    mark.close();
+    const listener = vi.fn();
+    mark.onClose(listener);
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("runs the listeners when the first input after the grace period closes the mark", () => {
+    const { state, input, advance } = createHarness();
+    const mark = state.open();
+    const listener = vi.fn();
+    mark.onClose(listener);
+    mark.showing();
+    advance(NATIVE_CONTEXT_MENU_GRACE_MS - 1);
+    input.fire("pointerdown");
+    expect(listener).not.toHaveBeenCalled();
+    advance(1);
+    input.fire("pointerdown");
+    expect(listener).toHaveBeenCalledOnce();
+    mark.close();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+});
+
 describe("the fallback for a popup that never settles", () => {
   it("waits one second after the popup call", () => {
     expect(NATIVE_CONTEXT_MENU_GRACE_MS).toBe(1_000);

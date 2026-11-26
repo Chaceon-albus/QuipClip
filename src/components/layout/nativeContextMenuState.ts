@@ -90,6 +90,12 @@ export interface NativeContextMenuMark {
    * closed stays closed.
    */
   readonly showing: () => void;
+  /**
+   * Runs the listener once when the mark closes: by `close`, or by the first input after the
+   * grace period. A mark that is already closed runs it at once. An owner that must wait until
+   * the menu has gone, such as an item that opens a dialog (ADR 065), waits for this.
+   */
+  readonly onClose: (listener: () => void) => void;
 }
 
 export interface NativeContextMenuState {
@@ -120,6 +126,19 @@ export function createNativeContextMenuState(
   const open = new Set<object>();
   // The marks whose popup call was sent, with the time of the call.
   const showing = new Map<object, number>();
+  // The close listeners of each open mark.
+  const listeners = new Map<object, (() => void)[]>();
+
+  /** Closes a mark and runs its close listeners once. */
+  const finish = (mark: object): void => {
+    open.delete(mark);
+    showing.delete(mark);
+    const waiting = listeners.get(mark) ?? [];
+    listeners.delete(mark);
+    for (const listener of waiting) {
+      listener();
+    }
+  };
 
   const onInput = (event: NativeContextMenuInputEvent): void => {
     if (!event.isTrusted || showing.size === 0) {
@@ -128,8 +147,7 @@ export function createNativeContextMenuState(
     const time = now();
     for (const [mark, since] of [...showing]) {
       if (time - since >= NATIVE_CONTEXT_MENU_GRACE_MS) {
-        showing.delete(mark);
-        open.delete(mark);
+        finish(mark);
       }
     }
   };
@@ -145,13 +163,19 @@ export function createNativeContextMenuState(
       open.add(mark);
       return {
         close: () => {
-          open.delete(mark);
-          showing.delete(mark);
+          finish(mark);
         },
         showing: () => {
           if (open.has(mark) && !showing.has(mark)) {
             showing.set(mark, now());
           }
+        },
+        onClose: (listener) => {
+          if (!open.has(mark)) {
+            listener();
+            return;
+          }
+          listeners.set(mark, [...(listeners.get(mark) ?? []), listener]);
         },
       };
     },

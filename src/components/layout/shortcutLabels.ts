@@ -128,6 +128,9 @@ function formatNamedKey(
       return platform === "macos" ? MAC_BACKWARD_DELETE : keyNames.backspace;
     case "Escape":
       return keyNames.escape;
+    case "F2":
+      // The label printed on the key cap, the same in every language and on both platforms.
+      return "F2";
   }
 }
 

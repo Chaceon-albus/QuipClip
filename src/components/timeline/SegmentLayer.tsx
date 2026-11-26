@@ -38,7 +38,11 @@ import {
   formatSegmentTimes,
   measureSegmentLabel,
   numberSegmentsInExportOrder,
+  resolveSegmentAccessibleName,
   resolveSegmentLabelTier,
+  SEGMENT_BAR_NAME_CLASS,
+  showsSegmentName,
+  type TranslateSegmentText,
 } from "./segmentLabels";
 import {
   createSegmentMenuSourceTracker,
@@ -285,26 +289,28 @@ export const SegmentLayer = memo(function SegmentLayer({
           const tooltipEntry: SegmentTooltipEntry = {
             id: segment.id,
             number,
+            name: segment.name,
             leftPercent: layout.leftPercent,
             widthPercent: layout.widthPercent,
             rows,
             edges,
           };
+          // The number, the name when the segment has one (ADR 065), and the times.
+          const accessibleName = resolveSegmentAccessibleName(
+            number,
+            segment.name,
+            times,
+          );
           return {
             segment,
             number,
             layout,
             compactDuration: times?.compactDuration ?? null,
             labelWidths: measureSegmentLabel(number, times?.compactDuration ?? null),
-            label:
-              times === null
-                ? t("timeline.segment", { index: number })
-                : t("timeline.segmentLabel", {
-                    index: number,
-                    inTime: times.inTime,
-                    outTime: times.outTime,
-                    duration: times.duration,
-                  }),
+            label: (t as TranslateSegmentText)(
+              accessibleName.key,
+              accessibleName.values,
+            ),
             description: t("timeline.segmentDescription", { order: number, total }),
             // The index in the project array is unique, and an ID token cannot hold a space.
             descriptionId: `${descriptionIdPrefix}-segment-${projectIndex}`,
@@ -536,6 +542,7 @@ export const SegmentLayer = memo(function SegmentLayer({
           const isSelected = selectedIds.has(seg.id);
           const widthPx = calculateSegmentWidthPx(layout.widthPercent, laneWidthPx);
           const tier = resolveSegmentLabelTier(widthPx, labelWidths);
+          const showsName = showsSegmentName(tier, widthPx, labelWidths, seg.name);
           const showsHandles = showsSegmentEdgeHandles(widthPx);
           const focusRing = resolveSegmentFocusRing(widthPx, isSelected);
           const isTrimmed = seg.id === trimmedSegmentId;
@@ -547,6 +554,9 @@ export const SegmentLayer = memo(function SegmentLayer({
               aria-pressed={isSelected}
               aria-label={label}
               aria-describedby={descriptionId}
+              // `SEGMENT_ID_ATTRIBUTE`: the rename dialog gives the focus back here when its
+              // opener is gone (ADR 065).
+              data-segment-id={seg.id}
               // A click on the body only selects: the playhead is the operand of Mark In, Mark
               // Out and Split, so a selection click must not move it. A click on an edge also
               // seeks to the boundary that the edge names. On macOS a Control click with the
@@ -646,12 +656,24 @@ export const SegmentLayer = memo(function SegmentLayer({
               }}
             >
               {tier !== "none" && (
+                // A bar that shows a name keeps the margins of the number tier in every tier, so
+                // the line of the number has one padding (`SEGMENT_NAMED_LABEL_MARGIN_PX`).
                 <span
-                  className={`flex min-w-0 flex-col text-left leading-tight ${tier === "full" ? "mx-2" : "mx-1"}`}
+                  className={`flex min-w-0 flex-col text-left leading-tight ${tier === "full" && !showsName ? "mx-2" : "mx-1"}`}
                 >
-                  <span className="truncate text-[11px] font-semibold tabular-nums">
-                    #{number}
-                  </span>
+                  {showsName ? (
+                    // The number keeps its width, and the name takes the rest of the line. CSS
+                    // clips a name that is too long, with no ellipsis (`SEGMENT_BAR_NAME_CLASS`,
+                    // ADR 065).
+                    <span className="flex min-w-0 text-[11px] font-semibold tabular-nums">
+                      <span className="shrink-0">#{number}</span>
+                      <span className={SEGMENT_BAR_NAME_CLASS}>{seg.name}</span>
+                    </span>
+                  ) : (
+                    <span className="truncate text-[11px] font-semibold tabular-nums">
+                      #{number}
+                    </span>
+                  )}
                   {tier === "full" && compactDuration !== null && (
                     <span className="truncate font-mono text-[10px] tabular-nums">
                       {compactDuration}

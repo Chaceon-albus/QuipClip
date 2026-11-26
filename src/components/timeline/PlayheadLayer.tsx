@@ -299,7 +299,9 @@ export function TimelineSeekSlider({
       // clamped to the extent, and it stays while the extent is unknown and there is no
       // `aria-valuenow`.
       aria-valuetext={timecode}
-      tabIndex={canSeek ? 0 : undefined}
+      // While seeking is off, the slider leaves the Tab order but a script can still focus it:
+      // the rename dialog gives the focus back to the timeline here (ADR 065).
+      tabIndex={canSeek ? 0 : -1}
       // A mouse press does not move the focus to the slider, as a press on a button of the
       // transport bar does not (ADR 021). A click focuses an element with a `tabIndex`, and
       // WebView2 then draws the focus ring around the whole track at the next key press,

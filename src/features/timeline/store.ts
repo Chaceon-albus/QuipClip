@@ -19,6 +19,7 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { isPtsString } from "@/lib/time";
 import type { Clip, EditPoint, Pts, Segment, SequenceSegment } from "@/types/project";
+import { isValidSegmentName } from "./segmentName";
 import {
   canonicalIn,
   canonicalOut,
@@ -134,6 +135,17 @@ function sameEditPoint(a: EditPoint, b: EditPoint): boolean {
 }
 
 /**
+ * The segment with the name, or with no `name` field for null (ADR 065). Every other field stays.
+ */
+function withSegmentName(
+  segment: SequenceSegment,
+  name: string | null,
+): SequenceSegment {
+  const { name: _previous, ...rest } = segment;
+  return name === null ? rest : { ...rest, name };
+}
+
+/**
  * The derived view of the truth: the virtual axis, the virtual source, and the segments and the
  * pending In as virtual PTS. Every write of the truth goes through it.
  */
@@ -174,7 +186,12 @@ function derive(
         pts: segment.outPts,
       });
       if (inPts !== null && outPts !== null) {
-        segments.push({ id: segment.id, sourceId, inPts, outPts });
+        // A segment with no name has no `name` field, as in the truth (ADR 065).
+        segments.push(
+          segment.name === undefined
+            ? { id: segment.id, sourceId, inPts, outPts }
+            : { id: segment.id, sourceId, inPts, outPts, name: segment.name },
+        );
       }
     }
   }
@@ -192,7 +209,8 @@ function derive(
 
 /**
  * The derived view `next` with the segment objects of `previous` kept wherever they are equal, and
- * the list of `previous` kept when every segment is equal.
+ * the list of `previous` kept when every segment is equal. The name counts, so a rename alone
+ * gives the interface a new segment and a new list (ADR 065).
  */
 function shareDerived(
   previous: TimelineState,
@@ -204,7 +222,8 @@ function shareDerived(
     return old !== undefined &&
       old.sourceId === segment.sourceId &&
       old.inPts === segment.inPts &&
-      old.outPts === segment.outPts
+      old.outPts === segment.outPts &&
+      old.name === segment.name
       ? old
       : segment;
   });
@@ -822,6 +841,31 @@ export function createTimelineStore(
           }
         }
         endSegmentInProgress();
+      },
+
+      renameSegment: (segmentId: string, name: string | null) => {
+        const state = get();
+        const target = findLiveSegment(state, segmentId);
+        // The store keeps only a valid name (ADR 065).
+        if (target === null || (name !== null && !isValidSegmentName(name))) {
+          return;
+        }
+        // A rename to the name that the segment has is no edit (ADR 065).
+        if ((target.segment.name ?? null) === name) {
+          return;
+        }
+        pushHistory();
+        // The replacement keeps the array order, which is the export order (ADR 007). The
+        // selection does not change.
+        write({
+          sequenceSegments: replaceSegmentAt(
+            state.sequenceSegments,
+            target.index,
+            withSegmentName(target.segment, name),
+          ),
+          canUndo: true,
+          canRedo: false,
+        });
       },
 
       deleteSelectedSegments: () => {

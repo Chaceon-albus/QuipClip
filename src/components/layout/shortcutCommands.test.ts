@@ -19,6 +19,7 @@ import {
   EXTENT_END_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
   planShortcutCommand,
+  EDGE_PRESS_LOCKED_ACTIONS,
   TRIM_LOCKED_ACTIONS,
   type ShortcutCommand,
   type ShortcutPress,
@@ -1759,6 +1760,90 @@ describe("planShortcutCommand", () => {
     });
   });
 
+  describe("Rename Segment (ADR 065)", () => {
+    it("opens the dialog for the current segment, with no frame or calibration needed", () => {
+      const current = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000"), segment("b", "6000", "9000")],
+          currentSegmentId: "b",
+        },
+        playback: { calibrationStatus: "unavailable", presentedFrame: null },
+      });
+      expect(planShortcutCommand("renameSegment", current)).toEqual({
+        kind: "renameSegment",
+        segmentId: "b",
+      });
+    });
+
+    it("does nothing with no current segment, or with several selected segments", () => {
+      expect(planShortcutCommand("renameSegment", createSnapshot())).toBeNull();
+      const pending = createSnapshot({ timeline: { pendingInPts: pts("0") } });
+      expect(planShortcutCommand("renameSegment", pending)).toBeNull();
+      const several = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000"), segment("b", "6000", "9000")],
+          currentSegmentId: null,
+          selectedSegmentIds: ["a", "b"],
+        },
+      });
+      expect(planShortcutCommand("renameSegment", several)).toBeNull();
+      // A current segment of another source is not on the timeline.
+      const foreign = createSnapshot({
+        timeline: {
+          segments: [segment("a", "0", "3000", "other-source")],
+          currentSegmentId: "a",
+        },
+      });
+      expect(planShortcutCommand("renameSegment", foreign)).toBeNull();
+    });
+
+    it("stays available while the preview loads the next clip of a sequence", () => {
+      // Playback crossed a junction: the next clip is attached and has no metadata yet, so no
+      // frame is on screen and no calibration holds. The segment stays current.
+      const loading = createSnapshot({
+        timeline: { segments: [segment("a", "0", "3000")], currentSegmentId: "a" },
+        playback: {
+          isReady: false,
+          calibrationStatus: "calibrating",
+          presentedFrame: null,
+          seekTargetSeconds: 2,
+        },
+        probe: null,
+      });
+      expect(planShortcutCommand("renameSegment", loading)).toEqual({
+        kind: "renameSegment",
+        segmentId: "a",
+      });
+      for (const [, inactive] of INACTIVE_SNAPSHOTS) {
+        expect(
+          planShortcutCommand("renameSegment", {
+            ...inactive,
+            timeline: loading.timeline,
+          }),
+        ).toEqual({ kind: "renameSegment", segmentId: "a" });
+      }
+    });
+
+    it("does nothing while a trim drags or an edge press is armed", () => {
+      const current = createSnapshot({
+        timeline: { segments: [segment("a", "0", "3000")], currentSegmentId: "a" },
+      });
+      expect(
+        planShortcutCommand("renameSegment", { ...current, isTrimDragging: true }),
+      ).toBeNull();
+      // The press on an edge has not crossed the drag threshold yet: a move can still start
+      // a trim behind the dialog.
+      expect(
+        planShortcutCommand("renameSegment", { ...current, isTrimArmed: true }),
+      ).toBeNull();
+      expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual(["renameSegment"]);
+      // An armed press locks no other action: a click on an edge still seeks at its release.
+      expect(
+        planShortcutCommand("deleteSegment", { ...current, isTrimArmed: true }),
+      ).toEqual({ kind: "deleteSegment" });
+    });
+  });
+
   describe("Delete, Escape, undo and redo", () => {
     it("deletes the current segment only", () => {
       expect(planShortcutCommand("deleteSegment", createSnapshot())).toBeNull();
@@ -1940,6 +2025,7 @@ describe("planShortcutCommand", () => {
           "markIn",
           "markOut",
           "redo",
+          "renameSegment",
           "selectAllSegments",
           "undo",
         ].sort(),

@@ -120,6 +120,18 @@ export interface SegmentTrimBeginInput {
    * otherwise.
    */
   readonly sequence?: TrimSequence | null;
+  /**
+   * True while a modal dialog of the page is open, such as the rename dialog (ADR 065). A press
+   * that the panel armed before the dialog opened then cannot become a trim behind it. Absent
+   * means false.
+   */
+  readonly isModalOpen?: boolean;
+}
+
+/** The edge of a press that can still become a trim at the drag threshold. */
+export interface SegmentTrimPress {
+  readonly segmentId: string;
+  readonly edge: SegmentEdge;
 }
 
 /**
@@ -140,6 +152,18 @@ export interface SegmentTrimSession {
   readonly getDraggingTrim: () => SegmentTrim | null;
   /** True while a trim is in its `dragging` phase. */
   readonly isDragging: () => boolean;
+  /**
+   * Records the edge press that the panel armed, which becomes a trim at the drag threshold, or
+   * null when the press ended or became a trim.
+   */
+  readonly armPress: (press: SegmentTrimPress | null) => void;
+  /** True while an edge press is armed and has not become a trim yet. */
+  readonly isPressArmed: () => boolean;
+  /**
+   * True while an edge press is armed or a trim drags. An edit that must not run under a trim,
+   * such as Rename Segment, reads it (ADR 030, ADR 065).
+   */
+  readonly isLocked: () => boolean;
   /** True when a press with these facts can start a trim (`planSegmentTrimStart`). */
   readonly canBegin: (input: SegmentTrimBeginInput) => boolean;
   /**
@@ -205,6 +229,7 @@ export function createSegmentTrimSession(
   const isVisible = stores.isVisible ?? isDocumentVisible;
   const listeners = new Set<() => void>();
   let trim: SegmentTrim | null = null;
+  let armedPress: SegmentTrimPress | null = null;
   let view: SegmentTrimView | null = null;
   let noticeCount = 0;
   // The subscription, the timer and the phase of the bound of a trim that waits for its frame.
@@ -331,6 +356,10 @@ export function createSegmentTrimSession(
   };
 
   const plan = (input: SegmentTrimBeginInput): SegmentTrim | null => {
+    // A press does not become a trim behind a modal dialog (ADR 065).
+    if (input.isModalOpen === true) {
+      return null;
+    }
     const { segments, sourceId } = timeline.getState();
     const planned = planSegmentTrimStart({
       segmentId: input.segmentId,
@@ -397,6 +426,14 @@ export function createSegmentTrimSession(
     getDraggingTrim: draggingTrim,
 
     isDragging: () => draggingTrim() !== null,
+
+    armPress: (press) => {
+      armedPress = press;
+    },
+
+    isPressArmed: () => armedPress !== null,
+
+    isLocked: () => armedPress !== null || draggingTrim() !== null,
 
     canBegin: (input) => plan(input) !== null,
 

@@ -8,7 +8,10 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { isSourceActive } from "@/components/layout/actionConditions";
-import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
+import {
+  isModalLayerOpen,
+  nativeContextMenuState,
+} from "@/components/layout/nativeContextMenuState";
 import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
 import { useMediaStore, type MediaStoreState } from "@/features/media";
 import {
@@ -905,6 +908,7 @@ export function TimelinePanel({
         }
         gestureModeRef.current = "scrub";
         trimPressRef.current = null;
+        segmentTrimSession.armPress(null);
         pressPlayback.finish();
       },
     });
@@ -1190,6 +1194,8 @@ export function TimelinePanel({
     }
     gestureModeRef.current = "trim";
     trimPressRef.current = { segmentId, edge };
+    // The armed press locks Rename Segment until it ends or becomes a trim (ADR 065).
+    segmentTrimSession.armPress({ segmentId, edge });
     trimPointerIdRef.current = event.pointerId;
     // A trim never resumes the playback, also when it stops and the rest of the drag scrubs.
     pressPlayback.pressTrim();
@@ -1219,12 +1225,16 @@ export function TimelinePanel({
         probe: media?.probe ?? null,
         totalDurationSeconds,
         sequence: readTrimSequence(),
+        // A press held while a dialog opened does not become a trim behind it (ADR 065).
+        isModalOpen: isModalLayerOpen(),
       })
     ) {
+      segmentTrimSession.armPress(null);
       gesture.sampleNow();
       return;
     }
     trimPressRef.current = null;
+    segmentTrimSession.armPress(null);
     gesture.cancel();
   };
 

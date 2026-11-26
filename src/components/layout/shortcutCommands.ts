@@ -142,17 +142,40 @@ export interface ShortcutSnapshot {
    * (`TRIM_LOCKED_ACTIONS`). Absent means false.
    */
   readonly isTrimDragging?: boolean;
+  /**
+   * True while an edge press is armed and has not crossed the drag threshold yet
+   * (`segmentTrimSession.isPressArmed`). A move of the held pointer can still start a trim, so
+   * the actions of `EDGE_PRESS_LOCKED_ACTIONS` do nothing. Absent means false.
+   */
+  readonly isTrimArmed?: boolean;
 }
 
 /**
  * The edit actions that do nothing while a drag trims a segment edge (ADR 030). The layer
  * still owns their key presses. An edit during the drag would change the segment under the
  * trim, and the limit, the snap and the preview of the trim would then be stale. Select All
- * would move the selection away from the segment that the trim selected (ADR 045).
+ * would move the selection away from the segment that the trim selected (ADR 045). Rename
+ * Segment would open a modal dialog while the drag holds the pointer (ADR 065).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
-  ["markIn", "markOut", "deleteSegment", "selectAllSegments", "undo", "redo"],
+  [
+    "markIn",
+    "markOut",
+    "deleteSegment",
+    "renameSegment",
+    "selectAllSegments",
+    "undo",
+    "redo",
+  ],
 );
+
+/**
+ * The actions that also do nothing while an edge press is armed (`isTrimArmed`), before it
+ * becomes a trim. Rename Segment opens a modal dialog, and a move of the held pointer behind it
+ * would start a trim during the rename (ADR 065).
+ */
+export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
+  new Set<ShortcutAction>(["renameSegment"]);
 
 /**
  * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
@@ -204,6 +227,11 @@ export type ShortcutCommand =
   | { readonly kind: "markIn"; readonly pts: Pts }
   | { readonly kind: "markOut"; readonly pts: Pts }
   | { readonly kind: "deleteSegment" }
+  | {
+      readonly kind: "renameSegment";
+      /** The current segment, which the rename dialog names from the moment it opens (ADR 065). */
+      readonly segmentId: string;
+    }
   | { readonly kind: "selectAllSegments" }
   | {
       readonly kind: "finishSegment";
@@ -781,6 +809,9 @@ export function planShortcutCommand(
   if (snapshot.isTrimDragging === true && TRIM_LOCKED_ACTIONS.has(action)) {
     return null;
   }
+  if (snapshot.isTrimArmed === true && EDGE_PRESS_LOCKED_ACTIONS.has(action)) {
+    return null;
+  }
 
   switch (action) {
     case "togglePlayback":
@@ -896,6 +927,16 @@ export function planShortcutCommand(
       // `outPts` is the first frame after the half-open segment (ADR 002). It is also the
       // frame at which the user pressed Mark Out, so a mark and a return to it show one frame.
       return planSegmentBoundarySeek(snapshot, hasActiveSource, "outPts");
+
+    case "renameSegment": {
+      // Rename opens the dialog for the live current segment (ADR 065), with the trim locks
+      // above. It reads no time, so it does not read the preview: while the preview loads the
+      // next clip of a sequence, the segment stays current and the action stays available.
+      const current = currentSegmentOf(timeline);
+      return current === null
+        ? null
+        : { kind: "renameSegment", segmentId: current.segment.id };
+    }
 
     case "deleteSegment":
       // Delete removes every selected segment (ADR 045).

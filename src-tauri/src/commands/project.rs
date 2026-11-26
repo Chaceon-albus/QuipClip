@@ -254,6 +254,10 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
             field: Some(format!("segments[{index}]")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
+        ProjectValidationError::InvalidSegmentName { index } => ProjectCommandError {
+            field: Some(format!("segments[{index}].name")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
         ProjectValidationError::EmptySourceId { index }
         | ProjectValidationError::DuplicateSourceId { index } => ProjectCommandError {
             field: Some(format!("sources[{index}].id")),
@@ -557,6 +561,10 @@ mod tests {
                 },
                 "segments[5]",
             ),
+            (
+                ProjectValidationError::InvalidSegmentName { index: 6 },
+                "segments[6].name",
+            ),
         ];
         for (error, field) in cases {
             let mapped = map_validation_error(error);
@@ -598,6 +606,7 @@ mod tests {
                 in_pts: Pts::new(10),
                 out_clip_id: "c1".to_owned(),
                 out_pts: Pts::new(20),
+                name: None,
             }],
         }
     }

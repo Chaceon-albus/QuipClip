@@ -47,6 +47,7 @@ export const SHORTCUT_ACTIONS = [
   "markOut",
   "goToSegmentIn",
   "goToSegmentOut",
+  "renameSegment",
   "deleteSegment",
   "selectAllSegments",
   "finishSegment",
@@ -73,7 +74,8 @@ export type ShortcutNamedKey =
   | "End"
   | "Delete"
   | "Backspace"
-  | "Escape";
+  | "Escape"
+  | "F2";
 
 export type ShortcutLetter =
   | "A"
@@ -411,6 +413,10 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   { key: letter("O"), modifiers: [], action: "markOut", repeat: "taken" },
   { key: letter("I"), modifiers: ["shift"], action: "goToSegmentIn", repeat: "taken" },
   { key: letter("O"), modifiers: ["shift"], action: "goToSegmentOut", repeat: "taken" },
+  // ADR 065. F2 is the rename key of Windows Explorer and of many editors. On a Mac keyboard whose
+  // function keys control the hardware, the user presses fn with it. The layer does nothing
+  // inside a text field or a dialog, so F2 never acts in the rename dialog itself.
+  { key: named("F2"), modifiers: [], action: "renameSegment", repeat: "taken" },
   { key: named("Delete"), modifiers: [], action: "deleteSegment", repeat: "taken" },
   { key: named("Backspace"), modifiers: [], action: "deleteSegment", repeat: "taken" },
   // ADR 045. The layer does nothing inside a text field, so there the key still selects the

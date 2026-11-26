@@ -27,11 +27,20 @@
  * An item runs the command that its key plans at the moment the item runs
  * (`planSegmentMenuCommand`), through the same runner as the key (`runShortcutCommand`). A
  * condition that changed while the menu was open therefore applies to the item too.
+ *
+ * An item that opens a dialog (`SEGMENT_MENU_DIALOG_ACTIONS`, ADR 065) runs only after the menu
+ * closed: when both its choice and the end of the mark arrived, in either order
+ * (`menuDialogHandoff.ts`). The end of the mark is the settled popup, or the first input after the
+ * grace period of a popup that never settles. When the choice came and the end did not, a timer
+ * of the hand-off ends the wait after that grace period. The item plans again at that moment, so
+ * it checks its target when the dialog opens. The backend binds the event of such an item to the
+ * show that it came from, and a later menu cancels the hand-off of the menu before it.
  */
 
 import type { StoreApi } from "zustand/vanilla";
 import {
   isModalLayerOpen,
+  NATIVE_CONTEXT_MENU_GRACE_MS,
   nativeContextMenuState,
   type NativeContextMenuState,
 } from "@/components/layout/nativeContextMenuState";
@@ -58,6 +67,11 @@ import {
 } from "@/features/timeline";
 import { i18n } from "@/i18n";
 import {
+  createMenuDialogHandoff,
+  type MenuDialogHandoff,
+  type MenuDialogHandoffSchedule,
+} from "./menuDialogHandoff";
+import {
   createTauriSegmentMenuBackend,
   type SegmentMenuBackend,
 } from "./nativeSegmentMenu";
@@ -66,6 +80,7 @@ import {
   canOpenSegmentMenu,
   planSegmentMenuCommand,
   resolveSegmentMenuTarget,
+  SEGMENT_MENU_DIALOG_ACTIONS,
   type SegmentMenuAction,
   type SegmentMenuEntry,
   type SegmentMenuItem,
@@ -94,7 +109,16 @@ export interface SegmentContextMenuDependencies {
   ) => string;
   /** Receives a failure of the native menu. The menu then did not show. */
   readonly onError?: (error: unknown) => void;
+  /** The timer of the dialog hand-off (`MenuDialogHandoffTimer`). `setTimeout` by default. */
+  readonly schedule?: MenuDialogHandoffSchedule;
 }
+
+const DEFAULT_SCHEDULE: MenuDialogHandoffSchedule = (callback, delayMs) => {
+  const handle = globalThis.setTimeout(callback, delayMs);
+  return () => {
+    globalThis.clearTimeout(handle);
+  };
+};
 
 /** A request of the segment layer to open the menu. */
 export interface SegmentContextMenuRequest {
@@ -131,6 +155,9 @@ export function createSegmentContextMenu(
     translate,
   } = dependencies;
   const onError = dependencies.onError ?? (() => {});
+  const schedule = dependencies.schedule ?? DEFAULT_SCHEDULE;
+  // The dialog hand-off of the latest menu.
+  let latestHandoff: MenuDialogHandoff<SegmentMenuAction> | null = null;
 
   /**
    * Runs the item that the user chose in the menu.
@@ -190,6 +217,11 @@ export function createSegmentContextMenu(
         state.selectSegment(segmentId);
       }
       const mark = menuState.open();
+      // The dialog hand-off of the menu before ends here, with its timer, so no dialog of that
+      // menu opens after this one opened (ADR 026). The backend binds the event of a dialog item
+      // to its own show (`nativeSegmentMenu.ts`), so a late event of that menu never reaches
+      // the hand-off of this one.
+      latestHandoff?.cancel();
 
       let shown: Promise<void>;
       try {
@@ -200,8 +232,27 @@ export function createSegmentContextMenu(
           keyNames: resolveShortcutKeyNames(translate),
           translate,
         });
+        // An item that opens a dialog waits until the menu has gone (ADR 065). The item event
+        // proves that the menu is closing, so a popup reply that never comes ends the wait after
+        // the grace period, and the mark closes with it.
+        const handoff = createMenuDialogHandoff<SegmentMenuAction>(
+          (action) => select(action, target, entries),
+          {
+            schedule,
+            delayMs: NATIVE_CONTEXT_MENU_GRACE_MS,
+            onExpire: mark.close,
+          },
+        );
+        latestHandoff = handoff;
+        mark.onClose(handoff.close);
         shown = backend.show(entries, position, {
-          onSelect: (action) => select(action, target, entries),
+          onSelect: (action) => {
+            if (SEGMENT_MENU_DIALOG_ACTIONS.has(action)) {
+              handoff.choose(action);
+              return;
+            }
+            select(action, target, entries);
+          },
           onPopup: mark.showing,
         });
       } catch (error) {

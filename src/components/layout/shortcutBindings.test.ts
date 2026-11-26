@@ -173,6 +173,12 @@ describe("shortcutBindings", () => {
         repeat: "taken",
       },
       {
+        name: "F2",
+        press: () => press({ key: "F2", code: "F2" }),
+        action: "renameSegment",
+        repeat: "taken",
+      },
+      {
         name: "Delete",
         press: () => press({ key: "Delete", code: "Delete" }),
         action: "deleteSegment",
@@ -363,6 +369,20 @@ describe("shortcutBindings", () => {
         );
         for (const action of SHORTCUT_ACTIONS) {
           expect(bound.has(action)).toBe(true);
+        }
+      }
+    });
+
+    it("does not claim F2 with a modifier, or another function key (ADR 065)", () => {
+      for (const platform of PLATFORMS) {
+        for (const p of [
+          press({ key: "F2", code: "F2", shiftKey: true }),
+          press({ key: "F2", code: "F2", ...primary(platform) }),
+          press({ key: "F2", code: "F2", altKey: true }),
+          press({ key: "F1", code: "F1" }),
+          press({ key: "F3", code: "F3" }),
+        ]) {
+          expect(findShortcutBinding(p, platform)).toBeNull();
         }
       }
     });
