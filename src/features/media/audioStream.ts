@@ -1,26 +1,9 @@
 /**
- * The audio stream of a source: the stream that the preview reads, the override that the user
- * chose, and the effective stream that the export, the measurement and the envelope read
- * (ADR 070).
+ * The audio stream of a source: the override that the user chose, and the effective stream that
+ * the export, the measurement, the envelope and the preview read (ADR 070).
  */
 
 import type { AudioProbe, ListedAudioStream, MediaProbe } from "./types";
-
-/**
- * Returns the audio stream of a source that the remux windows of a MediaSource and the PCM
- * windows of the cue read, or null when the source has no audio (ADR 070). A window request of a
- * source that is not an FLV names this stream by its absolute index, and the preview decides from
- * its codec whether a window copies or transcodes the audio (ADR 046).
- *
- * It is the preferred stream of the probe. The preview does not follow the override of the user
- * yet. Each reader of the preview audio takes the stream from here, so the requests, the copy
- * decision and the cue read one stream.
- */
-export function previewAudioStreamOf(
-  probe: Pick<MediaProbe, "audio">,
-): AudioProbe | null {
-  return probe.audio;
-}
 
 /**
  * The audio stream that the user chose for a source (ADR 070): its absolute index, and its codec,
@@ -60,9 +43,9 @@ export function isFlvProbe(probe: Pick<MediaProbe, "formatNames">): boolean {
 
 /**
  * The effective audio stream of a source (ADR 070): its override, or its preferred stream when it
- * has no override, or null for a source with no audio. Every reader of the stream of the export
- * takes it from here: the export request, the request and the key of the measurement, the facts of
- * the setup step, and the request of the envelope.
+ * has no override, or null for a source with no audio. Every reader of the stream takes it from
+ * here: the export request, the request and the key of the measurement, the facts of the setup
+ * step, the request of the envelope, and the preview (`previewAudioStreamOf`).
  *
  * The override is kept for the id of the source, which names one revision of the file (ADR 007),
  * so its facts are the facts of this probe. An FLV has one audio stream for QuipClip, and its
@@ -81,6 +64,25 @@ export function effectiveAudioStreamOf(
     sampleRate: override.sampleRate,
     channels: override.channels,
   };
+}
+
+/**
+ * Returns the audio stream of a source that the remux windows of a MediaSource and the PCM
+ * windows of the cue read, or null when the source has no audio (ADR 070). A window request of a
+ * source that is not an FLV names this stream by its absolute index, and the preview decides from
+ * its codec whether a window copies or transcodes the audio (ADR 046).
+ *
+ * It is the effective stream of the source (`effectiveAudioStreamOf`): the override of the user,
+ * else the preferred stream. Each reader of the preview audio takes the stream from here, so the
+ * requests, the copy decision and the cue read the stream that the export reads. An FLV has one
+ * audio stream for QuipClip, so it gets its preferred stream, and its windows keep the mapping
+ * `0:a:0` (`audioStreamField`).
+ */
+export function previewAudioStreamOf(
+  probe: AudioStreamSource,
+  override: AudioStreamOverride | undefined,
+): AudioProbe | null {
+  return effectiveAudioStreamOf(probe, override);
 }
 
 /**

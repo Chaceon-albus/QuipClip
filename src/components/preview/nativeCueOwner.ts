@@ -10,13 +10,15 @@
  * The cue needs the source time of media time 0 of the element. A native source has that time
  * only after the calibration of ADR 003. The pane therefore attaches the cue when the
  * calibration is ready. It detaches the cue when the element, the source or the calibration
- * changes.
+ * changes, and it replaces the cue when the effective audio stream of the source changes
+ * (ADR 070).
  */
 
 import type { ScrubCue } from "@/features/playback/cue";
 import type { PcmCue } from "@/features/playback/mse/pcmCue";
 import { videoStartSeconds } from "@/features/playback/mse/timeline";
 import type { Pts, Rational } from "@/types/project";
+import type { HeldAudioStream } from "./audioStreamChange";
 
 /** The file that the PCM windows of the cue read. */
 export interface NativeCueSource {
@@ -62,8 +64,9 @@ export interface NativeCueOwnerDependencies {
 
 export interface NativeCueOwner {
   /**
-   * Starts the cue of `element`. A previous cue stops first. A second call for the same element
-   * and source keeps the cue that runs.
+   * Starts the cue of `element`. A previous cue stops first. A second call for the same element,
+   * source and audio stream keeps the cue that runs. A call with another audio stream replaces the
+   * cue, with its PCM and its windows (ADR 070).
    */
   readonly attach: (
     element: NativeCueElement,
@@ -74,6 +77,8 @@ export interface NativeCueOwner {
   readonly detach: (element: NativeCueElement) => void;
   /** Sets the gain of the cue that the owner holds. */
   readonly setGain: (gain: number) => void;
+  /** The source and the audio stream of the cue that the owner holds, or null. */
+  readonly held: () => HeldAudioStream | null;
 }
 
 /**
@@ -108,6 +113,8 @@ function positionOf(element: NativeCueElement): number | null {
 interface Owned {
   readonly element: NativeCueElement;
   readonly sourceRevisionKey: string;
+  /** The audio stream that the PCM windows of the cue decode. */
+  readonly audioStreamIndex: number;
   readonly cue: PcmCue;
   readonly onMove: () => void;
   readonly stopGestures: () => void;
@@ -133,10 +140,13 @@ export function createNativeCueOwner(
 
   return {
     attach: (element, target, gain) => {
+      // The cue keeps the stream of its windows for its life, so the stream is part of what
+      // makes an attachment the same (ADR 070).
       if (
         owned !== null &&
         owned.element === element &&
-        owned.sourceRevisionKey === target.sourceRevisionKey
+        owned.sourceRevisionKey === target.sourceRevisionKey &&
+        owned.audioStreamIndex === target.source.audioStreamIndex
       ) {
         return;
       }
@@ -156,6 +166,7 @@ export function createNativeCueOwner(
       owned = {
         element,
         sourceRevisionKey: target.sourceRevisionKey,
+        audioStreamIndex: target.source.audioStreamIndex,
         cue,
         onMove,
         stopGestures,
@@ -172,5 +183,12 @@ export function createNativeCueOwner(
     setGain: (gain) => {
       owned?.cue.setGain(gain);
     },
+    held: () =>
+      owned === null
+        ? null
+        : {
+            sourceRevisionKey: owned.sourceRevisionKey,
+            audioStreamIndex: owned.audioStreamIndex,
+          },
   };
 }

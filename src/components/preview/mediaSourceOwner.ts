@@ -19,6 +19,7 @@ import type {
   MseVideoElement,
 } from "@/features/playback/mse/controller";
 import type { PcmCue } from "@/features/playback/mse/pcmCue";
+import type { HeldAudioStream } from "./audioStreamChange";
 import { whenStoreReady } from "./mediaSourceRules";
 
 /** What the owner needs to know of the open source. */
@@ -144,6 +145,12 @@ export interface MediaSourceOwner {
   readonly setGain: (gain: number) => void;
   /** The element that the owner holds, or null. */
   readonly element: () => HTMLVideoElement | null;
+  /**
+   * The source and the audio stream that the windows of the held element map, or null when the
+   * owner holds no element. The controller reads the stream when it starts, and it keeps it for
+   * the life of the element, so a change of the effective stream replaces the element (ADR 070).
+   */
+  readonly held: () => HeldAudioStream | null;
 }
 
 /**
@@ -170,6 +177,8 @@ const LATE_SEEK_REPAIR_DELAY_MS = 100;
 
 interface Owned {
   readonly sourceRevisionKey: string;
+  /** The audio stream that the windows of the controller map (`MseSource.audioStreamIndex`). */
+  readonly audioStreamIndex: number | null;
   readonly element: HTMLVideoElement;
   readonly controller: MseController;
   readonly cue: PcmCue | null;
@@ -209,6 +218,8 @@ export function createMediaSourceOwner(
 
   return {
     attach: (element, target, gain) => {
+      // One element keeps one controller. A new audio stream does not restart it on the same
+      // element: the preview replaces the element (ADR 070), and the new element comes here.
       if (owned?.element === element) {
         return;
       }
@@ -332,6 +343,7 @@ export function createMediaSourceOwner(
         cue === null ? null : dependencies.listenForGestures(() => cue.prime());
       current = {
         sourceRevisionKey: key,
+        audioStreamIndex: source.audioStreamIndex,
         element,
         controller,
         cue,
@@ -358,5 +370,12 @@ export function createMediaSourceOwner(
       owned?.cue?.setGain(gain);
     },
     element: () => owned?.element ?? null,
+    held: () =>
+      owned === null
+        ? null
+        : {
+            sourceRevisionKey: owned.sourceRevisionKey,
+            audioStreamIndex: owned.audioStreamIndex,
+          },
   };
 }

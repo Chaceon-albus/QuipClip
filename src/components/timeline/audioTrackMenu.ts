@@ -31,19 +31,29 @@ export interface AudioTrackMenu {
   readonly probe: Pick<MediaProbe, "formatNames">;
   /** The absolute index of the effective stream, which has the mark. */
   readonly checkedIndex: number | null;
-  /** True when the submenu shows the note that the preview can play another track. */
+  /**
+   * True when the submenu shows the note that the preview can play another track: for a source
+   * that the web view opens itself.
+   */
   readonly showsPreviewNote: boolean;
 }
+
+/**
+ * How the preview plays a source (`PreviewPath.kind`, ADR 046): the web view opens the file
+ * itself, or a MediaSource plays remux windows of it.
+ */
+export type AudioTrackPreviewKind = "native" | "mediaSource";
 
 /**
  * The submenu of a source with the probe `probe` and the override `override`, or null when the
  * source has fewer than two audio streams, or is an FLV: such a source has no submenu, and nothing
  * else changes for it. An FLV has one audio stream for QuipClip, however many ffprobe lists
- * (`isFlvProbe`).
+ * (`isFlvProbe`). `previewKind` is how the preview plays the source, which decides the note.
  */
 export function presentAudioTrackMenu(
   probe: Pick<MediaProbe, "audio" | "audioStreams" | "formatNames"> | undefined,
   override: AudioStreamOverride | undefined,
+  previewKind: AudioTrackPreviewKind,
 ): AudioTrackMenu | null {
   const streams = probe?.audioStreams ?? [];
   if (probe === undefined || streams.length < 2 || isFlvProbe(probe)) {
@@ -57,12 +67,11 @@ export function presentAudioTrackMenu(
     })),
     probe,
     checkedIndex: effectiveAudioStreamOf(probe, override)?.index ?? null,
-    // ADR 070 shows the note only for a native source. The preview does not follow the override
-    // yet: the windows of a MediaSource and the PCM cue still read the preferred stream. So for
-    // now every source with two or more audio streams can preview another track than the export
-    // uses, and the note shows for each of them. The unit that makes the preview follow the
-    // override narrows this to a native source.
-    showsPreviewNote: true,
+    // The element of a native source plays the track that the web view chooses, which QuipClip
+    // does not know, so the note shows for each effective stream, also the preferred one. The
+    // windows of a MediaSource source map the effective stream, so its preview plays the track
+    // that the export uses, and it gets no note (ADR 070).
+    showsPreviewNote: previewKind === "native",
   };
 }
 

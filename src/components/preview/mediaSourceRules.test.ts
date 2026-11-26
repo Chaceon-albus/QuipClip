@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MEDIA_ERR_DECODE, MEDIA_ERR_SRC_NOT_SUPPORTED } from "./decodeFailure";
 import {
   addMediaSourceNotice,
+  clearMediaSourceNotice,
   dismissMediaSourceNotice,
   mediaSourceNoticesFor,
   mediaSourcePanelTrigger,
@@ -157,6 +158,26 @@ describe("the notices of a MediaSource source", () => {
     expect(dismissMediaSourceNotice(NO_MEDIA_SOURCE_NOTICES, noSound)).toBe(
       NO_MEDIA_SOURCE_NOTICES,
     );
+  });
+
+  it("clears the notice of no sound for a new audio stream, so the new stream reports again", () => {
+    // ADR 070: the notice was about the stream of the old windows.
+    let notices = addMediaSourceNotice(NO_MEDIA_SOURCE_NOTICES, "a", decrease);
+    notices = addMediaSourceNotice(notices, "a", noSound);
+    notices = clearMediaSourceNotice(notices, "a", noSound);
+    expect(shownMediaSourceNotices(notices, "a")).toEqual([decrease]);
+
+    // A dismissed notice shows again when the new stream is left out too.
+    notices = addMediaSourceNotice(notices, "a", noSound);
+    notices = dismissMediaSourceNotice(notices, noSound);
+    notices = clearMediaSourceNotice(notices, "a", noSound);
+    notices = addMediaSourceNotice(notices, "a", noSound);
+    expect(shownMediaSourceNotices(notices, "a")).toEqual([decrease, noSound]);
+
+    // Another source, and a notice that is not there, change nothing.
+    expect(clearMediaSourceNotice(notices, "b", noSound)).toBe(notices);
+    const fresh = addMediaSourceNotice(NO_MEDIA_SOURCE_NOTICES, "a", decrease);
+    expect(clearMediaSourceNotice(fresh, "a", noSound)).toBe(fresh);
   });
 });
 

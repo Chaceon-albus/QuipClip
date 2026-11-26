@@ -114,7 +114,21 @@ again for each window. The revision of the source binds the index to the file (A
 - **A `MediaSource` source.** A change of the effective stream replaces the preview element
   through the reload of ADR 039, with no stall, as a recalibration does (ADR 063). The new
   element gets a new MediaSource and new windows, and it goes back to the position of the
-  playhead. The playback does not start again.
+  playhead. The playback does not start again. While the reload runs, the preview is in the
+  state of a recalibration: the actions that need a confirmed frame are off. The notice that
+  the preview has no sound goes at the change, because it was about the stream before. A
+  change while the preview is stalled, or while an element that is already retired gives way
+  to its replacement, starts no reload of its own: the element that loads next reads the
+  effective stream.
+  - While a seek waits for its frame, the new element goes to the destination of that seek,
+    not to the position that the playhead shows for it. The two can differ by less than one
+    frame, and the destination names the frame.
+  - When the preview shows the decode failure panel for the source, the change loads the
+    preview again, with windows of the effective stream. A native source does not load again,
+    because its element does not read the effective stream.
+  - A playback that waits for the element of the next clip of the sequence does not start on
+    the new element, after a reload and after a load from the failure panel. The seek to that
+    clip stays.
 - **A native source with a PCM cue (ADR 062).** A change of the effective stream replaces the
   cue, with its PCM and its windows. The element and its calibration do not change.
 
@@ -152,3 +166,5 @@ stream only where the PCM cue is active.
 - An override lasts for the session, until a version saves the project.
 - A change of the override of a `MediaSource` source loads the preview again, so the preview
   shows a short wait and stops a playback.
+- A trim whose edge the user released, and which waits for its frame, is not applied when that
+  reload starts during the wait. This is the rule of a trim for each loss of the element.

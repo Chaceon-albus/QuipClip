@@ -5,6 +5,7 @@
 
 import type { AudioProbe, MediaProbe } from "@/features/media";
 import { mediaDurationFor, videoStartSeconds } from "@/features/playback/mse/timeline";
+import { isMacOS, isWindows } from "@/lib/platform";
 import type {
   WindowAudio,
   WindowContainer,
@@ -39,8 +40,9 @@ export type PreviewPathProbe = Pick<
 export interface PreviewPathInput {
   readonly probe: PreviewPathProbe;
   /**
-   * The audio stream that the windows read (`previewAudioStreamOf`), or null when the source has
-   * no audio. Its codec decides whether a window copies or transcodes the audio (ADR 070).
+   * The audio stream that the windows read (`previewAudioStreamOf`: the effective stream), or null
+   * when the source has no audio. Its codec decides whether a window copies or transcodes the
+   * audio (ADR 070).
    */
   readonly audioStream: Pick<AudioProbe, "codec"> | null;
   /** The base name of the open file. Only its extension is read. */
@@ -138,6 +140,35 @@ function supports(isTypeSupported: (type: string) => boolean, type: string): boo
   } catch {
     return false;
   }
+}
+
+/** The platform of the web view. */
+export function currentPreviewPlatform(): PreviewPlatform {
+  if (isWindows()) {
+    return "windows";
+  }
+  if (isMacOS()) {
+    return "macos";
+  }
+  return "other";
+}
+
+/**
+ * How the preview of this web view plays `media` (ADR 046), with the audio stream `audioStream`
+ * (`previewAudioStreamOf`). The kind of the path does not depend on the audio stream: only the
+ * copy or transcode decision of a MediaSource source does.
+ */
+export function previewPathOfMedia(
+  media: { readonly probe: PreviewPathProbe; readonly fileName: string },
+  audioStream: Pick<AudioProbe, "codec"> | null,
+): PreviewPath {
+  return choosePreviewPath({
+    probe: media.probe,
+    audioStream,
+    fileName: media.fileName,
+    platform: currentPreviewPlatform(),
+    isTypeSupported: mediaSourceSupport(),
+  });
 }
 
 /** `MediaSource.isTypeSupported` of this web view, or null without a MediaSource. */

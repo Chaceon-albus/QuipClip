@@ -38,23 +38,44 @@ const FIRST: AudioStreamOverride = {
   channels: 1,
 };
 
+/** The format names of a Matroska file, which can hold an override. */
+const MKV = ["matroska", "webm"];
+
 describe("previewAudioStreamOf", () => {
-  it("gives the preferred stream, also when it is not the first audio stream", () => {
+  it("gives the preferred stream with no override, also when it is not the first audio stream", () => {
     // The stream with the `default` disposition is the second one (ADR 070).
     const probe = {
       audio: PREFERRED,
       audioStreams: [listed(1, "aac", false), listed(2, "ac3", true)],
+      formatNames: MKV,
     };
-    expect(previewAudioStreamOf(probe)).toEqual(PREFERRED);
+    expect(previewAudioStreamOf(probe, undefined)).toEqual(PREFERRED);
+  });
+
+  it("gives the override, so the windows and the cue read the stream that the export reads", () => {
+    const probe = {
+      audio: PREFERRED,
+      audioStreams: [listed(1, "opus", false), listed(2, "ac3", true)],
+      formatNames: MKV,
+    };
+    expect(previewAudioStreamOf(probe, FIRST)).toEqual(FIRST);
+    expect(previewAudioStreamOf(probe, FIRST)).toEqual(
+      effectiveAudioStreamOf(probe, FIRST),
+    );
+  });
+
+  it("gives the preferred stream of an FLV, which holds no override", () => {
+    // An FLV keeps the mapping 0:a:0, so its preview reads its one audio stream.
+    const probe = { audio: PREFERRED, formatNames: ["flv"] };
+    expect(previewAudioStreamOf(probe, FIRST)).toEqual(PREFERRED);
   });
 
   it("gives null for a source with no audio", () => {
-    expect(previewAudioStreamOf({ audio: null })).toBeNull();
+    expect(
+      previewAudioStreamOf({ audio: null, formatNames: MKV }, undefined),
+    ).toBeNull();
   });
 });
-
-/** The format names of a Matroska file, which can hold an override. */
-const MKV = ["matroska", "webm"];
 
 describe("the override and the effective stream (ADR 070)", () => {
   it("records the index, the codec, the rate and the channels of a listed stream", () => {

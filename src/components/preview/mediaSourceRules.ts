@@ -148,6 +148,29 @@ export function addMediaSourceNotice(
   return { ...current, shown: [...current.shown, key] };
 }
 
+/**
+ * The notices without `key` for `sourceRevisionKey`, neither shown nor dismissed, so a later
+ * report shows it again. A new audio stream of the source (ADR 070) clears the notice that the
+ * preview plays no sound: that notice was about the stream that the old windows read.
+ */
+export function clearMediaSourceNotice(
+  notices: MediaSourceNotices,
+  sourceRevisionKey: string,
+  key: MediaSourceNoticeKey,
+): MediaSourceNotices {
+  if (
+    notices.sourceRevisionKey !== sourceRevisionKey ||
+    (!notices.shown.includes(key) && !notices.dismissed.includes(key))
+  ) {
+    return notices;
+  }
+  return {
+    ...notices,
+    shown: notices.shown.filter((item) => item !== key),
+    dismissed: notices.dismissed.filter((item) => item !== key),
+  };
+}
+
 /** The notices with `key` dismissed. */
 export function dismissMediaSourceNotice(
   notices: MediaSourceNotices,

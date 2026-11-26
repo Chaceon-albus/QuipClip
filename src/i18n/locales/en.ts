@@ -416,8 +416,9 @@ export const en = {
       audioTrackNamedNoChannels: "Track {{number}}: {{name}} ({{codec}})",
       audioTrackUnnamedNoChannels: "Track {{number}} ({{codec}})",
       audioTrackUnknownCodec: "unknown codec",
-      // A line of text under the items of the submenu, not an item. The preview plays the audio
-      // track that the web view chooses, and QuipClip cannot control it.
+      // A line of text under the items of the submenu, not an item. It shows only for a file
+      // that the web view opens itself: the preview then plays the audio track that the web view
+      // chooses, and QuipClip cannot control it.
       audioTrackPreviewNote:
         "The preview can play a different audio track from the one that the export uses.",
       moveLeft: "Move Clip Left",

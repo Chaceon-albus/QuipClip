@@ -407,7 +407,8 @@ export interface PlaybackState {
    * and so do the detach and the attach of the new element before its metadata. An attach of a
    * different source, a loss of readiness of the new element and a reset end it. A failed seek
    * drops only the request of the reload, and the reload goes on. The reload of a decode stall
-   * does not set it.
+   * does not set it. The replacement of the element for a new audio stream
+   * (`replacePreviewElement`, ADR 070) sets it, as a recalibration does.
    *
    * While it is true, the cue of ADR 019 and the Web Audio cue of ADR 062 do not start, so no
    * cue loads the file beside the new element before its anchor.
@@ -528,6 +529,41 @@ export interface PlaybackActions {
    * It does not permit a new automatic recalibration of the source (`syncAnchorWaitExpired`).
    */
   recalibrate: (sourceRevisionKey: string) => void;
+
+  /**
+   * Replaces the attached element of the source with a new element of the same source, with no
+   * decode stall, on the path of a recalibration (ADR 063). The preview calls it when the
+   * effective audio stream of a MediaSource source changes (ADR 070): the new element gets a new
+   * MediaSource and new windows of that stream. It starts in the one step of `recalibrate`: it
+   * ends the playback, the cue, the priming play, the queued seek and the stop point of a segment
+   * playback, raises `reloadGeneration` once and sets `isRecalibrating`, and the old element is
+   * retired until the pane detaches it. The playback does not start again.
+   *
+   * The request of the reload is the position of the playhead, so the new element goes back to
+   * it:
+   *
+   * - a navigation that waits for the calibration anchor, with its seek and its steps, and a
+   *   scrub seek as an exact seek;
+   * - else, while a seek is pending on a ready calibration, the PTS of its destination: the
+   *   frame that the seek named, also for a frame seek that aims at the middle of the frame. The
+   *   playhead keeps the display target of the seek until the new element shows that frame.
+   *   Without a calibration, its display target, as an exact seek in seconds from the start of
+   *   the source;
+   * - else, on a ready calibration, the PTS of the confirmed frame (`presentedFrame`);
+   * - else the position of the approximate clock, as `recalibrate` takes it;
+   * - before the element is ready, nothing: the new element loads at the start.
+   *
+   * The new element of a reload that has no metadata yet goes too, and the request of that reload
+   * goes on to the next element. It does nothing in these cases:
+   *
+   * - The element is stalled (`decodeStall`), or its replacement started already. A seek replaces
+   *   a stalled element, and the preview reads the stream for each element that it attaches.
+   * - `sourceRevisionKey` is not the attached source, or no element is attached.
+   *
+   * It removes no denial of the source, and it does not permit a new automatic recalibration
+   * (`syncAnchorWaitExpired`).
+   */
+  replacePreviewElement: (sourceRevisionKey: string) => void;
 
   /**
    * True when `element` is the attached element of the source and a recalibration retired it

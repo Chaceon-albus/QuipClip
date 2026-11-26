@@ -34,8 +34,10 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { previewPathOfMedia } from "@/components/preview/previewPath";
 import {
   audioOverrideStore,
+  previewAudioStreamOf,
   useAudioOverrides,
   useMediaStore,
   type MediaStoreState,
@@ -211,10 +213,18 @@ export function ClipLabels({
             runningSourceId,
           },
         );
-        const audioTracks = presentAudioTrackMenu(
-          sources[layout.sourceId]?.probe,
-          audioOverrides[layout.sourceId],
-        );
+        const media = sources[layout.sourceId];
+        const override = audioOverrides[layout.sourceId];
+        // The note of the submenu depends on how the preview plays the source (ADR 070).
+        const audioTracks =
+          media === undefined
+            ? null
+            : presentAudioTrackMenu(
+                media.probe,
+                override,
+                previewPathOfMedia(media, previewAudioStreamOf(media.probe, override))
+                  .kind,
+              );
         return (
           <div
             key={layout.clipId}

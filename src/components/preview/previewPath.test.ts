@@ -135,12 +135,23 @@ describe("choosePreviewPath", () => {
     expect(
       choosePreviewPath({
         probe,
-        audioStream: previewAudioStreamOf(probe),
+        audioStream: previewAudioStreamOf(probe, undefined),
         fileName: "two-tracks.mkv",
         platform: "macos",
         isTypeSupported: webKit,
       }),
     ).toMatchObject({ kind: "mediaSource", audio: "transcode" });
+    // With an override of the AAC stream, the windows map that stream and copy it.
+    const override = { index: 1, codec: "aac", sampleRate: 48000, channels: 2 };
+    expect(
+      choosePreviewPath({
+        probe,
+        audioStream: previewAudioStreamOf(probe, override),
+        fileName: "two-tracks.mkv",
+        platform: "macos",
+        isTypeSupported: webKit,
+      }),
+    ).toMatchObject({ kind: "mediaSource", audio: "copy" });
   });
 
   it("takes HEVC where the web view accepts it", () => {

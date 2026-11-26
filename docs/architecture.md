@@ -493,7 +493,8 @@ effective audio stream of that source. Without a choice, it is the stream that t
 prefers. The export, the loudness measurement, the audio envelope, the windows of a
 `MediaSource` preview and the PCM cue read the effective stream. The native `<video>` element
 plays the stream that the web view chooses, and a note in the submenu says so. A source with
-one audio stream looks and behaves as before.
+one audio stream looks and behaves as before. An FLV has no such submenu, because each reader
+of an FLV reads its one audio stream.
 
 ## ffmpeg lifecycle
 

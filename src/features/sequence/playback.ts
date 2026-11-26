@@ -75,6 +75,24 @@ type Navigation = { readonly clipId: string } & (
   | { readonly kind: "segment"; readonly inPts: Pts; readonly outPts: Pts }
 );
 
+/**
+ * A navigation that waits for an attach, as a seek with no play: a play that waits loses its
+ * play, and a Play Segment that waits becomes a seek to its In. The replacement of the element
+ * for a new audio stream stops the playback, which does not start again (ADR 070).
+ */
+function withoutPlay(navigation: Navigation): {
+  readonly navigation: Navigation;
+  readonly play: false;
+} {
+  return {
+    navigation:
+      navigation.kind === "segment"
+        ? { kind: "pts", clipId: navigation.clipId, pts: navigation.inPts }
+        : navigation,
+    play: false,
+  };
+}
+
 /** Dependencies of `createSequencePlayback`, injected for tests. */
 export interface SequencePlaybackDependencies {
   readonly playback: PlaybackStore;
@@ -129,6 +147,14 @@ export interface SequencePlayback {
    * the trim. Does nothing while no navigation waits.
    */
   readonly dropNavigation: () => void;
+  /**
+   * Ends the play intent of the sequence, and keeps its navigation (ADR 070). A segment playback
+   * that crosses a junction ends. A navigation that waits for the attach of its clip stays as a
+   * seek with no play: a play loses its play, and a Play Segment becomes a seek to its In. The
+   * preview calls it before it mounts the element of a failed source again for a new audio
+   * stream, because the playback does not start again after a change of the stream.
+   */
+  readonly dropPlayIntent: () => void;
 }
 
 /**
@@ -542,6 +568,19 @@ export function createSequencePlayback(
     }
   };
 
+  /**
+   * Ends the play intent of the sequence and keeps its navigation (ADR 070): a segment playback
+   * that crosses a junction ends, and a navigation that waits for an attach stays as a seek with
+   * no play (`withoutPlay`).
+   */
+  const stripPlayIntent = (): void => {
+    playingTo = null;
+    endedWhilePlaying = false;
+    if (pending !== null) {
+      pending = withoutPlay(pending.navigation);
+    }
+  };
+
   // The depth of the actions of the interface that run (`asNavigation`).
   let actionDepth = 0;
 
@@ -821,6 +860,20 @@ export function createSequencePlayback(
         playback.getState().recalibrate(key);
       }
     }),
+    // The replacement of the element for a new audio stream (ADR 070). The preview passes the
+    // revision key of the source of its element, not the key of the interface, so the key passes
+    // through and the playback store refuses an old one. It is not a navigation of the user: a
+    // navigation that waits for the attach of a clip stays, and it runs on the new element. The
+    // store stops the playback, and the playback does not start again: a segment playback that
+    // crosses a junction ends here too, and a navigation that waits keeps its seek and loses its
+    // play. A replacement that the store refuses changes nothing here.
+    replacePreviewElement: asNavigation((sourceRevisionKey: string) => {
+      const generation = playback.getState().reloadGeneration;
+      playback.getState().replacePreviewElement(sourceRevisionKey);
+      if (playback.getState().reloadGeneration !== generation) {
+        stripPlayIntent();
+      }
+    }),
     isRetiredElement: (...args) => playback.getState().isRetiredElement(...args),
     refusesTransportForReload: () => playback.getState().refusesTransportForReload(),
     syncAnchorWaitExpired: (...args) =>
@@ -969,6 +1022,10 @@ export function createSequencePlayback(
     }
   });
 
+  const dropPlayIntent = asNavigation((): void => {
+    stripPlayIntent();
+  });
+
   return {
     store,
     handleEnded,
@@ -976,6 +1033,7 @@ export function createSequencePlayback(
     isSwitching,
     seekToClipFrame,
     dropNavigation,
+    dropPlayIntent,
   };
 }
 

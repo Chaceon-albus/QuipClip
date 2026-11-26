@@ -637,4 +637,244 @@ describe("sequence playback", () => {
       },
     );
   });
+
+  describe("the replacement of the element for a new audio stream (ADR 070)", () => {
+    it("passes the key of the source through, also on a sequence", () => {
+      const h = harness([a1, b1]);
+      const shown = attach(h.playback, A);
+      h.sequence.store.getState().replacePreviewElement("an old key");
+      expect(h.playback.getState().reloadGeneration).toBe(0);
+      h.sequence.store.getState().replacePreviewElement(shown.key);
+      expect(h.playback.getState().reloadGeneration).toBe(1);
+      expect(h.sequence.store.getState().isRecalibrating).toBe(true);
+      // Not a cold switch, and the clip on screen stays.
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+    });
+
+    it("keeps a navigation that waits for the attach of a clip", () => {
+      const h = harness([a1, b1]);
+      const shown = attach(h.playback, A);
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      expect(h.sequence.store.getState().switching).toBe(true);
+      h.sequence.store.getState().replacePreviewElement(shown.key);
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      expect(h.sequence.store.getState().switching).toBe(true);
+      attach(h.playback, B);
+      expect(h.playback.getState().seekTargetSeconds).toBe(1);
+    });
+
+    it("ends a segment playback that crosses a junction, because the store stops it", () => {
+      const h = harness([a1, b1]);
+      const shown = attach(h.playback, A);
+      h.sequence.store
+        .getState()
+        .playSegment(h.virtual("a1", "50"), h.virtual("b1", "50"));
+      h.sequence.store.getState().replacePreviewElement(shown.key);
+      expect(h.playback.getState().isPlaying).toBe(false);
+      // A late end of the old element does not go on at the next clip.
+      h.sequence.notePause(true);
+      expect(h.sequence.handleEnded()).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+    });
+
+    /** Attaches an element of `which` whose metadata has not loaded. */
+    function attachUnloaded(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const element = createFakeElement();
+      element.readyState = 0;
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, element);
+      return { element, key };
+    }
+
+    /** The detach of `old` and a replacement element of `which` with its metadata. */
+    function replaceLoaded(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+      old: { element: ReturnType<typeof createFakeElement>; key: string },
+    ) {
+      playback.getState().detach(old.key, old.element);
+      const next = attachUnloaded(playback, which);
+      next.element.readyState = 1;
+      playback.getState().syncReady(next.key, next.element);
+      return next;
+    }
+
+    it("does not play again after a change at a junction while the next element loads", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      h.playback.getState().play();
+      h.playback.getState().syncPlay(key, first);
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      expect(h.sequence.handleEnded()).toBe(true);
+      // The element of b1 attaches with no metadata, and the user chooses another track.
+      const incoming = attachUnloaded(h.playback, B);
+      h.sequence.store.getState().replacePreviewElement(incoming.key);
+      expect(h.playback.getState().reloadGeneration).toBe(1);
+      expect(h.sequence.store.getState().switching).toBe(true);
+
+      const next = replaceLoaded(h.playback, B, incoming);
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      // The navigation ran as a seek to the first frame of b1, with no play.
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      expect(h.playback.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      expect(next.element.paused).toBe(true);
+      expect(h.playback.getState().isPlaying).toBe(false);
+    });
+
+    it("turns a Play Segment that waits for the attach into a seek to its In", () => {
+      const h = harness([a1, b1]);
+      attach(h.playback, A);
+      // A segment of b1 alone, while a1 is on screen: it waits for the attach of b1.
+      h.sequence.store
+        .getState()
+        .playSegment(h.virtual("b1", "25"), h.virtual("b1", "50"));
+      const incoming = attachUnloaded(h.playback, B);
+      h.sequence.store.getState().replacePreviewElement(incoming.key);
+
+      const next = replaceLoaded(h.playback, B, incoming);
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      expect(next.element.currentTime).toBe(1);
+      expect(next.element.paused).toBe(true);
+      expect(h.playback.getState().isPlaying).toBe(false);
+      expect(h.playback.getState().playbackStop).toBeNull();
+    });
+
+    it("keeps the play of a navigation that waits when the store refuses the replacement", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      h.playback.getState().play();
+      h.playback.getState().syncPlay(key, first);
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      expect(h.sequence.handleEnded()).toBe(true);
+      // Another source, and no element of b1 yet: the store refuses, and nothing changes here.
+      h.sequence.store.getState().replacePreviewElement("an old key");
+      const incoming = getSourceRevisionKey(B.media);
+      h.sequence.store.getState().replacePreviewElement(incoming);
+      expect(h.playback.getState().reloadGeneration).toBe(0);
+
+      const element = createFakeElement();
+      element.readyState = 0;
+      h.playback.getState().attach(B.playback, element);
+      element.readyState = 1;
+      h.playback.getState().syncReady(incoming, element);
+      h.playback.getState().syncPresentedFrame(incoming, 0, 1, element);
+      expect(element.paused).toBe(false);
+    });
+
+    it("keeps the navigation as a seek when a second change finds the element retired", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      h.playback.getState().play();
+      h.playback.getState().syncPlay(key, first);
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      h.sequence.handleEnded();
+      const incoming = attachUnloaded(h.playback, B);
+      h.sequence.store.getState().replacePreviewElement(incoming.key);
+      // A second change while the element is retired: refused, and the navigation stays a seek.
+      h.sequence.store.getState().replacePreviewElement(incoming.key);
+      expect(h.playback.getState().reloadGeneration).toBe(1);
+      const next = replaceLoaded(h.playback, B, incoming);
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      expect(next.element.paused).toBe(true);
+    });
+
+    it("ends at the sought position after a seek before the new element is ready", () => {
+      const h = harness([a1]);
+      const shown = attach(h.playback, A);
+      h.sequence.store.getState().replacePreviewElement(shown.key);
+      h.playback.getState().detach(shown.key, shown.element);
+      const next = createFakeElement();
+      next.readyState = 0;
+      h.playback.getState().attach(A.playback, next);
+
+      // The seek waits as a navigation of the one clip, and replaces the request of the reload.
+      h.sequence.store.getState().seekToPts(pts("150"));
+      expect(h.playback.getState().error).toBeNull();
+
+      next.readyState = 1;
+      h.playback.getState().syncReady(shown.key, next);
+      h.playback.getState().syncPresentedFrame(shown.key, 0, 1, next);
+      expect(next.currentTime).toBe(6);
+    });
+
+    /**
+     * The decode failure of the element of `which` before its metadata: the pane marks it
+     * unready, and the element leaves the tree.
+     */
+    function failUnloaded(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const failed = attachUnloaded(playback, which);
+      playback.getState().syncUnready(failed.key, failed.element);
+      playback.getState().detach(failed.key, failed.element);
+      expect(playback.getState().isAttached).toBe(false);
+    }
+
+    /** The element that mounts again after the retry, with its metadata. */
+    function attachRetried(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const element = createFakeElement();
+      element.readyState = 0;
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, element);
+      element.readyState = 1;
+      playback.getState().syncReady(key, element);
+      playback.getState().syncPresentedFrame(key, 0, 1, element);
+      return { element, key };
+    }
+
+    it("does not play again when the retry of a failed clip at a junction mounts it", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      h.playback.getState().play();
+      h.playback.getState().syncPlay(key, first);
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      expect(h.sequence.handleEnded()).toBe(true);
+      // The chosen track of b1 fails before its metadata, and the user chooses another one.
+      failUnloaded(h.playback, B);
+      h.sequence.dropPlayIntent();
+
+      const retried = attachRetried(h.playback, B);
+      // The seek to the first frame of b1 ran, with no play.
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      expect(h.playback.getState().presentedFrame?.inferredSourcePts).toBe("0");
+      expect(retried.element.paused).toBe(true);
+      expect(h.playback.getState().isPlaying).toBe(false);
+    });
+
+    it("ends a waiting Play Segment across a junction when the retry mounts its clip", () => {
+      const h = harness([a1, b1]);
+      h.timeline.getState().setAttachedClip("b1");
+      attach(h.playback, B);
+      // The segment starts at 8 s of a1 and ends in b1: it waits for the attach of a1.
+      h.sequence.store
+        .getState()
+        .playSegment(h.virtual("a1", "200"), h.virtual("b1", "50"));
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+      failUnloaded(h.playback, A);
+      h.sequence.dropPlayIntent();
+
+      const retried = attachRetried(h.playback, A);
+      expect(retried.element.currentTime).toBe(8);
+      expect(retried.element.paused).toBe(true);
+      expect(h.playback.getState().isPlaying).toBe(false);
+      // The Out across the junction is gone, so a late end does not go on at b1.
+      h.sequence.notePause(true);
+      expect(h.sequence.handleEnded()).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+    });
+  });
 });

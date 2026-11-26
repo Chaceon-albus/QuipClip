@@ -13707,3 +13707,452 @@ describe("Recalibration (ADR 063)", () => {
     });
   });
 });
+
+describe("The replacement of the element for a new audio stream (ADR 070)", () => {
+  /**
+   * A Matroska file of 240 s at 25 fps on 1/1000, played through remux windows (ADR 046). One
+   * frame is 40 ticks. The anchor is known, so the calibration is ready at the metadata.
+   */
+  const mkv: PlaybackSource = {
+    path: "/media/two-tracks.mkv",
+    size: 52428800,
+    mtime: 1732600000,
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: "0" as Pts,
+    videoDurationTicks: "240000" as TickCount,
+    approximateDurationSeconds: 240,
+    avgFrameRate: { n: 25, d: 1 },
+    rFrameRate: { n: 25, d: 1 },
+    mediaSource: true,
+    anchorMediaTime: 0,
+  };
+  const key = getSourceRevisionKey(mkv);
+  const otherKey = getSourceRevisionKey({ ...mkv, path: "/media/other.mkv" });
+
+  type FakeVideo = ReturnType<typeof createFakeVideo>;
+
+  /** Attaches an element of `source` and loads its metadata. */
+  function attachLoaded(
+    store: PlaybackStore,
+    source: PlaybackSource = mkv,
+    video: FakeVideo = createFakeVideo({ duration: 240 }),
+  ): FakeVideo {
+    store.getState().attach(source, video);
+    video.readyState = 1;
+    store.getState().syncReady(getSourceRevisionKey(source), video);
+    return video;
+  }
+
+  /** Shows the frame at `seconds` after a seek to it: the confirmed frame of the playhead. */
+  function showFrameAt(store: PlaybackStore, video: FakeVideo, seconds: number): void {
+    store.getState().seekToPts(String(Math.round(seconds * 1000)) as Pts);
+    fireSeeked(store, key, video);
+    store.getState().syncPresentedFrame(key, seconds, 2, video);
+  }
+
+  /** The detach of the old element and the attach of the new one, as React replaces a node. */
+  function replaceWith(store: PlaybackStore, old: FakeVideo): FakeVideo {
+    store.getState().detach(key, old);
+    const next = createFakeVideo({ duration: 240 });
+    store.getState().attach(mkv, next);
+    return next;
+  }
+
+  it("replaces a ready element with no stall, and goes back to the confirmed frame", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("12000");
+    expect(store.getState().seekTargetSeconds).toBeNull();
+
+    store.getState().replacePreviewElement(key);
+    let state = store.getState();
+    expect(state.reloadGeneration).toBe(1);
+    expect(state.isRecalibrating).toBe(true);
+    expect(state.decodeStall).toBeNull();
+    expect(state.presentedFrame).toBeNull();
+    // The playhead stays on the start of the frame.
+    expect(state.seekTargetSeconds).toBe(12);
+    // The old element is retired: its events belong to nobody, and the transport waits.
+    expect(state.isRetiredElement(key, video)).toBe(true);
+    expect(state.refusesTransportForReload()).toBe(true);
+    const sets = video.currentTimeSets;
+    store.getState().syncPresentedFrame(key, 12.04, 3, video);
+    expect(store.getState().presentedFrame).toBeNull();
+
+    const next = replaceWith(store, video);
+    expect(store.getState().isRecalibrating).toBe(true);
+    expect(store.getState().seekTargetSeconds).toBe(12);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    state = store.getState();
+    // The anchor of the new element is known, so its request runs at its metadata.
+    expect(state.isRecalibrating).toBe(false);
+    expect(state.calibrationStatus).toBe("ready");
+    expect(next.currentTimeSets).toBe(1);
+    expect(next.currentTime).toBe(12);
+    expect(next.playCalls).toBe(0);
+    expect(video.currentTimeSets).toBe(sets);
+    fireSeeked(store, key, next);
+    store.getState().syncPresentedFrame(key, 12, 1, next);
+    expect(store.getState().presentedFrame?.inferredSourcePts).toBe("12000");
+  });
+
+  it("stops a playback, which does not start again on the new element", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().play();
+    store.getState().syncPlay(key, video);
+    video.currentTime = 12.05;
+    video.seeking = false;
+    store.getState().syncPresentedFrame(key, 12.04, 3, video);
+    expect(store.getState().isPlaying).toBe(true);
+    const pauses = video.pauseCalls;
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().isPlaying).toBe(false);
+    expect(video.pauseCalls).toBe(pauses + 1);
+    expect(store.getState().seekTargetSeconds).toBeCloseTo(12.04, 9);
+
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    expect(next.currentTime).toBeCloseTo(12.04, 9);
+    expect(next.playCalls).toBe(0);
+    expect(store.getState().isPlaying).toBe(false);
+  });
+
+  it("goes back to the target of a seek that is pending", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().seekToPts("30000" as Pts);
+    expect(store.getState().seekTargetSeconds).toBe(30);
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().seekTargetSeconds).toBe(30);
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    expect(next.currentTime).toBe(30);
+  });
+
+  describe("a pending frame seek at 23.976 fps on 1/90000", () => {
+    /**
+     * One frame is 3753.75 ticks. The muxer writes each frame at the tick at or after its
+     * nominal start, so frame 7 starts at tick 26277, and its nominal start, 26276.25 ticks,
+     * rounds to tick 26276: one tick before the frame.
+     */
+    const ntsc: PlaybackSource = {
+      ...mkv,
+      path: "/media/film.mkv",
+      videoTimeBase: { n: 1, d: 90000 },
+      videoDurationTicks: "21600000" as TickCount,
+      avgFrameRate: { n: 24000, d: 1001 },
+      rFrameRate: { n: 24000, d: 1001 },
+    };
+    const ntscKey = getSourceRevisionKey(ntsc);
+    /** The real start of frame `index` in seconds: the tick at or after its nominal start. */
+    const realStart = (index: number): number => Math.ceil(index * 3753.75) / 90000;
+    /** The nominal start of frame `index`, the display target of a frame seek. */
+    const nominalStart = (index: number): number => (index * 1001) / 24000;
+
+    /** Replaces the element, and returns the new element after its metadata. */
+    function replaceLoaded(store: PlaybackStore, old: FakeVideo): FakeVideo {
+      store.getState().detach(ntscKey, old);
+      const next = createFakeVideo({ duration: 240 });
+      store.getState().attach(ntsc, next);
+      next.readyState = 1;
+      store.getState().syncReady(ntscKey, next);
+      return next;
+    }
+
+    it("comes back inside the frame that the seek named, and the playhead stays", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(7);
+      expect(video.seeking).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(7), 12);
+
+      store.getState().replacePreviewElement(ntscKey);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(7), 12);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(7));
+      expect(next.currentTime).toBeLessThan(realStart(8));
+      // The playhead does not move to the middle of the frame while the seek runs.
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(7), 12);
+
+      fireSeeked(store, ntscKey, next);
+      store.getState().syncPresentedFrame(ntscKey, realStart(7), 1, next);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe("26277");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("takes the seek that waits in the queue behind a running seek", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(7);
+      // Frame 11 starts at tick 41292, and its nominal start rounds to 41291.
+      store.getState().seekToFrameIndex(11);
+      expect(video.currentTimeSets).toBe(1);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(11), 12);
+
+      store.getState().replacePreviewElement(ntscKey);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(11));
+      expect(next.currentTime).toBeLessThan(realStart(12));
+    });
+
+    it("comes back inside the frame of a pending typed frame after Play", () => {
+      // Frame 2407 starts at tick 9035277, and its nominal start rounds to tick 9035276.
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(2407);
+      store.getState().play();
+      expect(store.getState().isPlaying).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(2407), 12);
+
+      store.getState().replacePreviewElement(ntscKey);
+      expect(store.getState().isPlaying).toBe(false);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(2407));
+      expect(next.currentTime).toBeLessThan(realStart(2408));
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(2407), 12);
+      expect(next.playCalls).toBe(0);
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("comes back inside the frame of a queued seek that Play flushed", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(7);
+      store.getState().seekToFrameIndex(2407);
+      expect(video.currentTimeSets).toBe(1);
+      // Play sends the queued seek to the element as an exact seek, and plays from there.
+      store.getState().play();
+      expect(video.currentTimeSets).toBe(2);
+
+      store.getState().replacePreviewElement(ntscKey);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(2407));
+      expect(next.currentTime).toBeLessThan(realStart(2408));
+      expect(store.getState().isPlaying).toBe(false);
+    });
+
+    it("comes back to the seek, not to the clock, after Play and a `seeked` with no frame", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(2407);
+      store.getState().play();
+      // The pane delivers `seeked` before the frame callback that confirms the frame.
+      fireSeeked(store, ntscKey, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(2407), 12);
+      // The element plays on, and its clock moves two seconds past the seek.
+      const issued = video.currentTime;
+      video.currentTime = issued + 2;
+      video.seeking = false;
+      store.getState().syncBrowserTime(ntscKey, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(2407), 12);
+
+      store.getState().replacePreviewElement(ntscKey);
+      expect(store.getState().isPlaying).toBe(false);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(2407));
+      expect(next.currentTime).toBeLessThan(realStart(2408));
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(2407), 12);
+    });
+
+    it("never goes back to a seek that settled before the pending one", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToFrameIndex(7);
+      fireSeeked(store, ntscKey, video);
+      store.getState().syncPresentedFrame(ntscKey, realStart(7), 2, video);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      store.getState().play();
+      store.getState().pause();
+      store.getState().seekToFrameIndex(11);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(nominalStart(11), 12);
+
+      store.getState().replacePreviewElement(ntscKey);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBeGreaterThanOrEqual(realStart(11));
+      expect(next.currentTime).toBeLessThan(realStart(12));
+    });
+
+    it("comes back to the frame of a pending seek to a PTS", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().seekToPts("26277" as Pts);
+      store.getState().replacePreviewElement(ntscKey);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(realStart(7), 12);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBe(26277 / 90000);
+    });
+
+    it("keeps the display target in seconds when no calibration is ready", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store, ntsc);
+      store.getState().syncPresentationUnavailable(ntscKey, video);
+      store.getState().seekApproximate(7);
+      expect(store.getState().seekTargetSeconds).toBe(7);
+
+      store.getState().replacePreviewElement(ntscKey);
+      expect(store.getState().seekTargetSeconds).toBe(7);
+      const next = replaceLoaded(store, video);
+      expect(next.currentTime).toBe(7);
+      // The new element shows the elapsed seconds of its own request.
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(7, 4);
+    });
+  });
+
+  it("goes back to the approximate clock when the calibration is unavailable", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    store.getState().syncPresentationUnavailable(key, video);
+    video.currentTime = 7;
+    video.seeking = false;
+    store.getState().syncBrowserTime(key, video);
+    expect(store.getState().approximateBrowserTimeSeconds).toBe(7);
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().seekTargetSeconds).toBe(7);
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    // The new element calibrates from its own anchor, and the position runs on it.
+    expect(store.getState().calibrationStatus).toBe("ready");
+    expect(next.currentTime).toBe(7);
+  });
+
+  it("takes a navigation that waits for the anchor with it", () => {
+    // A native source, whose first frame anchors the calibration (ADR 003).
+    const native: PlaybackSource = {
+      ...mkv,
+      mediaSource: false,
+      anchorMediaTime: null,
+    };
+    const store = createPlaybackStore();
+    const video = attachLoaded(store, native);
+    expect(store.getState().calibrationStatus).toBe("calibrating");
+    store.getState().seekApproximate(12, { scrub: true });
+    expect(store.getState().hasDeferredNavigation).toBe(true);
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(1);
+    expect(store.getState().hasDeferredNavigation).toBe(false);
+    expect(store.getState().seekTargetSeconds).toBe(12);
+
+    store.getState().detach(key, video);
+    const next = createFakeVideo({ duration: 240, fastSeek: true });
+    attachLoaded(store, native, next);
+    expect(store.getState().hasDeferredNavigation).toBe(true);
+    store.getState().syncPresentedFrame(key, 0, 1, next);
+    // The scrub request runs as an exact seek.
+    expect(next.fastSeek).not.toHaveBeenCalled();
+    expect(next.currentTime).toBe(12);
+  });
+
+  it("loads the new element at the start when the old one had no metadata", () => {
+    const store = createPlaybackStore();
+    const video = createFakeVideo({ duration: 240 });
+    store.getState().attach(mkv, video);
+    expect(store.getState().isReady).toBe(false);
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(1);
+    expect(store.getState().isRecalibrating).toBe(true);
+    expect(store.getState().seekTargetSeconds).toBeNull();
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    expect(store.getState().isRecalibrating).toBe(false);
+    expect(next.currentTimeSets).toBe(0);
+  });
+
+  it("replaces the new element of a reload before its metadata, and keeps the request", () => {
+    // The user chooses a stream, and then another one while the new element loads.
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().replacePreviewElement(key);
+    const loading = replaceWith(store, video);
+    expect(store.getState().isRetiredElement(key, loading)).toBe(false);
+
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(2);
+    expect(store.getState().isRecalibrating).toBe(true);
+    expect(store.getState().isRetiredElement(key, loading)).toBe(true);
+    expect(store.getState().seekTargetSeconds).toBe(12);
+
+    const last = replaceWith(store, loading);
+    last.readyState = 1;
+    store.getState().syncReady(key, last);
+    expect(last.currentTime).toBe(12);
+    expect(loading.currentTimeSets).toBe(0);
+  });
+
+  it("starts one reload for two quick changes before the pane replaces the element", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().replacePreviewElement(key);
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(1);
+    expect(store.getState().seekTargetSeconds).toBe(12);
+  });
+
+  it("keeps the request of a seek on the retired element, as the latest request", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().replacePreviewElement(key);
+    store.getState().seekToPts("40000" as Pts);
+    expect(store.getState().reloadGeneration).toBe(1);
+    expect(store.getState().seekTargetSeconds).toBe(40);
+    expect(video.currentTimeSets).toBe(1);
+
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    expect(next.currentTime).toBe(40);
+  });
+
+  it("does nothing for another source, with no element, or for a stalled element", () => {
+    const store = createPlaybackStore();
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(0);
+
+    const video = attachLoaded(store);
+    showFrameAt(store, video, 12);
+    store.getState().replacePreviewElement(otherKey);
+    expect(store.getState().reloadGeneration).toBe(0);
+
+    // A stalled element is replaced at the next seek, and the new element reads the stream.
+    video.currentTime = 12.5;
+    expect(store.getState().syncDecodeStall(key, video)).toBe(true);
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(0);
+    expect(store.getState().isRecalibrating).toBe(false);
+    store.getState().seekToPts("20000" as Pts);
+    expect(store.getState().reloadGeneration).toBe(1);
+    store.getState().replacePreviewElement(key);
+    expect(store.getState().reloadGeneration).toBe(1);
+    expect(store.getState().isRecalibrating).toBe(false);
+  });
+
+  it("removes no denial of the source and permits no automatic recalibration", () => {
+    const store = createPlaybackStore();
+    const video = attachLoaded(store);
+    store.getState().denySourcePrecision(key, video);
+    expect(store.getState().calibrationStatus).toBe("unavailable");
+    store.getState().replacePreviewElement(key);
+    const next = replaceWith(store, video);
+    next.readyState = 1;
+    store.getState().syncReady(key, next);
+    expect(store.getState().calibrationStatus).toBe("unavailable");
+    expect(store.getState().canRecalibrate).toBe(false);
+  });
+});

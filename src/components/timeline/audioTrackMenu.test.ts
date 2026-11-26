@@ -42,22 +42,28 @@ const MKV = ["matroska", "webm"];
 
 describe("the Audio Track submenu (ADR 070)", () => {
   it("shows only for a source with two or more audio streams", () => {
-    expect(presentAudioTrackMenu(undefined, undefined)).toBeNull();
+    expect(presentAudioTrackMenu(undefined, undefined, "native")).toBeNull();
     expect(
       presentAudioTrackMenu(
         { audio: null, audioStreams: [], formatNames: MKV },
         undefined,
+        "native",
       ),
     ).toBeNull();
     expect(
       presentAudioTrackMenu(
         { audio: PREFERRED, audioStreams: [listed(3)], formatNames: MKV },
         undefined,
+        "native",
       ),
     ).toBeNull();
     // A probe that a test builds without the list has no submenu either.
     expect(
-      presentAudioTrackMenu({ audio: PREFERRED, formatNames: MKV }, undefined),
+      presentAudioTrackMenu(
+        { audio: PREFERRED, formatNames: MKV },
+        undefined,
+        "native",
+      ),
     ).toBeNull();
   });
 
@@ -67,6 +73,7 @@ describe("the Audio Track submenu (ADR 070)", () => {
       presentAudioTrackMenu(
         { audio: PREFERRED, audioStreams: STREAMS, formatNames: ["flv"] },
         undefined,
+        "native",
       ),
     ).toBeNull();
   });
@@ -75,6 +82,7 @@ describe("the Audio Track submenu (ADR 070)", () => {
     const menu = presentAudioTrackMenu(
       { audio: PREFERRED, audioStreams: STREAMS, formatNames: MKV },
       undefined,
+      "native",
     );
     expect(
       menu?.items.map((item) => [item.stream.index, item.number, item.name]),
@@ -88,28 +96,35 @@ describe("the Audio Track submenu (ADR 070)", () => {
 
   it("marks the effective stream: the override, else the preferred stream", () => {
     const probe = { audio: PREFERRED, audioStreams: STREAMS, formatNames: MKV };
-    expect(presentAudioTrackMenu(probe, undefined)?.checkedIndex).toBe(3);
+    expect(presentAudioTrackMenu(probe, undefined, "native")?.checkedIndex).toBe(3);
     expect(
-      presentAudioTrackMenu(probe, {
-        index: 1,
-        codec: "aac",
-        sampleRate: 48000,
-        channels: 2,
-      })?.checkedIndex,
+      presentAudioTrackMenu(
+        probe,
+        { index: 1, codec: "aac", sampleRate: 48000, channels: 2 },
+        "native",
+      )?.checkedIndex,
     ).toBe(1);
   });
 
-  it("shows the note of the preview for every source with a submenu in this unit", () => {
+  it("shows the note of the preview only for a native source, for each effective stream", () => {
+    // The element of a native source plays the track that the web view chooses, also when the
+    // effective stream is the preferred one. A MediaSource preview plays the effective stream.
     const probe = { audio: PREFERRED, audioStreams: STREAMS, formatNames: MKV };
-    expect(presentAudioTrackMenu(probe, undefined)?.showsPreviewNote).toBe(true);
+    const fourth = { index: 4, codec: null, sampleRate: 48000, channels: null };
+    expect(presentAudioTrackMenu(probe, undefined, "native")?.showsPreviewNote).toBe(
+      true,
+    );
+    expect(presentAudioTrackMenu(probe, fourth, "native")?.showsPreviewNote).toBe(true);
     expect(
-      presentAudioTrackMenu(probe, {
-        index: 4,
-        codec: null,
-        sampleRate: 48000,
-        channels: null,
-      })?.showsPreviewNote,
-    ).toBe(true);
+      presentAudioTrackMenu(probe, undefined, "mediaSource")?.showsPreviewNote,
+    ).toBe(false);
+    expect(presentAudioTrackMenu(probe, fourth, "mediaSource")?.showsPreviewNote).toBe(
+      false,
+    );
+    // A source with one audio stream has no submenu, so no note, on either path.
+    const single = { audio: PREFERRED, audioStreams: [listed(3)], formatNames: MKV };
+    expect(presentAudioTrackMenu(single, undefined, "native")).toBeNull();
+    expect(presentAudioTrackMenu(single, undefined, "mediaSource")).toBeNull();
   });
 
   it.each([
@@ -149,6 +164,7 @@ describe("the Audio Track submenu (ADR 070)", () => {
       const menu = presentAudioTrackMenu(
         { audio: PREFERRED, audioStreams: STREAMS, formatNames: MKV },
         undefined,
+        "native",
       );
       expect(menu?.items.map((item) => audioTrackItemText(item, t))).toEqual(items);
       expect(

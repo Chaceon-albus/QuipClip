@@ -157,6 +157,34 @@ describe("the owner of the Web Audio cue of a native source (ADR 062)", () => {
     expect(cues[0]?.cue.destroy).not.toHaveBeenCalled();
   });
 
+  it("replaces the cue of the same element for another audio stream (ADR 070)", () => {
+    const { owner, cues, cleared, routed } = setup();
+    const element = fakeElement();
+    owner.attach(element, TARGET, 1);
+    expect(owner.held()).toEqual({ sourceRevisionKey: "clip", audioStreamIndex: 1 });
+
+    const second = { ...TARGET, source: { ...TARGET.source, audioStreamIndex: 3 } };
+    owner.attach(element, second, 1);
+
+    // The old cue goes with its PCM, and a fresh cue reads the windows of stream 3.
+    expect(cues).toHaveLength(2);
+    expect(cues[0]?.cue.destroy).toHaveBeenCalledTimes(1);
+    expect(cleared).toEqual([cues[0]?.cue]);
+    expect(cues[1]?.target.source.audioStreamIndex).toBe(3);
+    expect(routed).toEqual([cues[0]?.cue, cues[1]?.cue]);
+    expect(cues[1]?.cue.ensure).toHaveBeenCalledWith(134.775);
+    // The element keeps one listener of each kind.
+    expect(element.listenerCount()).toBe(2);
+    expect(owner.held()).toEqual({ sourceRevisionKey: "clip", audioStreamIndex: 3 });
+
+    // The same stream again keeps the new cue.
+    owner.attach(element, second, 1);
+    expect(cues).toHaveLength(2);
+
+    owner.detach(element);
+    expect(owner.held()).toBeNull();
+  });
+
   it("stops the previous cue when a new element attaches", () => {
     const { owner, cues, cleared, stopGestures, routed } = setup();
     const first = fakeElement();

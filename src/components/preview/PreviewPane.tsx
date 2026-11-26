@@ -16,12 +16,16 @@ import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { Button } from "@/components/ui/button";
 import {
+  audioOverrideStore,
   getGeneratedSourceId,
   getSourceRevisionKey,
   mediaStore,
   previewAudioStreamOf,
+  useAudioOverrides,
   useMediaStore,
   VIDEO_FILE_EXTENSIONS,
+  type AudioProbe,
+  type AudioStreamOverride,
   type ImportMediaResult,
   type MediaStoreState,
 } from "@/features/media";
@@ -67,7 +71,7 @@ import {
   FRAME_TIMECODE_PLACEHOLDER,
   MILLISECONDS_TIMECODE_PLACEHOLDER,
 } from "@/lib/timecode";
-import { isMacOS, isWindows } from "@/lib/platform";
+import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
   PICTURE_CHECK_INTERVAL_MS,
@@ -77,7 +81,6 @@ import {
   type DecodeFailureTrigger,
   type PictureCheckEvent,
   type PictureCheckState,
-  type PreviewPlatform,
 } from "./decodeFailure";
 import {
   createAnchorWaitController,
@@ -115,9 +118,15 @@ import {
   nativeMediaTimeOrigin,
   type NativeCueOwner,
 } from "./nativeCueOwner";
-import { choosePreviewPath, mediaSourceSupport, type PreviewPath } from "./previewPath";
+import {
+  currentPreviewPlatform,
+  previewPathOfMedia,
+  type PreviewPath,
+} from "./previewPath";
+import { audioStreamChangeEffect } from "./audioStreamChange";
 import {
   addMediaSourceNotice,
+  clearMediaSourceNotice,
   dismissMediaSourceNotice,
   mediaSourceNoticesFor,
   mediaSourcePanelTrigger,
@@ -184,17 +193,6 @@ const SUPPORTED_VIDEO_FORMATS = formatSupportedVideoFormats(VIDEO_FILE_EXTENSION
  */
 const PRIMES_FIRST_FRAME = isMacOS();
 
-/** The platform of the web view, for the hint of the decode-failure panel. */
-function currentPlatform(): PreviewPlatform {
-  if (isWindows()) {
-    return "windows";
-  }
-  if (isMacOS()) {
-    return "macos";
-  }
-  return "other";
-}
-
 /** The picture check of one mounted video element (see `resolvePictureCheck`). */
 interface PictureCheck {
   readonly element: HTMLVideoElement;
@@ -212,25 +210,46 @@ function stopPictureCheckTimer(check: PictureCheck | null): void {
   }
 }
 
-/** How the preview plays a source: the element opens it, or a MediaSource plays it (ADR 046). */
-function previewPathOf(media: ImportMediaResult): PreviewPath {
-  return choosePreviewPath({
-    probe: media.probe,
-    audioStream: previewAudioStreamOf(media.probe),
-    fileName: media.fileName,
-    platform: currentPlatform(),
-    isTypeSupported: mediaSourceSupport(),
-  });
+/**
+ * The audio stream of `media` that the preview reads: its effective stream under `overrides`
+ * (ADR 070). The default reads the override store now, as the ref callback of an element does
+ * when it starts the windows.
+ */
+function previewStreamOf(
+  media: ImportMediaResult,
+  overrides: Readonly<
+    Record<string, AudioStreamOverride>
+  > = audioOverrideStore.getState().overrides,
+): AudioProbe | null {
+  const sourceId = getGeneratedSourceId(media);
+  return previewAudioStreamOf(
+    media.probe,
+    sourceId === null ? undefined : overrides[sourceId],
+  );
 }
 
-/** The source as the remux windows of a MediaSource source need it (ADR 046). */
+/**
+ * How the preview plays a source: the element opens it, or a MediaSource plays it (ADR 046).
+ * `stream` is the audio stream that the windows read, whose codec decides between a copy and a
+ * transcode of the audio.
+ */
+function previewPathOf(
+  media: ImportMediaResult,
+  stream: AudioProbe | null = previewStreamOf(media),
+): PreviewPath {
+  return previewPathOfMedia(media, stream);
+}
+
+/**
+ * The source as the remux windows of a MediaSource source need it (ADR 046). `stream` is the
+ * stream whose codec chose `path.audio`, and the windows map it (ADR 070).
+ */
 function toMseSource(
   media: ImportMediaResult,
   path: Extract<PreviewPath, { kind: "mediaSource" }>,
+  stream: AudioProbe | null,
   rescanConfig: boolean,
 ): MseSource {
-  // The stream whose codec chose `path.audio` is the stream that the windows map (ADR 070).
-  const stream = previewAudioStreamOf(media.probe);
   return {
     path: media.path,
     size: media.size,
@@ -535,6 +554,9 @@ export function PreviewPane() {
     null,
   );
   const decodeFailed = failureTrigger !== null;
+  // Whether the committed render shows the decode-failure panel, for the listener of the
+  // audio-stream overrides, which outlives the render that started it (ADR 070).
+  const decodeFailedRef = useRef(false);
   // The stall whose notice the user closed. The notice stays hidden for that stall only, so a
   // later stall shows it again.
   const [dismissedStall, setDismissedStall] = useState<typeof decodeStall>(null);
@@ -721,9 +743,20 @@ export function PreviewPane() {
   const mediaPath = media?.path;
   const mediaProbe = media?.probe;
   const mediaFileName = media?.fileName;
+  // The audio stream that the preview reads: the effective stream of the source (ADR 070). A
+  // change of the override renders the pane again, so the PCM cue of a native source follows it.
+  const audioOverrides = useAudioOverrides();
+  const previewStream = useMemo(
+    () => (media ? previewStreamOf(media, audioOverrides) : null),
+    [media, audioOverrides],
+  );
+  const previewStreamIndex = previewStream?.index ?? null;
   // How the element plays the source: through the asset protocol, or through a MediaSource that
   // the ref owner below starts (ADR 046).
-  const previewPath = useMemo(() => (media ? previewPathOf(media) : null), [media]);
+  const previewPath = useMemo(
+    () => (media ? previewPathOf(media, previewStream) : null),
+    [media, previewStream],
+  );
   const isMediaSource = previewPath?.kind === "mediaSource";
 
   // What the decode-failure panel says about this source and its trigger.
@@ -735,7 +768,7 @@ export function PreviewPane() {
             probe: mediaProbe,
             fileName: mediaFileName,
             trigger: failureTrigger,
-            platform: currentPlatform(),
+            platform: currentPreviewPlatform(),
           }),
     [failureTrigger, mediaProbe, mediaFileName],
   );
@@ -813,9 +846,11 @@ export function PreviewPane() {
       const audioLevel = previewMutePreferenceStore.getState();
       element.volume = previewElementVolume(audioLevel.volumePercent);
       // A MediaSource source starts its controller after the store attached the element, so
-      // the first reports find the attachment (ADR 046).
+      // the first reports find the attachment (ADR 046). The windows map the effective audio
+      // stream at this moment, and a later change replaces the element (ADR 070).
       const current = attachedMediaStore.getState().media;
-      const path = current === null ? null : previewPathOf(current);
+      const stream = current === null ? null : previewStreamOf(current);
+      const path = current === null ? null : previewPathOf(current, stream);
       if (current !== null && path?.kind === "mediaSource") {
         const key = getSourceRevisionKey(current);
         mediaSourceOwnerRef.current ??= createPreviewMediaSourceOwner({
@@ -842,13 +877,14 @@ export function PreviewPane() {
             source: toMseSource(
               current,
               path,
+              stream,
               rescansAtAttach(
                 rescanGenerations,
                 key,
                 playbackStore.getState().reloadGeneration,
               ),
             ),
-            hasAudio: previewAudioStreamOf(current.probe) !== null,
+            hasAudio: stream !== null,
           },
           previewCueGain(audioLevel),
         );
@@ -863,10 +899,13 @@ export function PreviewPane() {
   // while this flag holds, and it is the cue in every other case, such as a calibration that is
   // unavailable. A new element (`elementKey`), a new source or a lost calibration stops the cue.
   // A recalibration stops it too, and it starts again when the new element calibrates (ADR 063).
+  // A change of the effective audio stream replaces the cue, with its PCM and its windows, and the
+  // element and its calibration stay (ADR 070): the effect depends on `previewStreamIndex`, and
+  // the owner takes a cue of another stream for a new attachment.
   const usesNativePcmCue =
     NATIVE_SOURCE_PCM_CUE &&
     media !== null &&
-    previewAudioStreamOf(media.probe) !== null &&
+    previewStream !== null &&
     !isMediaSource &&
     !decodeFailed &&
     !isRecalibrating &&
@@ -878,10 +917,11 @@ export function PreviewPane() {
       return;
     }
     // The media and the anchor are read here, so a re-import of the open file, which keeps the
-    // key, keeps the cue that runs.
+    // key, keeps the cue that runs. The stream is read from the override store now, as the
+    // windows of a MediaSource element read it at their start.
     const current = attachedMediaStore.getState().media;
     const element = videoRef.current;
-    const stream = current === null ? null : previewAudioStreamOf(current.probe);
+    const stream = current === null ? null : previewStreamOf(current);
     if (
       current === null ||
       element === null ||
@@ -920,7 +960,65 @@ export function PreviewPane() {
     return () => {
       owner.detach(element);
     };
-  }, [usesNativePcmCue, sourceRevisionKey, elementKey]);
+  }, [usesNativePcmCue, sourceRevisionKey, elementKey, previewStreamIndex]);
+
+  // A change of the effective audio stream (ADR 070). The windows of a MediaSource element map
+  // the stream that they read when the element started, so a change replaces the element through
+  // the reload of ADR 039, with no stall, as a recalibration does (ADR 063). The new element reads
+  // the stream again in the ref callback above. The listener reads the media and the owners when
+  // the override changes, so the replacement starts in the task of the choice of the user, and
+  // the mark of the submenu and the stream of the new windows come from one state.
+  useEffect(
+    () =>
+      audioOverrideStore.subscribe((state, previous) => {
+        if (state.overrides === previous.overrides) {
+          return;
+        }
+        const current = attachedMediaStore.getState().media;
+        if (current === null) {
+          return;
+        }
+        const key = getSourceRevisionKey(current);
+        const stream = previewStreamOf(current, state.overrides);
+        const path = previewPathOf(current, stream);
+        const effect = audioStreamChangeEffect({
+          path: path.kind,
+          sourceRevisionKey: key,
+          previousStreamIndex:
+            previewStreamOf(current, previous.overrides)?.index ?? null,
+          effectiveStreamIndex: stream?.index ?? null,
+          // The failure of the render that the user sees: the render-phase reset clears it for
+          // a new media object, so it belongs to the attached source.
+          showsFailure: decodeFailedRef.current,
+          held:
+            path.kind === "mediaSource"
+              ? (mediaSourceOwnerRef.current?.held() ?? null)
+              : (nativeCueOwnerRef.current?.held() ?? null),
+        });
+        // A cue to replace needs nothing here: the effect of the cue above depends on the stream
+        // index, so the render that this change starts replaces the cue.
+        if (effect !== "reloadElement" && effect !== "retryFailed") {
+          return;
+        }
+        // The notice that the preview plays no sound was about the stream of the old windows.
+        setMediaSourceNotices((notices) =>
+          clearMediaSourceNotice(notices, key, "preview.mediaSource.noSound"),
+        );
+        if (effect === "retryFailed") {
+          // The element mounts again, as for a new import of the open file. Its ref callback
+          // attaches it to the store, which detached the failed element, and starts a new
+          // controller that reads the new stream. The picture check of the failed element ended
+          // when that element left the tree, and the new element starts its own. A navigation
+          // that waits for the attach, as a playback that crossed into this clip, keeps its seek
+          // and loses its play first, so the playback does not start again on the new element.
+          sequencePlayback.dropPlayIntent();
+          setFailureTrigger(null);
+          return;
+        }
+        sequencePlayback.store.getState().replacePreviewElement(key);
+      }),
+    [],
+  );
 
   // Registers and unregisters the hidden scrub audio element with exact ownership (ADR 019).
   // The callback identity is stable for the life of the component. The closure holds the element
@@ -1274,6 +1372,7 @@ export function PreviewPane() {
   useLayoutEffect(() => {
     runPictureCheckRef.current = runPictureCheck;
     mediaSourceFailureRef.current = handleMediaSourceFailure;
+    decodeFailedRef.current = decodeFailed;
   });
 
   // The format of the open source: the user's preference, with milliseconds for a source

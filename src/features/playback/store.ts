@@ -486,6 +486,19 @@ type FrameStepRequest =
     };
 
 /**
+ * A seek to a PTS. `displaySeconds` is the display target while the seek runs, in place of the
+ * elapsed seconds of `pts`. Only the replacement of an element sets it (replacePreviewElement,
+ * ADR 070): it sends the new element to the destination of a frame seek, the middle of the frame,
+ * and the playhead keeps the nominal start of that frame, as during the frame seek itself.
+ */
+type PtsSeek = {
+  readonly kind: "pts";
+  readonly pts: Pts;
+  readonly scrub: boolean;
+  readonly displaySeconds?: number;
+};
+
+/**
  * The absolute seek of a navigation that the store deferred during calibration.
  * `keepBrowserTimeline` is the seek option of that name (see SeekOptions).
  */
@@ -496,7 +509,7 @@ type DeferredSeek =
       readonly scrub: boolean;
       readonly keepBrowserTimeline: boolean;
     }
-  | { readonly kind: "pts"; readonly pts: Pts; readonly scrub: boolean };
+  | PtsSeek;
 
 /**
  * The seek that a deferred seek runs as once the calibration settles: a PTS on the calibrated
@@ -504,7 +517,7 @@ type DeferredSeek =
  */
 type SettledSeek =
   | { readonly kind: "approximate"; readonly seconds: number; readonly scrub: boolean }
-  | { readonly kind: "pts"; readonly pts: Pts; readonly scrub: boolean };
+  | PtsSeek;
 
 /**
  * A navigation request that arrived while the calibration anchor was still open (ADR 003).
@@ -631,8 +644,9 @@ export function createPlaybackStore(
   // An attach of another source, a detach of an element with no reload, a reset, a loss of
   // readiness and a failed seek drop the reload or its request.
   // `recalibration` is true for the reload of a recalibration, and the public field
-  // isRecalibrating reports it until the new element is ready. A failed seek drops the request
-  // of a reload, and the reload continues: the new element then loads at the start.
+  // isRecalibrating reports it until the new element is ready. The replacement of an element for
+  // a new audio stream (replacePreviewElement, ADR 070) takes that path too. A failed seek drops
+  // the request of a reload, and the reload continues: the new element then loads at the start.
   let reload: {
     readonly sourceRevisionKey: string;
     readonly request: DeferredNavigation | null;
@@ -671,6 +685,15 @@ export function createPlaybackStore(
   // It is also the key that keeps the target while a scrub seek is the last request, and the
   // pending target for play and seekNominal.
   let lastAcceptedSeek: { mediaTime: number; scrub: boolean } | null = null;
+  // The media time of the last seek that dispatchSeek accepted, sent or queued, or that play
+  // flushed: the destination of the pending display target (ADR 070). replacementTarget reads it
+  // only while seekTargetSeconds is set on a ready calibration. Unlike lastAcceptedSeek, which is
+  // bookkeeping of the scrub, play keeps it, so a seek that play overtakes still names its frame.
+  // It cannot be stale where it is read: every seek that sets a display target on a ready
+  // calibration goes through dispatchSeek, which writes it first. The places that clear
+  // lastAcceptedSeek, other than play, clear it too, and a value that a settled seek leaves is
+  // never read, because no target is pending then.
+  let pendingSeekDestination: number | null = null;
   /**
    * Where a repair (`repairSeek`) left the element, 3 ms from the target of its seek. The rules of
    * `syncSeeked` read the position of the element as that target. A newer seek clears it.
@@ -968,6 +991,7 @@ export function createPlaybackStore(
         issueSeek(element, nextEntry);
       } catch {
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         lastScrubAudioTarget = null;
         if (get().isPlaying) {
           // The queued seek kept the playback running. A failed seek leaves the element
@@ -1208,6 +1232,7 @@ export function createPlaybackStore(
       }
 
       lastAcceptedSeek = { mediaTime, scrub };
+      pendingSeekDestination = mediaTime;
       if (!scrub) {
         // Exact seeks record their mediaTime as the baseline for scrub audio, so the first
         // scrub after pointer down measures its direction from pointer-down time and a zero
@@ -1239,6 +1264,7 @@ export function createPlaybackStore(
       } catch {
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         lastScrubAudioTarget = null;
         if (keepPlaying) {
           // A failed seek leaves the element paused, as every failed seek does, so the store
@@ -1464,6 +1490,9 @@ export function createPlaybackStore(
             ? null
             : Math.max(0, target - browserTimelineOriginSeconds);
         }
+        if (seek.displaySeconds !== undefined) {
+          return seek.displaySeconds;
+        }
         const elapsed =
           attachedSource?.videoStartPts == null
             ? null
@@ -1568,6 +1597,7 @@ export function createPlaybackStore(
      * (isRetired) until the pane detaches it, and isRecalibrating holds until the new element is
      * ready. The new element calibrates from its own first frame, and syncReady moves the request
      * into the deferred navigation, so no time of the old element enters the PTS inference.
+     * replacePreviewElement starts its reload here too (ADR 070).
      *
      * @param request The navigation for the new element, or null to load it at the start.
      * @param displaySeconds The display target of the request, in seconds from the start of the
@@ -1586,6 +1616,7 @@ export function createPlaybackStore(
       lastScrubAudioTarget = null;
       queuedSeek = null;
       lastAcceptedSeek = null;
+      pendingSeekDestination = null;
       repairLanding = null;
       deferredNavigation = null;
       endPriming(true);
@@ -1610,6 +1641,133 @@ export function createPlaybackStore(
         seekTargetSeconds: request === null ? null : displaySeconds,
         reloadGeneration: get().reloadGeneration + 1,
       });
+    };
+
+    /**
+     * The position that the replacement of a ready element goes back to (replacePreviewElement,
+     * ADR 070), as the request of the reload and its display target in seconds from the start of
+     * the source. The latest request of the user wins, as at each reload (ADR 022, ADR 063):
+     *
+     * 1. A navigation that waits for the calibration anchor, with its seek and its steps. A scrub
+     *    seek becomes an exact seek, as in syncAnchorWaitExpired: the timeline ends a scrub
+     *    gesture when the element goes, so no exact seek at its release would follow a keyframe.
+     * 2. A seek that is pending, on a ready calibration: the PTS of its destination, with its
+     *    display target. Without a calibration, or with no destination recorded: its display
+     *    target in seconds, as recalibrate takes it.
+     * 3. On a ready calibration, the confirmed frame. Its PTS goes back to that frame exactly, and
+     *    the display target is the start of that frame, where the playhead stands.
+     * 4. The position of the approximate clock, as recalibrate takes it, or null.
+     *
+     * The PTS and the seconds are positions of the source, so no time of the old element enters
+     * the calibration of the new one.
+     */
+    const replacementTarget = (
+      state: PlaybackState,
+    ): {
+      readonly request: DeferredNavigation | null;
+      readonly displaySeconds: number | null;
+    } => {
+      const entry = deferredNavigation;
+      if (entry !== null) {
+        return {
+          request:
+            entry.seek?.scrub === true
+              ? { seek: { ...entry.seek, scrub: false }, frames: entry.frames }
+              : entry,
+          displaySeconds: state.seekTargetSeconds,
+        };
+      }
+      const frame = state.presentedFrame;
+      const startPts = attachedSource?.videoStartPts ?? null;
+      // A pending seek on a ready calibration: its destination, the media time that the element
+      // was sent to, or that waits in the queue behind a running seek. For a frame seek that is
+      // the middle of the frame, while the display target is the nominal start of the frame, and
+      // that start can convert to a PTS one tick before the real start of the frame. The
+      // calibration of the old element maps the destination to a PTS, as it maps a presented
+      // frame, and the new element presents the frame that the seek named. The playhead keeps
+      // the display target.
+      //
+      // The destination is the queued seek, else the last accepted seek, else the issued
+      // destination (pendingSeekDestination). Play flushes a queued seek to the element and clears
+      // the first two, while the display target stays until the frame comes, so the third keeps
+      // the seek. None of the three can name an older seek than the display target: every seek
+      // that sets the display target on a ready calibration goes through dispatchSeek, which
+      // writes the last accepted seek and the issued destination before it queues the seek or
+      // sends it, and a queued seek is that same seek. The position of the element is no
+      // fallback: a
+      // `seeked` before the frame callback lets a playing element move on while the target still
+      // waits, and the position would then be seconds after the seek.
+      const destinationTime =
+        queuedSeek?.mediaTime ?? lastAcceptedSeek?.mediaTime ?? pendingSeekDestination;
+      if (
+        state.seekTargetSeconds !== null &&
+        state.calibrationStatus === "ready" &&
+        calibratedMediaTime !== null &&
+        destinationTime !== null &&
+        Number.isFinite(destinationTime) &&
+        attachedSource !== null &&
+        startPts !== null
+      ) {
+        const pts = mediaTimeToPts(
+          destinationTime,
+          calibratedMediaTime,
+          startPts,
+          attachedSource.videoTimeBase,
+        );
+        if (pts !== null) {
+          return {
+            request: {
+              seek: {
+                kind: "pts",
+                pts,
+                scrub: false,
+                displaySeconds: state.seekTargetSeconds,
+              },
+              frames: 0,
+            },
+            displaySeconds: state.seekTargetSeconds,
+          };
+        }
+      }
+      if (
+        state.seekTargetSeconds === null &&
+        state.calibrationStatus === "ready" &&
+        frame !== null &&
+        attachedSource !== null &&
+        startPts !== null
+      ) {
+        const elapsed = ptsElapsedSeconds(
+          frame.inferredSourcePts,
+          startPts,
+          attachedSource.videoTimeBase,
+        );
+        if (elapsed !== null) {
+          return {
+            request: {
+              seek: { kind: "pts", pts: frame.inferredSourcePts, scrub: false },
+              frames: 0,
+            },
+            displaySeconds: Math.max(0, elapsed),
+          };
+        }
+      }
+      const position = state.seekTargetSeconds ?? state.approximateBrowserTimeSeconds;
+      const seconds =
+        position !== null && Number.isFinite(position) ? Math.max(0, position) : null;
+      return seconds === null
+        ? { request: null, displaySeconds: null }
+        : {
+            request: {
+              seek: {
+                kind: "approximate",
+                seconds,
+                scrub: false,
+                keepBrowserTimeline: false,
+              },
+              frames: 0,
+            },
+            displaySeconds: seconds,
+          };
     };
 
     /**
@@ -1721,7 +1879,9 @@ export function createPlaybackStore(
       if (!state.isPlaying && ptsShowsAnchorFrame(pts)) {
         return null;
       }
-      return { kind: "pts", pts, scrub: seek.scrub };
+      return seek.kind === "pts" && seek.displaySeconds !== undefined
+        ? { kind: "pts", pts, scrub: seek.scrub, displaySeconds: seek.displaySeconds }
+        : { kind: "pts", pts, scrub: seek.scrub };
     };
 
     /**
@@ -1768,7 +1928,19 @@ export function createPlaybackStore(
       const seek = entry.seek === null ? null : settleDeferredSeek(entry.seek, state);
       const runSeek = (settled: SettledSeek): void => {
         if (settled.kind === "pts") {
+          const before = navigationRevision;
           get().seekToPts(settled.pts, { scrub: settled.scrub });
+          // A seek that seekToPts sent shows the display target of the request until its frame
+          // comes, so the playhead does not move to the middle of the frame and back (ADR 070).
+          // An accepted seek raises the revision once. A listener of its write that navigated
+          // raised it again, and its own target then stays.
+          if (
+            settled.displaySeconds !== undefined &&
+            navigationRevision === before + 1 &&
+            get().seekTargetSeconds !== null
+          ) {
+            set({ seekTargetSeconds: settled.displaySeconds });
+          }
         } else {
           get().seekApproximate(settled.seconds, { scrub: settled.scrub });
         }
@@ -3044,6 +3216,7 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         lastScrubAudioTarget = null;
         // A new attachment has no loss of its own yet. An attach that starts unavailable has no
         // valid start, no valid time base, or a denied source, and none of those is recoverable.
@@ -3140,6 +3313,7 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         waitExpiredLoss = false;
         // Two detaches keep the reload and its display target for the next attach of the same
         // source, and every other detach drops the reload:
@@ -3260,6 +3434,7 @@ export function createPlaybackStore(
         repairLanding = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         lastScrubAudioTarget = null;
         // A deferred navigation needs a ready element to run on, and so does the request of a
         // reload.
@@ -3311,6 +3486,7 @@ export function createPlaybackStore(
         lastScrubAudioTarget = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         deferredNavigation = null;
         reload = null;
         endPriming(true);
@@ -3397,6 +3573,40 @@ export function createPlaybackStore(
               },
           seconds,
         );
+      },
+
+      replacePreviewElement: (sourceRevisionKey: string) => {
+        const state = get();
+        if (
+          activeSourceRevisionKey === null ||
+          activeSourceRevisionKey !== sourceRevisionKey ||
+          attachedElement === null
+        ) {
+          return;
+        }
+        // A stalled element is replaced at the next seek, and an element whose replacement
+        // started is retired. The preview reads the source again for the element that it
+        // attaches next, so neither needs another reload (ADR 039, ADR 063).
+        if (
+          state.decodeStall !== null ||
+          (reload !== null && reload.phase === "requested")
+        ) {
+          return;
+        }
+        if (reload !== null) {
+          // The new element of a reload has no metadata yet. It goes too, and the request of
+          // the reload, with its display target, goes on to the next element.
+          startRecalibration(reload.request, state.seekTargetSeconds);
+          return;
+        }
+        if (!state.isReady) {
+          // The element has not loaded, so no position is known. A navigation of the sequence
+          // waits for the attach, and it runs on the new element (ADR 052).
+          startRecalibration(null, null);
+          return;
+        }
+        const target = replacementTarget(state);
+        startRecalibration(target.request, target.displaySeconds);
       },
 
       isRetiredElement: (sourceRevisionKey: string, element: PlaybackMediaElement) =>
@@ -3510,6 +3720,7 @@ export function createPlaybackStore(
             issuedKeepsPlaying = true;
           } catch {
             lastAcceptedSeek = null;
+            pendingSeekDestination = null;
             lastScrubAudioTarget = null;
             set({
               isPlaying: false,
@@ -3520,6 +3731,8 @@ export function createPlaybackStore(
             return;
           }
           lastAcceptedSeek = null;
+          // The flushed seek is the destination of the pending target until its frame comes.
+          pendingSeekDestination = nextMediaTime;
         }
 
         // A navigation deferred during calibration is dropped, and playback starts where the
@@ -3546,6 +3759,8 @@ export function createPlaybackStore(
             : {}),
         });
 
+        // The scrub records go, and the destination of a pending seek stays: the replacement of
+        // the element goes back to it while its frame has not come (ADR 070).
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
         scrubCue.stop();
@@ -3709,6 +3924,7 @@ export function createPlaybackStore(
           beginNavigation();
           queuedSeek = null;
           lastAcceptedSeek = null;
+          pendingSeekDestination = null;
           lastScrubAudioTarget = null;
           deferredNavigation = null;
           // The reload itself continues, also the reload of a recalibration (ADR 063).
@@ -4878,6 +5094,7 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        pendingSeekDestination = null;
         reload = null;
         waitExpiredLoss = false;
         // A reset permits a new automatic recalibration of every source (ADR 063).

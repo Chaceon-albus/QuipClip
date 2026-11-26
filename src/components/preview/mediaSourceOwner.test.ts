@@ -366,6 +366,33 @@ describe("createMediaSourceOwner", () => {
     expect(controllers).toHaveLength(2);
   });
 
+  it("reports the stream that the windows of the held element map (ADR 070)", () => {
+    const { owner, controllers } = setup();
+    expect(owner.held()).toBeNull();
+    const first = fakeElement();
+    owner.attach(first, TARGET, 1);
+    expect(owner.held()).toEqual({ sourceRevisionKey: "live", audioStreamIndex: 1 });
+
+    // A new stream comes with a new element, which gets its own controller.
+    const matroska: MseSource = {
+      ...SOURCE,
+      container: "matroska",
+      audioStreamIndex: 3,
+    };
+    const second = fakeElement();
+    owner.attach(second, { ...TARGET, source: matroska }, 1);
+    expect(controllers[0]?.destroy).toHaveBeenCalledTimes(1);
+    expect(controllers[1]?.source.audioStreamIndex).toBe(3);
+    expect(owner.held()).toEqual({ sourceRevisionKey: "live", audioStreamIndex: 3 });
+
+    // One element keeps one controller: the stream changes only with the element.
+    owner.attach(second, TARGET, 1);
+    expect(controllers).toHaveLength(2);
+    expect(owner.held()).toEqual({ sourceRevisionKey: "live", audioStreamIndex: 3 });
+    owner.detach(second);
+    expect(owner.held()).toBeNull();
+  });
+
   it("asks for the PCM at each seek target on MPEG-TS and Matroska only", () => {
     const { owner, cues } = setup();
     const ts = fakeElement();
