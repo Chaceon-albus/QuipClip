@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 030, ADR 045, ADR 052, ADR 056
+- Amended by: ADR 030, ADR 045, ADR 052, ADR 056, ADR 065
 
 ## Context
 
@@ -137,6 +137,9 @@ A split leaves the left half current. It already keeps the segment's identifier,
 touches no selection field and undo restores the same target with no special case. The right half
 is the one under the playhead, so making it current would move the target under the operand the
 user just used.
+
+(Changed on 2026-11-26.) A segment can have a name (ADR 065). A split gives the name of the
+segment to its two halves.
 
 `currentSegmentId` restores through undo and redo only while the restored array still holds that
 segment and it belongs to the active source. That rule is keyed on the source alone and not on

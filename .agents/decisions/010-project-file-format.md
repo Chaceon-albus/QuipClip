@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 052, ADR 058
+- Amended by: ADR 052, ADR 058, ADR 065
 
 ## Context
 
@@ -106,6 +106,10 @@ either the old file or the new file, and never a half-written one.
 The format below stays defined, and `src-tauri/src/project/` keeps `load_project` and
 `save_project` in the command surface. Nothing calls them. The decision is a scope decision,
 not a defect, so the code stays ready rather than being deleted and rebuilt.
+
+(Changed on 2026-11-26.) A segment of the document can have the optional field `name`
+(ADR 065). The loader refuses a name that breaks the rule of that record. The schema version
+stays 1.
 
 Persistence needs more than the file. It needs a source that resolves after a move, a
 revision check against the file on disk, an order for restoring the media, playback, and

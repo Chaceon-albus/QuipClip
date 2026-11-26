@@ -86,6 +86,7 @@ document summarizes them and shows how the parts fit together.
 | [`062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md`](../.agents/decisions/062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md) | On macOS a native source plays its frame step cue through the PCM cue of ADR 046   |
 | [`063-calibrate-the-preview-again-after-a-calibration-that-failed.md`](../.agents/decisions/063-calibrate-the-preview-again-after-a-calibration-that-failed.md)         | An element that showed no first frame is replaced one time, and again on request   |
 | [`064-keep-the-frame-step-cue-after-a-failure.md`](../.agents/decisions/064-keep-the-frame-step-cue-after-a-failure.md)                                                 | The PCM cue turns on again 3 s after a failure, except after a changed file        |
+| [`065-give-a-segment-a-name.md`](../.agents/decisions/065-give-a-segment-a-name.md)                                                                                     | A segment can have a name of one line, set in a dialog with `F2`                   |
 
 ## Shape
 
@@ -631,6 +632,7 @@ type SequenceSegment = {
   inPts: Pts; // inclusive, in the video time base of the source of inClipId
   outClipId: string;
   outPts: Pts; // exclusive, in the video time base of the source of outClipId
+  name?: string; // one line of 1 to 80 characters (ADR 065)
 };
 
 type Project = {
@@ -671,6 +673,11 @@ seeking never creates project state.
 Mark In stores the clip and the inferred PTS of the displayed frame. Mark Out stores the
 clip and the current PTS as the first excluded frame. Split creates adjacent half-open
 segments.
+
+A segment can have a name of one line (ADR 065). Rename Segment (`F2`, or "Rename…" in the
+context menu of the segment) opens a dialog for it. The confirm adds one edit when the name
+changes. A split gives the name to its two halves. The tooltip and the accessible name of the
+segment show the name after the number, and the bar shows it when it has room.
 
 On the first frame of a clip, Mark Out stores the end of the clip before it, so each
 boundary has one form. When that clip has no `videoEndPts`, or when no clip comes before,

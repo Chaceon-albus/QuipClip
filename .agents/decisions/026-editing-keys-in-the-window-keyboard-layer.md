@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065
 
 ## Context
 
@@ -273,6 +273,11 @@ The key of each item comes from the key table. On macOS the item carries the acc
 its row, and the system draws it in the form of the tooltips, such as `⇧I`. On Windows the
 item text carries the tooltip form after a tab, such as `Shift+I`, and the menu shows it in
 its accelerator column. The labels come from the catalog.
+
+(Changed on 2026-11-26.) The key table gains the row Rename Segment, with the key `F2`
+(ADR 065). The menu gains the item "Rename…" for it, between two separators, after Play Segment
+and before Delete Segment. The item shows `F2`. It is disabled for a request on several
+selected segments. Its command opens a dialog after the menu closes.
 
 The menu holds only actions whose operand is the segment. Mark In, Mark Out and Split act at
 the playhead, which a right-click does not move. Finish Segment clears the selection that the
