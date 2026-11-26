@@ -4,13 +4,19 @@ import {
   frameIndexOfTicks,
   type TimecodeDisplay,
 } from "@/lib/timecode";
-import type { Pts, Rational, Segment } from "@/types/project";
+import type { Pts, Rational, Segment, SequenceSegment } from "@/types/project";
+import { selectExportSegmentCount } from "./exportSegments";
 import {
+  exportSegmentGridLength,
   formatSegmentTotal,
   selectActiveSourceSegmentCount,
+  sequenceSegmentGridLength,
   totalActiveSourceSegments,
+  totalExportSegments,
   type SegmentTotalSource,
 } from "./segmentTotal";
+import type { SequenceSource } from "./sequence";
+import { createTimelineStore } from "./store";
 
 const ms: Rational = { n: 1, d: 1000 };
 const fps25: Rational = { n: 25, d: 1 };
@@ -335,5 +341,217 @@ describe("selectActiveSourceSegmentCount", () => {
       }),
     ).toBe(0);
     expect(selectActiveSourceSegmentCount({ segments: [], sourceId: "s1" })).toBe(0);
+  });
+});
+
+describe("totalExportSegments", () => {
+  const nanoseconds: SequenceSource = {
+    id: "A",
+    videoTimeBase: { n: 1, d: 1_000_000_000 },
+    videoStartPts: "0" as Pts,
+    videoEndPts: "1000000000" as Pts,
+    videoDurationTicks: null,
+    approximateDurationSeconds: null,
+  };
+  // A clip whose start PTS puts the virtual origin near the largest PTS, so the virtual PTS of a
+  // later segment is outside the range of a PTS.
+  const lateStart: SequenceSource = {
+    id: "B",
+    videoTimeBase: { n: 1, d: 8_000_009 },
+    videoStartPts: "9218000000" as Pts,
+    videoEndPts: "9220000002" as Pts,
+    videoDurationTicks: null,
+    approximateDurationSeconds: null,
+  };
+  const anchored = (id: string, inPts: string, outPts: string): SequenceSegment => ({
+    id,
+    inClipId: "a1",
+    inPts: inPts as Pts,
+    outClipId: "a1",
+    outPts: outPts as Pts,
+  });
+
+  /** Two 100 ms segments on clip A, then clip B dropped before A, as an import does. */
+  function overflowingStore() {
+    const store = createTimelineStore(
+      {},
+      {
+        clips: [{ id: "a1", sourceId: "A" }],
+        sequenceSources: { A: nanoseconds },
+        sequenceSegments: [
+          anchored("first", "50000000", "150000000"),
+          anchored("second", "500000000", "600000000"),
+        ],
+        attachedClipId: "a1",
+        generation: 1,
+      },
+    );
+    expect(
+      store.getState().insertClips(0, [{ id: "b1", sourceId: "B" }], [lateStart]),
+    ).toBe(true);
+    return store;
+  }
+
+  /** The probe of the sequence: the virtual time base and origin (`virtualMedia.ts`). */
+  function sequenceProbe(
+    store: ReturnType<typeof overflowingStore>,
+  ): SegmentTotalSource {
+    const virtual = store.getState().virtual;
+    if (virtual === null) {
+      throw new Error("no virtual timeline");
+    }
+    return { videoTimeBase: virtual.timeBase, videoStartPts: virtual.originPts };
+  }
+
+  it("adds every segment that the count counts, also one with no virtual PTS", () => {
+    const store = overflowingStore();
+    const state = store.getState();
+    // The derived timeline cannot place the second segment, and the export still takes it.
+    expect(state.segments.map((segment) => segment.id)).toEqual(["first"]);
+    expect(selectExportSegmentCount(state)).toBe(2);
+    const probe = sequenceProbe(store);
+    const display = MILLISECONDS_TIMECODE_DISPLAY;
+
+    // The total of the derived timeline misses the second segment.
+    expect(
+      totalActiveSourceSegments(state.segments, state.sourceId, probe, display),
+    ).toBe(100n);
+    expect(totalExportSegments(state, probe, display)).toBe(200n);
+    expect(
+      formatSegmentTotal(totalExportSegments(state, probe, display), display),
+    ).toBe("00:00:00.200");
+    // The length of the second segment comes from its own source, which has no virtual PTS.
+    const second = state.sequenceSegments.find((segment) => segment.id === "second");
+    if (second === undefined) {
+      throw new Error("missing segment");
+    }
+    expect(
+      sequenceSegmentGridLength(
+        second,
+        state.clips,
+        new Map(Object.entries(state.sequenceSources)),
+        display,
+      ),
+    ).toBe(100n);
+  });
+
+  it("is the total of the derived timeline when every segment has a place", () => {
+    const store = createTimelineStore(
+      {},
+      {
+        clips: [{ id: "a1", sourceId: "A" }],
+        sequenceSources: { A: nanoseconds },
+        sequenceSegments: [
+          anchored("first", "50000000", "150000000"),
+          anchored("second", "500000000", "650000000"),
+        ],
+        attachedClipId: "a1",
+        generation: 1,
+      },
+    );
+    const state = store.getState();
+    const probe = sequenceProbe(store);
+    const display = framesDisplay(fps25, nanoseconds.videoTimeBase);
+    expect(totalExportSegments(state, probe, display)).toBe(
+      totalActiveSourceSegments(state.segments, state.sourceId, probe, display),
+    );
+    expect(totalExportSegments(state, probe, display)).toBe(6n);
+  });
+
+  it("counts from the pieces when the virtual axis is not known, as the rows do", () => {
+    const store = overflowingStore();
+    const state = store.getState();
+    expect(totalExportSegments(state, null, MILLISECONDS_TIMECODE_DISPLAY)).toBe(200n);
+    expect(
+      totalExportSegments(
+        state,
+        { videoTimeBase: ms, videoStartPts: null },
+        MILLISECONDS_TIMECODE_DISPLAY,
+      ),
+    ).toBe(200n);
+  });
+
+  it("returns null when a segment has no length on the axis and none from its pieces", () => {
+    const store = overflowingStore();
+    const state = store.getState();
+    // A source with no valid start PTS gives its pieces no length.
+    const broken = {
+      ...state,
+      sequenceSources: {
+        ...state.sequenceSources,
+        A: { ...nanoseconds, videoStartPts: "x" as Pts },
+      },
+    };
+    expect(
+      exportSegmentGridLength(
+        undefined,
+        state.sequenceSegments.find((segment) => segment.id === "second"),
+        {
+          clips: broken.clips,
+          sources: new Map(Object.entries(broken.sequenceSources)),
+          axis: null,
+          display: MILLISECONDS_TIMECODE_DISPLAY,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      exportSegmentGridLength(undefined, undefined, {
+        clips: state.clips,
+        sources: new Map(Object.entries(state.sequenceSources)),
+        axis: null,
+        display: MILLISECONDS_TIMECODE_DISPLAY,
+      }),
+    ).toBeNull();
+  });
+
+  it("counts a placed segment from its pieces when the display cannot count its virtual PTS", () => {
+    // Clip B, 0.75 s long, dropped before A. Both segments keep a valid virtual PTS, so the
+    // derived timeline places them, but the later one is more than 2^53 virtual ticks after the
+    // origin, which the millisecond display cannot count.
+    const shortStart: SequenceSource = {
+      ...lateStart,
+      videoStartPts: "0" as Pts,
+      videoEndPts: "6000000" as Pts,
+    };
+    const store = createTimelineStore(
+      {},
+      {
+        clips: [{ id: "a1", sourceId: "A" }],
+        sequenceSources: { A: nanoseconds },
+        sequenceSegments: [
+          anchored("first", "50000000", "150000000"),
+          anchored("second", "500000000", "600000000"),
+        ],
+        attachedClipId: "a1",
+        generation: 1,
+      },
+    );
+    expect(
+      store.getState().insertClips(0, [{ id: "b1", sourceId: "B" }], [shortStart]),
+    ).toBe(true);
+    const state = store.getState();
+    expect(state.segments.map((segment) => segment.id)).toEqual(["first", "second"]);
+    const probe = sequenceProbe(store);
+    const display = MILLISECONDS_TIMECODE_DISPLAY;
+    // The virtual axis alone gives no total.
+    expect(
+      totalActiveSourceSegments(state.segments, state.sourceId, probe, display),
+    ).toBeNull();
+    const facts = {
+      clips: state.clips,
+      sources: new Map(Object.entries(state.sequenceSources)),
+      axis: probe,
+      display,
+    };
+    const placed = new Map(state.segments.map((segment) => [segment.id, segment]));
+    const anchoredById = new Map(
+      state.sequenceSegments.map((segment) => [segment.id, segment]),
+    );
+    expect(
+      ["first", "second"].map((id) =>
+        exportSegmentGridLength(placed.get(id), anchoredById.get(id), facts),
+      ),
+    ).toEqual([100n, 100n]);
+    expect(totalExportSegments(state, probe, display)).toBe(200n);
   });
 });

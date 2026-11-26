@@ -3,6 +3,7 @@ import {
   canDeleteSegment,
   canExportMedia,
   canFitTimeline,
+  canOpenExportOrder,
   canRedoEdit,
   canSelectAllSegments,
   canStepFrames,
@@ -16,6 +17,15 @@ import {
 const BOOLEANS = [false, true] as const;
 
 describe("actionConditions", () => {
+  it("opens Export Order only for two or more segments of the export (ADR 066)", () => {
+    expect(canOpenExportOrder(0)).toBe(false);
+    expect(canOpenExportOrder(1)).toBe(false);
+    expect(canOpenExportOrder(2)).toBe(true);
+    expect(canOpenExportOrder(256)).toBe(true);
+    expect(canOpenExportOrder(Number.NaN)).toBe(false);
+    expect(canOpenExportOrder(2.5)).toBe(false);
+  });
+
   it("makes a source active only with open media, an attached element and metadata", () => {
     for (const hasMedia of BOOLEANS) {
       for (const isAttached of BOOLEANS) {

@@ -97,26 +97,31 @@ export interface BoundaryIndex {
 /**
  * Parses the boundaries that a badge can name.
  *
- * Each segment takes the number that the timeline shows on it, which counts the segments of
- * the active source in export order (`numberSegmentsInExportOrder`). A segment that is not a
- * valid half-open interval has no In frame and no Out frame, so it is left out, and the
- * numbers of the other segments do not change.
+ * Each segment takes the number that the timeline shows on it, its place among the segments
+ * of the export (`numberSegmentsInExportOrder`, ADR 066). A segment that is not a valid
+ * half-open interval has no In frame and no Out frame, so it is left out, and the numbers of
+ * the other segments do not change.
  *
- * @param segments The project segment array, in export order.
+ * @param segments The segments of the timeline, in array order.
+ * @param exportIds The ids of the segments of the export, in export order
+ *   (`exportSegmentIds`).
  * @param activeSourceId The source that the timeline shows.
  * @param pendingInPts The pending In mark of the active source, or null.
  */
 export function indexSegmentBoundaries(
   segments: readonly Segment[],
+  exportIds: readonly string[],
   activeSourceId: string | null | undefined,
   pendingInPts: Pts | null,
 ): BoundaryIndex {
   const indexed: IndexedSegment[] = [];
-  for (const { segment, number } of numberSegmentsInExportOrder(
-    segments,
-    activeSourceId,
-  ).entries) {
-    if (isValidSegmentRange(segment.inPts, segment.outPts)) {
+  for (const { segment, number } of numberSegmentsInExportOrder(segments, exportIds)
+    .entries) {
+    // Only a segment of the active source has its PTS on the axis of the frame on screen.
+    if (
+      segment.sourceId === activeSourceId &&
+      isValidSegmentRange(segment.inPts, segment.outPts)
+    ) {
       indexed.push({
         number,
         inPts: BigInt(segment.inPts),

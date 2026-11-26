@@ -1781,3 +1781,162 @@ describe("timeline store names through clip operations (ADR 052, ADR 065)", () =
     ]);
   });
 });
+
+describe("timeline store reorderExportSegments (ADR 066)", () => {
+  const A: SequenceSource = {
+    id: "A",
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: pts("0"),
+    videoEndPts: pts("10000"),
+    videoDurationTicks: null,
+    approximateDurationSeconds: 10,
+  };
+  const B: SequenceSource = { ...A, id: "B", videoEndPts: pts("5000") };
+  const clipA: Clip = { id: "clip:A", sourceId: "A" };
+  const clipB: Clip = { id: "clip:B", sourceId: "B" };
+  const on = (id: string, clipId: string, inPts: string, outPts: string) => ({
+    id,
+    inClipId: clipId,
+    inPts: pts(inPts),
+    outClipId: clipId,
+    outPts: pts(outPts),
+  });
+
+  /**
+   * One clip of A, with the segment `notLive` of B between `a` and `b`: B is not on the
+   * sequence, as after a file replaced it (ADR 027). `a` and `b` are selected.
+   */
+  function withDormant() {
+    return createTimelineStore(
+      {},
+      {
+        clips: [clipA],
+        sequenceSources: { A, B },
+        sequenceSegments: [
+          on("a", "clip:A", "1000", "2000"),
+          on("notLive", "clip:B", "0", "1000"),
+          on("b", "clip:A", "3000", "4000"),
+        ],
+        attachedClipId: "clip:A",
+        generation: 1,
+        selectedSegmentIds: ["a", "b"],
+      },
+    );
+  }
+
+  const ids = (store: ReturnType<typeof withDormant>) =>
+    store.getState().sequenceSegments.map((segment) => segment.id);
+
+  it("writes the new order into the places of the segments of the export", () => {
+    const store = withDormant();
+    expect(store.getState().reorderExportSegments(["b", "a"])).toBe("reordered");
+    // The segment that is not live keeps its place: no move to the end, as a clip edit makes.
+    expect(ids(store)).toEqual(["b", "notLive", "a"]);
+    expect(store.getState().segments.map((segment) => segment.id)).toEqual(["b", "a"]);
+    // The same selection, in the order of the new array, with nothing current.
+    expect(store.getState()).toMatchObject({
+      selectedSegmentIds: ["b", "a"],
+      currentSegmentId: null,
+      canUndo: true,
+      canRedo: false,
+    });
+  });
+
+  it("restores the order and the selection on Undo, and the new order on Redo", () => {
+    const store = withDormant();
+    store.getState().reorderExportSegments(["b", "a"]);
+    store.getState().undo();
+    expect(ids(store)).toEqual(["a", "notLive", "b"]);
+    expect(store.getState()).toMatchObject({
+      selectedSegmentIds: ["a", "b"],
+      canUndo: false,
+      canRedo: true,
+    });
+    store.getState().redo();
+    expect(ids(store)).toEqual(["b", "notLive", "a"]);
+    expect(store.getState()).toMatchObject({
+      selectedSegmentIds: ["b", "a"],
+      canUndo: true,
+      canRedo: false,
+    });
+  });
+
+  it("keeps the current segment of a selection of one", () => {
+    const store = withDormant();
+    store.getState().selectSegment("b");
+    store.getState().reorderExportSegments(["b", "a"]);
+    expect(store.getState()).toMatchObject({
+      selectedSegmentIds: ["b"],
+      currentSegmentId: "b",
+    });
+  });
+
+  it("keeps each field of a moved segment, the name included", () => {
+    const store = withDormant();
+    store.getState().renameSegment("b", "Intro");
+    store.getState().reorderExportSegments(["b", "a"]);
+    expect(store.getState().sequenceSegments[0]).toEqual({
+      ...on("b", "clip:A", "3000", "4000"),
+      name: "Intro",
+    });
+  });
+
+  it("makes no edit for the order of the array", () => {
+    const store = withDormant();
+    const before = store.getState().sequenceSegments;
+    expect(store.getState().reorderExportSegments(["a", "b"])).toBe("unchanged");
+    expect(store.getState().sequenceSegments).toBe(before);
+    expect(store.getState().canUndo).toBe(false);
+  });
+
+  it("refuses ids that are not exactly the segments of the export, each one time", () => {
+    const store = withDormant();
+    const before = store.getState().sequenceSegments;
+    for (const wrong of [
+      [],
+      ["b"],
+      ["b", "a", "a"],
+      ["b", "b"],
+      ["b", "notLive", "a"],
+      ["b", "missing"],
+      ["notLive", "a"],
+    ]) {
+      expect(store.getState().reorderExportSegments(wrong)).toBe("refused");
+    }
+    expect(store.getState().sequenceSegments).toBe(before);
+    expect(store.getState()).toMatchObject({
+      canUndo: false,
+      selectedSegmentIds: ["a", "b"],
+    });
+  });
+
+  it("reorders the live segments of several clips and keeps a dormant one in place", () => {
+    const clipC: Clip = { id: "clip:C", sourceId: "C" };
+    const store = createTimelineStore(
+      {},
+      {
+        clips: [clipA, clipB],
+        sequenceSources: { A, B, C: { ...A, id: "C" } },
+        sequenceSegments: [
+          on("x", "clip:A", "0", "1000"),
+          on("dormant", clipC.id, "0", "1000"),
+          {
+            id: "cross",
+            inClipId: "clip:A",
+            inPts: pts("9000"),
+            outClipId: "clip:B",
+            outPts: pts("1000"),
+          },
+          on("y", "clip:B", "2000", "3000"),
+        ],
+        attachedClipId: "clip:A",
+        generation: 1,
+      },
+    );
+    expect(store.getState().reorderExportSegments(["y", "x", "cross"])).toBe(
+      "reordered",
+    );
+    expect(ids(store)).toEqual(["y", "dormant", "x", "cross"]);
+    expect(store.getState().selectedSegmentIds).toEqual([]);
+  });
+});

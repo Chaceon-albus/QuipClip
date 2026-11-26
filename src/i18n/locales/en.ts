@@ -475,6 +475,36 @@ export const en = {
       tooLong:
         "The name has {{length}} characters. A name can have no more than {{max}} characters.",
     },
+    // The dialog that changes the order in which the export joins the segments (ADR 066). The
+    // user opens it with the segment summary in the gutter of the track row, or with a key.
+    // `title` is also the name of the action. `open` is the tooltip of the segment summary: the
+    // ellipsis says that it opens a dialog. `list` is the accessible name of the list of
+    // segments. `moveHintMac` and `moveHintWindows` show under the list on each platform: ⌥ is
+    // the Option key of macOS, and ↑ and ↓ are the arrow keys. The keys move a row only while
+    // a row of the list has the focus. `sort` puts the segments in the order of their place on
+    // the timeline. `confirm` applies the order. `changed` shows when the
+    // segments of the export changed while the dialog was open, and the list then shows the new
+    // order. `rowDuration` and `rowDurationNamed` are the accessible name of a segment whose
+    // place on the timeline is not known: {{index}} is its place in the list, {{name}} is its
+    // name, and {{duration}} is a timecode such as "00:01:23:04". `moved` is read to a screen
+    // reader after a segment moved: {{position}} is its new place, and {{total}} is the number
+    // of segments.
+    exportOrder: {
+      title: "Export Order",
+      open: "Export Order…",
+      description: "The export joins the segments in this order.",
+      list: "Segments in export order",
+      moveHintMac:
+        "Drag a segment to move it. With a row focused, you can also press ⌥↑ or ⌥↓.",
+      moveHintWindows:
+        "Drag a segment to move it. With a row focused, you can also press Alt+↑ or Alt+↓.",
+      sort: "Sort by Timeline Position",
+      confirm: "Apply",
+      changed: "The timeline changed. The list shows the new order.",
+      rowDuration: "Segment {{index}}, duration {{duration}}",
+      rowDurationNamed: "Segment {{index}}: {{name}}, duration {{duration}}",
+      moved: "Moved to position {{position}} of {{total}}.",
+    },
   },
   mediaError: {
     invalidPath: "The selected file path is invalid.",

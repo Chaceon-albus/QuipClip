@@ -42,8 +42,8 @@ import {
 } from "@/features/settings/presetTestStore";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
-  selectActiveSourceSegmentCount,
-  totalActiveSourceSegments,
+  selectExportSegmentCount,
+  totalExportSegments,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -860,17 +860,17 @@ export function ExportSetup({
     () => resolveTimecodeDisplay(timecodePreference, probe),
     [timecodePreference, probe],
   );
-  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  const segmentCount = useTimelineStore(selectExportSegmentCount);
   // What the export writes with the preset value `source`, and the facts of the copy of the
   // audio (ADR 053): with one clip, its probe; with several, the canvas, the highest frame rate
   // and the widest audio of the sources of the pieces, by the rules that the plan applies.
   const sourceFacts = useExportSourceFacts(probe);
   const outputSource = sourceFacts.output;
   // The total of the Export tooltip, for the sentence only. It is one bigint or null, which
-  // compare by value, so the step renders again only when the total changes.
+  // compare by value, so the step renders again only when the total changes. It adds the
+  // segments that the count counts (ADR 066).
   const selectSegmentTotal = useCallback(
-    (state: TimelineStoreState) =>
-      totalActiveSourceSegments(state.segments, state.sourceId, probe, timecodeDisplay),
+    (state: TimelineStoreState) => totalExportSegments(state, probe, timecodeDisplay),
     [probe, timecodeDisplay],
   );
   const segmentTotal = useTimelineStore(selectSegmentTotal);

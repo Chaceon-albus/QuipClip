@@ -63,6 +63,40 @@ export function toPromptFocusTarget(
   };
 }
 
+/** A focus target that also tells whether the focus landed on it after `focus()`. */
+export interface LandingFocusTarget extends PromptFocusTarget {
+  /** True while the element holds the focus (`document.activeElement`). */
+  readonly hasFocus: boolean;
+}
+
+/**
+ * Wraps a DOM element for a rule that tries each candidate until the focus lands, such as
+ * `returnSegmentRenameFocus` (ADR 065), or returns null for no element.
+ */
+export function toLandingFocusTarget(
+  element: HTMLElement | null,
+): LandingFocusTarget | null {
+  const target = toPromptFocusTarget(element);
+  if (element === null || target === null) {
+    return null;
+  }
+  return {
+    get isConnected() {
+      return target.isConnected;
+    },
+    get isRendered() {
+      return target.isRendered;
+    },
+    get isDisabled() {
+      return target.isDisabled;
+    },
+    get hasFocus() {
+      return element.ownerDocument.activeElement === element;
+    },
+    focus: target.focus,
+  };
+}
+
 /** True when the target is in the document, rendered, and enabled. */
 export function canTakeFocus<T extends PromptFocusTarget>(
   target: T | null,

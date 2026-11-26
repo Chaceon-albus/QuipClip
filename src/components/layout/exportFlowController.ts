@@ -53,7 +53,7 @@ import {
   exportLimitError,
   sequenceExportPieces,
 } from "@/features/export/sequenceRequest";
-import { timelineStore } from "@/features/timeline";
+import { isSequenceExport, timelineStore } from "@/features/timeline";
 import type { TimelineTruth } from "@/features/timeline/types";
 import type { ImportMediaResult } from "@/features/media/types";
 import { loudnessRequestId } from "@/features/loudness/store";
@@ -106,7 +106,8 @@ export interface ExportRequestParts {
  */
 export function composeExportRequest(parts: ExportRequestParts): ExportRequest | null {
   const { timeline, media, preset, streams, audioMode, outputPath } = parts;
-  if (timeline.clips.length > 1) {
+  // `exportSegmentIds` chooses its array by the same rule (ADR 066).
+  if (isSequenceExport(timeline.clips)) {
     return buildSequenceExportRequest({
       clips: timeline.clips,
       segments: timeline.sequenceSegments,

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ImportMediaResult } from "@/features/media/types";
 import { createPresetDraft } from "@/features/settings/presetDocument";
-import type { SequenceSource } from "@/features/timeline/sequence";
+import { exportSegmentIds, isSequenceExport } from "@/features/timeline/exportSegments";
+import { calculateSegmentLayout } from "@/features/timeline/math";
+import { expandSegment, type SequenceSource } from "@/features/timeline/sequence";
+import { createTimelineStore } from "@/features/timeline/store";
 import type { Pts, Segment, SequenceSegment } from "@/types/project";
 import {
   composeExportRequest,
@@ -141,5 +144,215 @@ describe("the scope of the measurement (ADR 061)", () => {
   it("is null when no request can be built", () => {
     expect(measurementScope(parts({ segments: [] }))).toBeNull();
     expect(measurementScope(parts({ media: null }))).toBeNull();
+  });
+});
+
+describe("the segments of the export (ADR 066)", () => {
+  const facts = (id: string, end: string, timeBaseD = 1000): SequenceSource => ({
+    id,
+    videoTimeBase: { n: 1, d: timeBaseD },
+    videoStartPts: "0" as Pts,
+    videoEndPts: end as Pts,
+    videoDurationTicks: null,
+    approximateDurationSeconds: null,
+  });
+  const imported = (path: string) =>
+    ({ path, fileName: path.slice(1), size: 1, mtime: 1 }) as ImportMediaResult;
+  const on = (
+    id: string,
+    inClipId: string,
+    inPts: string,
+    outClipId: string,
+    outPts: string,
+  ): SequenceSegment => ({
+    id,
+    inClipId,
+    inPts: inPts as Pts,
+    outClipId,
+    outPts: outPts as Pts,
+  });
+
+  const PAST_EXTENT: SequenceSource = {
+    ...facts("A", "0"),
+    videoEndPts: null,
+    approximateDurationSeconds: 5,
+  };
+
+  /** The request that the session composes for the state of `store`. */
+  function composeFrom(store: ReturnType<typeof createTimelineStore>) {
+    const state = store.getState();
+    return composeExportRequest(
+      parts({
+        timeline: state,
+        sources: {
+          A: imported("/a.mp4"),
+          B: imported("/b.mp4"),
+          C: imported("/c.mp4"),
+        },
+        segments: state.segments,
+        sourceId: state.sourceId,
+      }),
+    );
+  }
+
+  /**
+   * The pieces that the request holds for `ids`, in that order: the one piece of each derived
+   * segment for one clip, and the pieces of each anchored segment for several clips.
+   */
+  function piecesOf(
+    store: ReturnType<typeof createTimelineStore>,
+    ids: readonly string[],
+  ) {
+    const state = store.getState();
+    if (!isSequenceExport(state.clips)) {
+      return ids.map((id) => {
+        const segment = state.segments.find((candidate) => candidate.id === id);
+        return {
+          sourceId: state.sourceId,
+          inPts: segment?.inPts,
+          outPts: segment?.outPts,
+        };
+      });
+    }
+    const sources = new Map(Object.entries(state.sequenceSources));
+    return ids.flatMap((id) => {
+      const segment = state.sequenceSegments.find((candidate) => candidate.id === id);
+      return (
+        segment === undefined
+          ? []
+          : (expandSegment(segment, state.clips, sources) ?? [])
+      ).map((piece) => ({
+        sourceId: piece.sourceId,
+        inPts: piece.inPts,
+        outPts: piece.outPts,
+      }));
+    });
+  }
+
+  // Each state, and the ids of the segments of its export.
+  const states: readonly [
+    string,
+    () => ReturnType<typeof createTimelineStore>,
+    readonly string[],
+  ][] = [
+    [
+      "one clip, with a segment of a file that another file replaced",
+      () =>
+        createTimelineStore(
+          {},
+          {
+            clips: [{ id: "clip:A", sourceId: "A" }],
+            sequenceSources: { A: facts("A", "10000"), B: facts("B", "5000") },
+            sequenceSegments: [
+              on("s1", "clip:A", "4000", "clip:A", "5000"),
+              on("old", "clip:B", "0", "clip:B", "1000"),
+              on("s2", "clip:A", "1000", "clip:A", "2000"),
+            ],
+            generation: 1,
+          },
+        ),
+      ["s1", "s2"],
+    ],
+    [
+      "one clip, with a segment after the estimated extent, which has no width on the lane",
+      () =>
+        createTimelineStore(
+          {},
+          {
+            clips: [{ id: "clip:A", sourceId: "A" }],
+            // No known end, and an estimate of 5 s: a segment at 8 s is valid, and the bar
+            // layer clamps it to no width.
+            sequenceSources: { A: PAST_EXTENT },
+            sequenceSegments: [
+              on("past", "clip:A", "8000", "clip:A", "9000"),
+              on("s1", "clip:A", "0", "clip:A", "1000"),
+            ],
+            generation: 1,
+          },
+        ),
+      ["past", "s1"],
+    ],
+    [
+      "several clips, with a segment across a junction and one that is not live",
+      () =>
+        createTimelineStore(
+          {},
+          {
+            clips: [
+              { id: "a1", sourceId: "A" },
+              { id: "b1", sourceId: "B" },
+            ],
+            sequenceSources: {
+              A: facts("A", "10000"),
+              B: facts("B", "5000"),
+              C: facts("C", "5000"),
+            },
+            sequenceSegments: [
+              on("y", "b1", "2000", "b1", "3000"),
+              on("dormant", "c1", "0", "c1", "1000"),
+              on("cross", "a1", "9000", "b1", "1000"),
+              on("x", "a1", "0", "a1", "1000"),
+            ],
+            generation: 1,
+          },
+        ),
+      ["y", "cross", "x"],
+    ],
+    [
+      "several clips whose common time base is not a safe integer, so derive omits them",
+      () =>
+        createTimelineStore(
+          {},
+          {
+            clips: [
+              { id: "a1", sourceId: "A" },
+              { id: "b1", sourceId: "B" },
+            ],
+            // The least common multiple of the two denominators is not a safe integer, so
+            // the sequence has no virtual axis and no derived segment (`buildVirtualTimeline`).
+            sequenceSources: {
+              A: facts("A", "9007199254740990", 9007199254740991),
+              B: facts("B", "9007199254740988", 9007199254740989),
+            },
+            sequenceSegments: [
+              on("b", "b1", "0", "b1", "1000"),
+              on("a", "a1", "0", "a1", "1000"),
+            ],
+            generation: 1,
+          },
+        ),
+      ["b", "a"],
+    ],
+  ];
+
+  for (const [name, make, expected] of states) {
+    it(`are the segments of the composed request, in its order: ${name}`, () => {
+      const store = make();
+      const ids = exportSegmentIds(store.getState());
+      expect(ids).toEqual(expected);
+      const request = composeFrom(store);
+      expect(request?.segmentCount).toBe(ids.length);
+      expect(request?.pieces).toEqual(piecesOf(store, ids));
+    });
+  }
+
+  it("hold a segment that has no width on the lane, as the request of one clip does", () => {
+    const [, make] = states[1] ?? [];
+    const state = make?.().getState();
+    const past = state?.segments.find((segment) => segment.id === "past");
+    expect(past).toBeDefined();
+    expect(
+      past === undefined
+        ? null
+        : calculateSegmentLayout(past, "0" as Pts, { n: 1, d: 1000 }, 5).widthPercent,
+    ).toBe(0);
+    expect(state === undefined ? [] : exportSegmentIds(state)).toEqual(["past", "s1"]);
+  });
+
+  it("hold a segment that derive omits, as the request of several clips does", () => {
+    const [, make] = states[3] ?? [];
+    const state = make?.().getState();
+    expect(state?.segments).toEqual([]);
+    expect(state === undefined ? [] : exportSegmentIds(state)).toEqual(["b", "a"]);
   });
 });

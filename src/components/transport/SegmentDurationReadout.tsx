@@ -3,7 +3,11 @@ import { useTranslation } from "react-i18next";
 import { type MediaStoreState } from "@/features/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
-import { useTimelineStore, type TimelineStoreState } from "@/features/timeline";
+import {
+  selectExportSegmentIds,
+  useTimelineStore,
+  type TimelineStoreState,
+} from "@/features/timeline";
 import { timecodePlaceholder, type TimecodeDisplay } from "@/lib/timecode";
 import type { Pts } from "@/types/project";
 import {
@@ -115,6 +119,8 @@ export function SegmentDurationReadout({
   const { t } = useTranslation();
   const probe = useSequenceMediaStore(selectProbe);
   const segments = useTimelineStore(selectSegments);
+  // The number of the segment is its place in the export (ADR 066).
+  const exportIds = useTimelineStore(selectExportSegmentIds);
   const sourceId = useTimelineStore(selectSourceId);
   const currentSegmentId = useTimelineStore(selectCurrentSegmentId);
   const pendingInPts = useTimelineStore(selectPendingInPts);
@@ -124,12 +130,13 @@ export function SegmentDurationReadout({
     () =>
       resolveSegmentDurationSubject(
         segments,
+        exportIds,
         currentSegmentId,
         sourceId,
         pendingInPts,
         hasActiveSource,
       ),
-    [segments, currentSegmentId, sourceId, pendingInPts, hasActiveSource],
+    [segments, exportIds, currentSegmentId, sourceId, pendingInPts, hasActiveSource],
   );
   // The format of the source, as the preview timecode and the segment tooltip use it
   // (ADR 028).

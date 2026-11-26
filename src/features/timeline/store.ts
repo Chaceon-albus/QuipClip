@@ -19,6 +19,7 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { isPtsString } from "@/lib/time";
 import type { Clip, EditPoint, Pts, Segment, SequenceSegment } from "@/types/project";
+import { exportSegmentIds } from "./exportSegments";
 import { isValidSegmentName } from "./segmentName";
 import {
   canonicalIn,
@@ -866,6 +867,54 @@ export function createTimelineStore(
           canUndo: true,
           canRedo: false,
         });
+      },
+
+      reorderExportSegments: (ids: readonly string[]) => {
+        const state = get();
+        const current = exportSegmentIds(state);
+        // The ids must be the segments of the export, each one time (ADR 066).
+        const exported = new Set(current);
+        const seen = new Set<string>();
+        for (const id of ids) {
+          if (!exported.has(id) || seen.has(id)) {
+            return "refused";
+          }
+          seen.add(id);
+        }
+        if (seen.size !== exported.size) {
+          return "refused";
+        }
+        // The order of the array is no edit.
+        if (ids.every((id, index) => id === current[index])) {
+          return "unchanged";
+        }
+        const byId = new Map(
+          state.sequenceSegments.map((segment) => [segment.id, segment]),
+        );
+        // The segments of the export take the places that they hold now, in the new order. Each
+        // other segment keeps its place.
+        let next = 0;
+        const sequenceSegments = state.sequenceSegments.map((segment) => {
+          if (!exported.has(segment.id)) {
+            return segment;
+          }
+          const id = ids[next];
+          next += 1;
+          return (id === undefined ? undefined : byId.get(id)) ?? segment;
+        });
+        // The same selected segments, in the order of the new array (ADR 045).
+        const selected = new Set(state.selectedSegmentIds);
+        const selection = sequenceSegments
+          .filter((segment) => selected.has(segment.id))
+          .map((segment) => segment.id);
+        pushHistory();
+        write({
+          sequenceSegments,
+          ...selectionOf(selection),
+          canUndo: true,
+          canRedo: false,
+        });
+        return "reordered";
       },
 
       deleteSelectedSegments: () => {

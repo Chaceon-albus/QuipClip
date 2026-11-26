@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { exportOrderDialogStore } from "@/components/timeline/exportOrderDialogStore";
 import { segmentRenameDialogStore } from "@/components/timeline/segmentRenameDialogStore";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
@@ -97,6 +98,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
     case "renameSegment":
       // The dialog names the segment by its id from here on (ADR 065).
       segmentRenameDialogStore.getState().open(command.segmentId);
+      return;
+    case "exportOrder":
+      // The dialog reads the segments of the export when it opens (ADR 066).
+      exportOrderDialogStore.getState().open();
       return;
     case "selectAllSegments":
       timeline.selectAllSegments();

@@ -8,7 +8,7 @@
  */
 
 import type { Preset } from "@/features/settings/types";
-import { getActiveSourceSegmentEntries } from "@/features/timeline/math";
+import { oneClipExportSegments } from "@/features/timeline/exportSegments";
 import type { Segment } from "@/types/project";
 import type {
   ExportAudioMode,
@@ -108,22 +108,23 @@ export function buildExportRequest(
     return null;
   }
 
-  const activeEntries = getActiveSourceSegmentEntries(
+  // The segments of the export of one clip (ADR 066). `exportSegmentIds` reads the same rule.
+  const activeSegments = oneClipExportSegments(
     options.segments,
     options.activeSourceId,
   );
 
-  if (activeEntries.length === 0) {
+  if (activeSegments.length === 0) {
     return null;
   }
 
   const sourceId = options.activeSourceId;
 
   // Preserve array order strictly: one piece of the one source for each segment.
-  const pieces: ExportPiece[] = activeEntries.map((entry) => ({
+  const pieces: ExportPiece[] = activeSegments.map((segment) => ({
     sourceId,
-    inPts: entry.segment.inPts,
-    outPts: entry.segment.outPts,
+    inPts: segment.inPts,
+    outPts: segment.outPts,
   }));
 
   const source: ExportRequest["sources"][number] = {

@@ -115,6 +115,9 @@ export interface TimelineState extends TimelineTruth {
   readonly canRedo: boolean;
 }
 
+/** What `reorderExportSegments` did. */
+export type ReorderExportSegmentsResult = "reordered" | "unchanged" | "refused";
+
 /**
  * Public actions exposed by the timeline store.
  */
@@ -268,6 +271,24 @@ export interface TimelineActions {
    * @param name The new name, or null to remove the name.
    */
   renameSegment: (segmentId: string, name: string | null) => void;
+
+  /**
+   * Writes the segments of the export in a new order (ADR 066), with one history entry. Undo and
+   * Redo restore the order and the selection.
+   *
+   * `ids` names the segments of the export (`exportSegmentIds`) in the new order. The action
+   * writes them into the places that the segments of the export hold in the array, in that order.
+   * Each other segment of the array keeps its place: unlike a clip operation, it does not move
+   * the segments that are not live to the end. In the same edit it writes `selectedSegmentIds` in
+   * the order of the new array (ADR 045), so the selection and the current segment name the same
+   * segments as before. The pending In mark does not change.
+   *
+   * @param ids The ids of the segments of the export, in the new order.
+   * @returns `refused`, with no change and no history entry, when `ids` is not exactly the ids of
+   *   the segments of the export, each one time. `unchanged`, with no history entry, for the order
+   *   of the array. `reordered` after the edit.
+   */
+  reorderExportSegments: (ids: readonly string[]) => ReorderExportSegmentsResult;
 
   /**
    * Removes every selected segment on the sequence, with one history entry, and leaves

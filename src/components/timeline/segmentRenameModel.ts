@@ -5,7 +5,7 @@
  * The module has no React, DOM or store dependency, so the tests need no document.
  */
 
-import { canTakeFocus, type PromptFocusTarget } from "@/components/common/focusTarget";
+import { canTakeFocus, type LandingFocusTarget } from "@/components/common/focusTarget";
 import {
   normalizeSegmentNameInput,
   removeSegmentNameForbiddenCharacters,
@@ -19,6 +19,12 @@ import type { SequenceSegment } from "@/types/project";
  * gone.
  */
 export const SEGMENT_ID_ATTRIBUTE = "data-segment-id";
+
+/**
+ * The seek surface of the timeline, the last place for the focus after a dialog of the timeline
+ * closes. It keeps a `tabIndex` of -1 while seeking is off, so a script can always focus it.
+ */
+export const TIMELINE_SEEK_SURFACE_SELECTOR = '[data-timeline-track] [role="slider"]';
 
 /** The text that the field holds when the dialog opens: the name, or empty for no name. */
 export function initialSegmentRenameText(
@@ -221,10 +227,7 @@ export function spliceSegmentRenamePaste(
 }
 
 /** A focus target that also tells whether the focus landed on it after `focus()`. */
-export interface SegmentRenameFocusTarget extends PromptFocusTarget {
-  /** True while the element holds the focus (`document.activeElement`). */
-  readonly hasFocus: boolean;
-}
+export type SegmentRenameFocusTarget = LandingFocusTarget;
 
 /**
  * Gives the focus back when the dialog closes, after a confirm or a cancel (ADR 065): it tries the

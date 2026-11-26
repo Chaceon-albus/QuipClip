@@ -13,11 +13,17 @@ import {
 } from "@/features/playback";
 import { createTimelineViewportStore } from "@/features/timeline";
 import type { Pts, Segment, TickCount } from "@/types/project";
+import { resolveShortcut } from "./keyboardShortcutController";
+import {
+  createNativeContextMenuState,
+  isPageOverlayOpen,
+} from "./nativeContextMenuState";
 import { SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   EXTENT_END_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
+  planControlCommand,
   planShortcutCommand,
   EDGE_PRESS_LOCKED_ACTIONS,
   TRIM_LOCKED_ACTIONS,
@@ -68,6 +74,10 @@ interface SnapshotOverrides {
  */
 function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
   const timeline = {
+    // No clip list: the snapshot reads the derived segments of one clip (ADR 066).
+    clips: [],
+    sequenceSegments: [],
+    sequenceSources: {},
     sourceId: SOURCE_ID,
     segments: [],
     currentSegmentId: null,
@@ -1836,11 +1846,182 @@ describe("planShortcutCommand", () => {
       expect(
         planShortcutCommand("renameSegment", { ...current, isTrimArmed: true }),
       ).toBeNull();
-      expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual(["renameSegment"]);
+      // Export Order opens a modal dialog too (ADR 066).
+      expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual([
+        "renameSegment",
+        "exportOrder",
+      ]);
       // An armed press locks no other action: a click on an edge still seeks at its release.
       expect(
         planShortcutCommand("deleteSegment", { ...current, isTrimArmed: true }),
       ).toEqual({ kind: "deleteSegment" });
+    });
+  });
+
+  describe("Export Order (ADR 066)", () => {
+    const two = [segment("a", "0", "3000"), segment("b", "6000", "9000")];
+
+    it("opens the dialog while the export has two or more segments", () => {
+      expect(
+        planShortcutCommand(
+          "exportOrder",
+          createSnapshot({ timeline: { segments: two } }),
+        ),
+      ).toEqual({ kind: "exportOrder" });
+      expect(planShortcutCommand("exportOrder", createSnapshot())).toBeNull();
+      expect(
+        planShortcutCommand(
+          "exportOrder",
+          createSnapshot({ timeline: { segments: [segment("a", "0", "3000")] } }),
+        ),
+      ).toBeNull();
+      // A segment of another source is not a segment of the export.
+      expect(
+        planShortcutCommand(
+          "exportOrder",
+          createSnapshot({
+            timeline: {
+              segments: [segment("a", "0", "3000"), segment("x", "0", "3000", "other")],
+            },
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    it("does nothing from the button or the key while a native segment menu is being built", () => {
+      const ready = createSnapshot({ timeline: { segments: two } });
+      const menus = createNativeContextMenuState({ input: null });
+      const noModalLayer = () => false;
+      expect(
+        planControlCommand(
+          "exportOrder",
+          isPageOverlayOpen(menus, noModalLayer),
+          ready,
+        ),
+      ).toEqual({ kind: "exportOrder" });
+
+      // The segment menu marks itself open before it waits for the build of the native menu,
+      // so no popup shows yet. A click on the button in that interval opens nothing.
+      const mark = menus.open();
+      const isOverlayOpen = isPageOverlayOpen(menus, noModalLayer);
+      expect(isOverlayOpen).toBe(true);
+      expect(planControlCommand("exportOrder", isOverlayOpen, ready)).toBeNull();
+      // The key reads the same test, so it opens nothing either (ADR 021).
+      const pressKey = (overlay: boolean) =>
+        resolveShortcut(
+          {
+            key: "E",
+            code: "KeyE",
+            repeat: false,
+            isComposing: false,
+            ctrlKey: false,
+            metaKey: true,
+            altKey: false,
+            shiftKey: true,
+            defaultPrevented: false,
+            target: null,
+            isOverlayOpen: overlay,
+            isTooltipOpen: false,
+          },
+          {
+            platform: "macos",
+            isActionAvailable: (action) => planShortcutCommand(action, ready) !== null,
+          },
+        );
+      expect(pressKey(isOverlayOpen)).toEqual({ claimed: false, action: null });
+      expect(pressKey(false)).toEqual({ claimed: true, action: "exportOrder" });
+
+      // A dialog, a menu or a list box of the page blocks the button too.
+      mark.close();
+      expect(
+        planControlCommand(
+          "exportOrder",
+          isPageOverlayOpen(menus, () => true),
+          ready,
+        ),
+      ).toBeNull();
+      expect(
+        planControlCommand(
+          "exportOrder",
+          isPageOverlayOpen(menus, noModalLayer),
+          ready,
+        ),
+      ).toEqual({ kind: "exportOrder" });
+    });
+
+    it("counts the live anchored segments of a sequence of several clips", () => {
+      const facts = {
+        videoTimeBase: { n: 1, d: 1000 },
+        videoStartPts: pts("0"),
+        videoEndPts: pts("10000"),
+        videoDurationTicks: null,
+        approximateDurationSeconds: null,
+      };
+      const anchored = (id: string, clipId: string) => ({
+        id,
+        inClipId: clipId,
+        inPts: pts("0"),
+        outClipId: clipId,
+        outPts: pts("1000"),
+      });
+      const sequence = createSnapshot({
+        timeline: {
+          clips: [
+            { id: "a1", sourceId: "A" },
+            { id: "b1", sourceId: "B" },
+          ],
+          sequenceSources: { A: { ...facts, id: "A" }, B: { ...facts, id: "B" } },
+          // The derived array is empty, as when the sequence has no virtual axis.
+          segments: [],
+          sequenceSegments: [anchored("x", "a1"), anchored("y", "b1")],
+        },
+      });
+      expect(planShortcutCommand("exportOrder", sequence)).toEqual({
+        kind: "exportOrder",
+      });
+      const oneLive = createSnapshot({
+        timeline: {
+          ...sequence.timeline,
+          sequenceSegments: [anchored("x", "a1"), anchored("gone", "c1")],
+        },
+      });
+      expect(planShortcutCommand("exportOrder", oneLive)).toBeNull();
+    });
+
+    it("needs no frame, no calibration, no ready preview and no current segment", () => {
+      const loading = createSnapshot({
+        timeline: { segments: two, currentSegmentId: null, selectedSegmentIds: [] },
+        playback: {
+          isReady: false,
+          calibrationStatus: "calibrating",
+          presentedFrame: null,
+          seekTargetSeconds: 2,
+        },
+        probe: null,
+      });
+      expect(planShortcutCommand("exportOrder", loading)).toEqual({
+        kind: "exportOrder",
+      });
+      for (const [, inactive] of INACTIVE_SNAPSHOTS) {
+        expect(
+          planShortcutCommand("exportOrder", {
+            ...inactive,
+            timeline: loading.timeline,
+          }),
+        ).toEqual({ kind: "exportOrder" });
+      }
+    });
+
+    it("does nothing while a trim drags or an edge press is armed", () => {
+      const snapshot = createSnapshot({ timeline: { segments: two } });
+      expect(
+        planShortcutCommand("exportOrder", { ...snapshot, isTrimDragging: true }),
+      ).toBeNull();
+      expect(
+        planShortcutCommand("exportOrder", { ...snapshot, isTrimArmed: true }),
+      ).toBeNull();
+      expect(TRIM_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
+      expect(EDGE_PRESS_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
     });
   });
 
@@ -2004,10 +2185,11 @@ describe("planShortcutCommand", () => {
     });
 
     it("takes the edit keys and does nothing while a trim drags", () => {
-      // The frame on screen (PTS 90000) lies inside the segment, so each action can act.
+      // The frame on screen (PTS 90000) lies inside the segment, so each action can act. A
+      // second segment gives Export Order an order to change (ADR 066).
       const editable = createSnapshot({
         timeline: {
-          segments: [segment("a", "0", "180000")],
+          segments: [segment("a", "0", "180000"), segment("b", "270000", "360000")],
           currentSegmentId: "a",
           canUndo: true,
           canRedo: true,
@@ -2022,6 +2204,7 @@ describe("planShortcutCommand", () => {
       expect([...TRIM_LOCKED_ACTIONS].sort()).toEqual(
         [
           "deleteSegment",
+          "exportOrder",
           "markIn",
           "markOut",
           "redo",

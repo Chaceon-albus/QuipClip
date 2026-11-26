@@ -1,14 +1,42 @@
-import { memo, useCallback } from "react";
+import { memo, useCallback, useId } from "react";
 import { useTranslation } from "react-i18next";
+import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouseDown";
+import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
+import { useShortcutLabels } from "@/components/common/useShortcutLabels";
+import { canOpenExportOrder } from "@/components/layout/actionConditions";
+import { isPageOverlayOpen } from "@/components/layout/nativeContextMenuState";
+import { planControlCommand } from "@/components/layout/shortcutCommands";
 import {
-  selectActiveSourceSegmentCount,
-  totalActiveSourceSegments,
+  readShortcutSnapshot,
+  runShortcutCommand,
+} from "@/components/layout/useKeyboardShortcuts";
+import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  selectExportSegmentCount,
+  totalExportSegments,
   useTimelineStore,
   type SegmentTotalSource,
   type TimelineStoreState,
 } from "@/features/timeline";
 import type { TimecodeDisplay } from "@/lib/timecode";
 import { presentSegmentSummary } from "./segmentSummaryModel";
+
+/**
+ * Runs Export Order (ADR 066) with the plan of its key, from one read of the stores, so the
+ * button and the key do the same thing under the same conditions, the trim locks included. A
+ * click does nothing while an overlay of the page owns the commands, as the key does: a native
+ * segment menu marks itself open before it shows, and a click can arrive in that interval.
+ */
+const openExportOrder = () => {
+  const command = planControlCommand(
+    "exportOrder",
+    isPageOverlayOpen(),
+    readShortcutSnapshot(),
+  );
+  if (command !== null) {
+    runShortcutCommand(command);
+  }
+};
 
 export interface SegmentSummaryProps {
   /** The probe of the open media, or null while no media is open. */
@@ -40,17 +68,26 @@ export interface SegmentSummaryProps {
  *
  * The lines are aria-hidden, and a visually hidden sentence gives assistive technology the full
  * text, which also says what the duration is.
+ *
+ * The summary is the button of Export Order (ADR 066). Its accessible name is the sentence of the
+ * summary, which holds the text that the button shows, and its description names the action.
+ * Its tooltip names the action and its key. It is disabled while the export has fewer than two
+ * segments, and the summary then looks the same: only the hover fill and the tooltip differ. A
+ * mouse click does not keep the focus (ADR 021): the dialog gives the focus back to the element
+ * that held it, or else to this button.
  */
 export const SegmentSummary = memo(function SegmentSummary({
   probe,
   timecodeDisplay,
 }: SegmentSummaryProps) {
   const { t } = useTranslation();
-  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
-  // The selector of the title bar, so the total is the one that the Export tooltip shows.
+  const shortcutOf = useShortcutLabels();
+  const descriptionId = useId();
+  const segmentCount = useTimelineStore(selectExportSegmentCount);
+  // The selector of the title bar, so the total is the one that the Export tooltip shows. It
+  // adds the segments that the count counts (ADR 066).
   const selectSegmentTotal = useCallback(
-    (state: TimelineStoreState) =>
-      totalActiveSourceSegments(state.segments, state.sourceId, probe, timecodeDisplay),
+    (state: TimelineStoreState) => totalExportSegments(state, probe, timecodeDisplay),
     [probe, timecodeDisplay],
   );
   const segmentTotal = useTimelineStore(selectSegmentTotal);
@@ -63,15 +100,44 @@ export const SegmentSummary = memo(function SegmentSummary({
     return null;
   }
   const values = { count: summary.count, duration: summary.duration };
+  const actionLabel = t("timeline.exportOrder.open");
+  const shortcut = shortcutOf("exportOrder");
   return (
-    <div className="flex min-w-0 flex-col text-muted-foreground tabular-nums">
-      <span className="sr-only">{t(summary.labelKey, values)}</span>
-      <span aria-hidden="true" className="truncate text-2xs">
-        {t(summary.countKey, values)}
-      </span>
-      <span aria-hidden="true" className="truncate font-mono text-[10px] leading-4">
-        {summary.duration}
-      </span>
-    </div>
+    <Tooltip>
+      {/* A disabled button takes no pointer events, so its own tooltip could never open. The span
+          is the trigger, as for the zoom buttons. It has no tabIndex, so the Tab order does not
+          change. The negative margin and the padding give the hover fill room around the text,
+          and keep the width of the two lines. */}
+      <TooltipTrigger asChild>
+        <span className="-mx-1 flex min-w-0">
+          <button
+            type="button"
+            // `EXPORT_ORDER_TRIGGER_ATTRIBUTE`: the dialog finds the button by it.
+            data-export-order-trigger=""
+            disabled={!canOpenExportOrder(segmentCount)}
+            onMouseDown={preventFocusOnMouseDown}
+            onClick={openExportOrder}
+            aria-describedby={descriptionId}
+            aria-keyshortcuts={shortcut?.aria}
+            className="flex w-full min-w-0 flex-col items-start rounded-sm px-1 text-left text-muted-foreground tabular-nums focus-ring-inset transition-colors outline-none hover:bg-chrome-accent hover:text-chrome-accent-foreground disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+          >
+            <span className="sr-only">{t(summary.labelKey, values)}</span>
+            <span aria-hidden="true" className="w-full truncate text-2xs">
+              {t(summary.countKey, values)}
+            </span>
+            <span
+              aria-hidden="true"
+              className="w-full truncate font-mono text-[10px] leading-4"
+            >
+              {summary.duration}
+            </span>
+          </button>
+          <span id={descriptionId} className="sr-only">
+            {actionLabel}
+          </span>
+        </span>
+      </TooltipTrigger>
+      <ShortcutTooltipContent label={actionLabel} keys={shortcut?.chips} />
+    </Tooltip>
   );
 });

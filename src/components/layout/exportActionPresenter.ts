@@ -48,11 +48,11 @@ export interface ExportActionInput {
   readonly exportStatus: ExportStatus;
   /** The `tracking` field of the export store. With the status, it decides `busy`. */
   readonly exportTracking: boolean;
-  /** The number of segments of the open source. */
+  /** The number of segments of the export (`selectExportSegmentCount`, ADR 066). */
   readonly segmentCount: number;
   /**
-   * The total duration of those segments, from `totalActiveSourceSegments` with the same
-   * display, or null when it is not known. Its unit depends on the display: whole frames in
+   * The total duration of those segments, from `totalExportSegments` with the same display,
+   * or null when it is not known. Its unit depends on the display: whole frames in
    * the frame format, whole milliseconds in the millisecond format.
    */
   readonly segmentTotal: bigint | null;

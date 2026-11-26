@@ -7,7 +7,6 @@
  * applies to the source (ADR 028).
  */
 
-import { getActiveSourceSegmentEntries } from "@/features/timeline";
 import { isPtsString, isValidSegmentRange } from "@/lib/time";
 import {
   formatElapsedTickSpan,
@@ -16,19 +15,19 @@ import {
 } from "@/lib/timecode";
 import type { Pts, Rational, Segment } from "@/types/project";
 
-/** A segment of the active source with its position in the export order. */
+/** A segment of the timeline with its position in the export order. */
 export interface ExportNumberedSegment {
   readonly segment: Segment;
-  /** The index in the project array. It is unique, so element IDs can use it. */
+  /** The index in the segment list of the timeline. It is unique, so element IDs can use it. */
   readonly projectIndex: number;
   /**
-   * The 1-based position among the segments that the export joins: the segments of the
-   * active source, in project order (ADR 007). `#N` shows this number.
+   * The 1-based position among the segments of the export (`exportSegmentIds`, ADR 066). `#N`
+   * shows this number.
    */
   readonly number: number;
 }
 
-/** The segments of the active source in export order, and how many there are. */
+/** The segments of the timeline in export order, and how many segments the export joins. */
 export interface ExportNumbering {
   readonly entries: readonly ExportNumberedSegment[];
   /** The number of segments that the export joins. */
@@ -36,29 +35,32 @@ export interface ExportNumbering {
 }
 
 /**
- * Numbers the segments of the active source in the order the export joins them.
+ * Numbers the segments of the timeline by their place among the segments of the export.
  *
- * The export (`buildExportRequest`) and the segment count in the title bar take only the
- * segments of the active source. The project array can also hold the segments of a source
- * that was replaced (ADR 027), so a number taken from the project index would count
- * segments that the export leaves out. A segment that has no width on the timeline still
- * counts, because the export includes it.
+ * The segments of the export are the segments that a request for an export takes, in that order
+ * (`exportSegmentIds`, ADR 066). The dialog of ADR 066 numbers its rows by the same list, so a
+ * number on the timeline is the number of the row of that segment. The project array can also
+ * hold segments that the export leaves out, such as the segments of a source that was replaced
+ * (ADR 027), so a number taken from the array index would count them. A segment that has no
+ * width on the timeline still counts, because the export includes it. A segment of the list that
+ * is not a segment of the export gets no number and no entry.
  *
- * @param segments The project segment array, in export order.
- * @param activeSourceId The source that the timeline shows.
+ * @param segments The segments of the timeline (`segments`), in array order.
+ * @param exportIds The ids of the segments of the export, in export order.
  */
 export function numberSegmentsInExportOrder(
   segments: readonly Segment[],
-  activeSourceId: string | null | undefined,
+  exportIds: readonly string[],
 ): ExportNumbering {
-  const entries = getActiveSourceSegmentEntries(segments, activeSourceId).map(
-    ({ segment, projectIndex }, activeIndex) => ({
-      segment,
-      projectIndex,
-      number: activeIndex + 1,
-    }),
-  );
-  return { entries, total: entries.length };
+  const numberOf = new Map(exportIds.map((id, index) => [id, index + 1]));
+  const entries: ExportNumberedSegment[] = [];
+  segments.forEach((segment, projectIndex) => {
+    const number = numberOf.get(segment.id);
+    if (number !== undefined) {
+      entries.push({ segment, projectIndex, number });
+    }
+  });
+  return { entries, total: exportIds.length };
 }
 
 /**

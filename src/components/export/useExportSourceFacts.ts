@@ -6,7 +6,7 @@ import {
 import { useMediaStore, type MediaStoreState } from "@/features/media";
 import type { MediaProbe } from "@/features/media/types";
 import {
-  selectActiveSourceSegmentCount,
+  selectExportSegmentCount,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -24,7 +24,7 @@ const selectImportedSources = (state: MediaStoreState) => state.sources;
  * `probe` is the probe of the attached clip, which decides alone with one clip.
  */
 export function useExportSourceFacts(probe: MediaProbe | null): ExportSourceFacts {
-  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  const segmentCount = useTimelineStore(selectExportSegmentCount);
   const clips = useTimelineStore(selectClips);
   const segments = useTimelineStore(selectSequenceSegments);
   const sources = useTimelineStore(selectSequenceSources);

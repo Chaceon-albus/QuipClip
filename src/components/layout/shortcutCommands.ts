@@ -31,6 +31,7 @@ import {
   getTimelineDurationSeconds,
   planFinishSegment,
   selectActiveSourceSegmentCount,
+  selectExportSegmentCount,
   type CurrentSegmentRef,
   type TimelineState,
   type TimelineViewportState,
@@ -42,6 +43,7 @@ import {
   canDeleteSegment,
   canExportMedia,
   canFitTimeline,
+  canOpenExportOrder,
   canRedoEdit,
   canSelectAllSegments,
   canStepFrames,
@@ -126,6 +128,9 @@ export interface ShortcutSnapshot {
   };
   readonly timeline: Pick<
     TimelineState,
+    | "clips"
+    | "sequenceSegments"
+    | "sequenceSources"
     | "sourceId"
     | "segments"
     | "currentSegmentId"
@@ -155,7 +160,8 @@ export interface ShortcutSnapshot {
  * still owns their key presses. An edit during the drag would change the segment under the
  * trim, and the limit, the snap and the preview of the trim would then be stale. Select All
  * would move the selection away from the segment that the trim selected (ADR 045). Rename
- * Segment would open a modal dialog while the drag holds the pointer (ADR 065).
+ * Segment and Export Order would open a modal dialog while the drag holds the pointer (ADR 065,
+ * ADR 066).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
   [
@@ -163,6 +169,7 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
     "markOut",
     "deleteSegment",
     "renameSegment",
+    "exportOrder",
     "selectAllSegments",
     "undo",
     "redo",
@@ -171,11 +178,11 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
 
 /**
  * The actions that also do nothing while an edge press is armed (`isTrimArmed`), before it
- * becomes a trim. Rename Segment opens a modal dialog, and a move of the held pointer behind it
- * would start a trim during the rename (ADR 065).
+ * becomes a trim. Rename Segment and Export Order open a modal dialog, and a move of the held
+ * pointer behind it would start a trim while the dialog is open (ADR 065, ADR 066).
  */
 export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
-  new Set<ShortcutAction>(["renameSegment"]);
+  new Set<ShortcutAction>(["renameSegment", "exportOrder"]);
 
 /**
  * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
@@ -232,6 +239,7 @@ export type ShortcutCommand =
       /** The current segment, which the rename dialog names from the moment it opens (ADR 065). */
       readonly segmentId: string;
     }
+  | { readonly kind: "exportOrder" }
   | { readonly kind: "selectAllSegments" }
   | {
       readonly kind: "finishSegment";
@@ -938,6 +946,14 @@ export function planShortcutCommand(
         : { kind: "renameSegment", segmentId: current.segment.id };
     }
 
+    case "exportOrder":
+      // Export Order opens its dialog while the export has two or more segments (ADR 066), with
+      // the trim locks above. It reads no frame and no time, so it does not read the preview,
+      // and it names no segment, so it needs no current segment.
+      return canOpenExportOrder(selectExportSegmentCount(timeline))
+        ? { kind: "exportOrder" }
+        : null;
+
     case "deleteSegment":
       // Delete removes every selected segment (ADR 045).
       return canDeleteSegment(hasActiveSource, selectedSegmentCountOf(timeline))
@@ -991,4 +1007,24 @@ export function planShortcutCommand(
     case "zoomToFit":
       return canFitTimeline(hasMedia, viewport.zoom) ? { kind: "zoomToFit" } : null;
   }
+}
+
+/**
+ * Returns the store call of an action that a control of the page runs, such as the Export Order
+ * button of the segment summary (ADR 066), or null when it runs nothing.
+ *
+ * The control does nothing while an overlay of the page owns the commands: a dialog, a menu or
+ * a list box, or a native context menu, also while that menu is still being built and shows
+ * nothing yet (`isPageOverlayOpen`). The window keyboard layer (`isShortcutSuppressed`) and the
+ * command items of the macOS menu (`planNativeMenuCommand`) read the same test, so the key and
+ * the control act under the same conditions (ADR 021).
+ *
+ * @param isOverlayOpen The value of `isPageOverlayOpen`, read when the control runs.
+ */
+export function planControlCommand(
+  action: ShortcutAction,
+  isOverlayOpen: boolean,
+  snapshot: ShortcutSnapshot,
+): ShortcutCommand | null {
+  return isOverlayOpen ? null : planShortcutCommand(action, snapshot);
 }

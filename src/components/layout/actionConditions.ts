@@ -92,6 +92,17 @@ export function canSelectAllSegments(
 }
 
 /**
+ * Export Order opens its dialog while the export has two or more segments (ADR 066). One segment
+ * has no order to change. It needs no active source: it reads no frame and no time of the
+ * preview, so it stays available while the preview loads the next clip of a sequence.
+ *
+ * @param exportSegmentCount The number of segments of the export (`selectExportSegmentCount`).
+ */
+export function canOpenExportOrder(exportSegmentCount: number): boolean {
+  return Number.isSafeInteger(exportSegmentCount) && exportSegmentCount >= 2;
+}
+
+/**
  * The Export button and the Export item of the File menu need open media, and nothing more.
  * The export flow itself reports a missing segment in its dialog (ADR 024).
  */

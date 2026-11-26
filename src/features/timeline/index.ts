@@ -7,6 +7,7 @@
  */
 
 export * from "./types";
+export * from "./exportSegments";
 export * from "./math";
 export * from "./segmentName";
 export * from "./segmentTotal";

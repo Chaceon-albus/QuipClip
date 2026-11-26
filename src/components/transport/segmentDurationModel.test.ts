@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatSegmentTimes } from "@/components/timeline/segmentLabels";
 import type { PresentedFrame } from "@/features/playback";
+import { exportSegmentIds } from "@/features/timeline";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import { MILLISECONDS_TIMECODE_DISPLAY, type TimecodeDisplay } from "@/lib/timecode";
@@ -17,6 +18,16 @@ import {
 } from "./segmentDurationModel";
 
 const pts = (value: string | number) => String(value) as Pts;
+
+/** The ids of the segments of the export of one clip (`exportSegmentIds`, ADR 066). */
+const exportIdsOf = (segments: readonly Segment[], sourceId: string | null) =>
+  exportSegmentIds({
+    clips: [],
+    sequenceSegments: [],
+    sequenceSources: {},
+    segments: [...segments],
+    sourceId,
+  });
 
 const segment = (
   id: string,
@@ -64,36 +75,55 @@ describe("resolveSegmentDurationSubject", () => {
     segment("a", 1080, 2081),
     segment("b", 3000, 4000),
   ];
+  const ids = exportIdsOf(segments, "s");
 
   it("takes the current segment, with its number among the segments of the active source", () => {
-    expect(resolveSegmentDurationSubject(segments, "b", "s", null, true)).toStrictEqual(
-      {
-        kind: "segment",
-        number: 2,
-        segment: segments[2],
-      },
-    );
+    expect(
+      resolveSegmentDurationSubject(segments, ids, "b", "s", null, true),
+    ).toStrictEqual({
+      kind: "segment",
+      number: 2,
+      segment: segments[2],
+    });
+  });
+
+  it("numbers the current segment by its place in the export (ADR 066)", () => {
+    expect(
+      resolveSegmentDurationSubject(segments, ["b", "a"], "b", "s", null, true),
+    ).toStrictEqual({ kind: "segment", number: 1, segment: segments[2] });
+    // A segment that the export does not take has no number, so it is no subject.
+    expect(
+      resolveSegmentDurationSubject(segments, ["a"], "b", "s", null, true),
+    ).toBeNull();
   });
 
   it("takes the pending In mark when no segment is current", () => {
     expect(
-      resolveSegmentDurationSubject(segments, null, "s", pts(5000), true),
+      resolveSegmentDurationSubject(segments, ids, null, "s", pts(5000), true),
     ).toStrictEqual(pendingFrom(5000));
   });
 
   it("does not take a current segment of another source", () => {
-    expect(resolveSegmentDurationSubject(segments, "old", "s", null, true)).toBeNull();
     expect(
-      resolveSegmentDurationSubject(segments, "missing", "s", null, true),
+      resolveSegmentDurationSubject(segments, ids, "old", "s", null, true),
+    ).toBeNull();
+    expect(
+      resolveSegmentDurationSubject(segments, ids, "missing", "s", null, true),
     ).toBeNull();
   });
 
   it("has no subject without an active source, or with nothing to measure", () => {
-    expect(resolveSegmentDurationSubject(segments, "a", "s", null, false)).toBeNull();
-    expect(resolveSegmentDurationSubject(segments, "a", null, null, true)).toBeNull();
-    expect(resolveSegmentDurationSubject(segments, null, "s", null, true)).toBeNull();
     expect(
-      resolveSegmentDurationSubject(segments, null, "s", "x" as Pts, true),
+      resolveSegmentDurationSubject(segments, ids, "a", "s", null, false),
+    ).toBeNull();
+    expect(
+      resolveSegmentDurationSubject(segments, ids, "a", null, null, true),
+    ).toBeNull();
+    expect(
+      resolveSegmentDurationSubject(segments, ids, null, "s", null, true),
+    ).toBeNull();
+    expect(
+      resolveSegmentDurationSubject(segments, ids, null, "s", "x" as Pts, true),
     ).toBeNull();
   });
 });

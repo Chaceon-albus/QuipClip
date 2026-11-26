@@ -15,6 +15,7 @@ import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
 import {
   calculatePercentFromPts,
   calculateSegmentLayout,
+  selectExportSegmentIds,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -251,12 +252,13 @@ export const SegmentLayer = memo(function SegmentLayer({
     return () => viewport.removeEventListener("scroll", onScroll);
   }, [viewportRef, tooltip]);
 
-  // The numbers and the total count only the segments of the active source, as the export
-  // does. They are taken before the zero-width filter below, because the export also joins a
-  // segment that has no width on the timeline.
+  // The numbers and the total count the segments of the export (ADR 066), as the Export Order
+  // dialog numbers its rows. They are taken before the zero-width filter below, because the
+  // export also joins a segment that has no width on the timeline.
+  const exportIds = useTimelineStore(selectExportSegmentIds);
   const { entries: numberedSegments, total } = useMemo(
-    () => numberSegmentsInExportOrder(segments, sourceId),
-    [segments, sourceId],
+    () => numberSegmentsInExportOrder(segments, exportIds),
+    [segments, exportIds],
   );
   // A selection change renders this layer again, and none of these inputs depends on the
   // selection. So the layouts, the texts and the numbers are built once per change of the

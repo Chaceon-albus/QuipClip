@@ -221,6 +221,14 @@ describe("shortcutBindings", () => {
         action: "export",
         repeat: "taken",
       },
+      // ADR 066. Shift makes the browser report the capital letter.
+      {
+        name: "primary+Shift+E",
+        press: (platform) =>
+          press({ key: "E", code: "KeyE", shiftKey: true, ...primary(platform) }),
+        action: "exportOrder",
+        repeat: "taken",
+      },
       {
         name: "primary+,",
         press: (platform) => press({ key: ",", code: "Comma", ...primary(platform) }),
@@ -757,11 +765,11 @@ describe("shortcutBindings", () => {
       ).toBeNull();
     });
 
-    it("rejects primary+Shift+O, primary+Shift+E and primary+Shift+comma", () => {
+    // ADR 066 binds primary+Shift+E to Export Order, so it left this list.
+    it("rejects primary+Shift+O and primary+Shift+comma", () => {
       for (const platform of PLATFORMS) {
         for (const [key, code] of [
           ["O", "KeyO"],
-          ["E", "KeyE"],
           ["<", "Comma"],
         ]) {
           expect(
@@ -772,6 +780,46 @@ describe("shortcutBindings", () => {
           ).toBeNull();
         }
       }
+    });
+
+    it("binds primary+Shift+E to Export Order, and no other set of E (ADR 066)", () => {
+      for (const platform of PLATFORMS) {
+        expect(
+          actionOf(
+            press({ key: "E", code: "KeyE", shiftKey: true, ...primary(platform) }),
+            platform,
+          ),
+        ).toBe("exportOrder");
+        expect(
+          actionOf(press({ key: "e", code: "KeyE", ...primary(platform) }), platform),
+        ).toBe("export");
+        for (const p of [
+          press({ key: "E", code: "KeyE", shiftKey: true }),
+          press({ key: "e", code: "KeyE", altKey: true, ...primary(platform) }),
+          press({
+            key: "E",
+            code: "KeyE",
+            shiftKey: true,
+            altKey: true,
+            ...primary(platform),
+          }),
+        ]) {
+          expect(actionOf(p, platform)).not.toBe("exportOrder");
+        }
+      }
+      // Ctrl on macOS and Cmd on Windows are not the primary modifier.
+      expect(
+        actionOf(
+          press({ key: "E", code: "KeyE", shiftKey: true, ctrlKey: true }),
+          "macos",
+        ),
+      ).toBeNull();
+      expect(
+        actionOf(
+          press({ key: "E", code: "KeyE", shiftKey: true, metaKey: true }),
+          "windows",
+        ),
+      ).toBeNull();
     });
 
     it("rejects Ctrl and Cmd held together with Z", () => {

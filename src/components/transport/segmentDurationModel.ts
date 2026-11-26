@@ -53,7 +53,9 @@ export type SegmentDurationSubject =
  * the rule total. A current segment of another source does not resolve, as for every segment
  * action.
  *
- * @param segments The project segment array, in export order.
+ * @param segments The segments of the timeline, in array order.
+ * @param exportIds The ids of the segments of the export, in export order
+ *   (`exportSegmentIds`). The number of the segment is its place in this list (ADR 066).
  * @param currentSegmentId The current segment, or null.
  * @param activeSourceId The source that the timeline shows.
  * @param pendingInPts The pending In mark of the active source, or null.
@@ -61,6 +63,7 @@ export type SegmentDurationSubject =
  */
 export function resolveSegmentDurationSubject(
   segments: readonly Segment[],
+  exportIds: readonly string[],
   currentSegmentId: string | null,
   activeSourceId: string | null | undefined,
   pendingInPts: Pts | null,
@@ -70,8 +73,9 @@ export function resolveSegmentDurationSubject(
     return null;
   }
   if (currentSegmentId !== null) {
-    const entry = numberSegmentsInExportOrder(segments, activeSourceId).entries.find(
-      ({ segment }) => segment.id === currentSegmentId,
+    const entry = numberSegmentsInExportOrder(segments, exportIds).entries.find(
+      ({ segment }) =>
+        segment.id === currentSegmentId && segment.sourceId === activeSourceId,
     );
     if (entry !== undefined) {
       return { kind: "segment", number: entry.number, segment: entry.segment };

@@ -191,7 +191,7 @@ export type ExportSummaryInput = {
   /** The number of segments of the open source. */
   readonly segmentCount: number;
   /**
-   * The total duration of those segments, from `totalActiveSourceSegments` with `display`, or
+   * The total duration of those segments, from `totalExportSegments` with `display`, or
    * null when it is not known. It is the value that the Export tooltip of the title bar reads.
    */
   readonly segmentTotal: bigint | null;

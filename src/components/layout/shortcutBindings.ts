@@ -48,6 +48,7 @@ export const SHORTCUT_ACTIONS = [
   "goToSegmentIn",
   "goToSegmentOut",
   "renameSegment",
+  "exportOrder",
   "deleteSegment",
   "selectAllSegments",
   "finishSegment",
@@ -447,6 +448,15 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
   },
   { key: letter("O"), modifiers: ["primary"], action: "openMedia", repeat: "taken" },
   { key: letter("E"), modifiers: ["primary"], action: "export", repeat: "taken" },
+  // ADR 066. The modifier match is exact, so this row and primary+E (export) never match the same
+  // key press. The layer does nothing while a dialog is open, so the key does not act in the
+  // Export Order dialog itself.
+  {
+    key: letter("E"),
+    modifiers: ["primary", "shift"],
+    action: "exportOrder",
+    repeat: "taken",
+  },
   {
     key: character(",", "Comma"),
     modifiers: ["primary"],

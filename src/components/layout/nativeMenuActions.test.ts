@@ -48,6 +48,10 @@ function createSnapshot(
       ...playback,
     },
     timeline: {
+      // No clip list: the snapshot reads the derived segments of one clip (ADR 066).
+      clips: [],
+      sequenceSegments: [],
+      sequenceSources: {},
       sourceId: probe === null ? null : "source-1",
       segments: [],
       currentSegmentId: null,

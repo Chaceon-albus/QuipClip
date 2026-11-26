@@ -2,7 +2,7 @@ import { useId, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import { DialogActions } from "@/components/common/DialogActions";
-import { isInOpenDialog, toPromptFocusTarget } from "@/components/common/focusTarget";
+import { isInOpenDialog, toLandingFocusTarget } from "@/components/common/focusTarget";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,6 +24,7 @@ import {
   returnSegmentRenameFocus,
   SEGMENT_ID_ATTRIBUTE,
   spliceSegmentRenamePaste,
+  TIMELINE_SEEK_SURFACE_SELECTOR,
   type SegmentRenameFocusTarget,
 } from "./segmentRenameModel";
 import { segmentTrimSession } from "./segmentTrimSession";
@@ -34,37 +35,6 @@ const handleOpenChange = (open: boolean) => {
   }
 };
 
-/**
- * The seek surface of the timeline, the last place for the focus after the dialog closes. It
- * keeps a `tabIndex` of -1 while seeking is off, so a script can always focus it.
- */
-const TIMELINE_SEEK_SURFACE_SELECTOR = '[data-timeline-track] [role="slider"]';
-
-/** Wraps an element for `returnSegmentRenameFocus`, which reads where the focus landed. */
-function toRenameFocusTarget(
-  element: HTMLElement | null,
-): SegmentRenameFocusTarget | null {
-  const target = toPromptFocusTarget(element);
-  if (element === null || target === null) {
-    return null;
-  }
-  return {
-    get isConnected() {
-      return target.isConnected;
-    },
-    get isRendered() {
-      return target.isRendered;
-    },
-    get isDisabled() {
-      return target.isDisabled;
-    },
-    get hasFocus() {
-      return element.ownerDocument.activeElement === element;
-    },
-    focus: target.focus,
-  };
-}
-
 /** The bar of the segment, then the seek surface of the timeline, as focus fallbacks. */
 function timelineFocusFallbacks(
   segmentId: string,
@@ -73,8 +43,8 @@ function timelineFocusFallbacks(
     document.querySelectorAll<HTMLElement>(`[${SEGMENT_ID_ATTRIBUTE}]`),
   ).find((element) => element.getAttribute(SEGMENT_ID_ATTRIBUTE) === segmentId);
   return [
-    toRenameFocusTarget(bar ?? null),
-    toRenameFocusTarget(
+    toLandingFocusTarget(bar ?? null),
+    toLandingFocusTarget(
       document.querySelector<HTMLElement>(TIMELINE_SEEK_SURFACE_SELECTOR),
     ),
   ];
@@ -170,7 +140,7 @@ function SegmentRenameContent({
         // the open, or else to the timeline, so a keyboard user keeps the place.
         event.preventDefault();
         returnSegmentRenameFocus(
-          toRenameFocusTarget(openerRef.current),
+          toLandingFocusTarget(openerRef.current),
           timelineFocusFallbacks(segmentId),
         );
       }}

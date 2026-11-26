@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { presentExportAction } from "@/components/layout/exportActionPresenter";
 import { buildExportRequest } from "@/features/export";
 import { createPresetDraft } from "@/features/settings/presetDocument";
-import { totalActiveSourceSegments } from "@/features/timeline";
+import { exportSegmentIds, totalActiveSourceSegments } from "@/features/timeline";
 import { createI18nInstance } from "@/i18n";
 import {
   MILLISECONDS_TIMECODE_DISPLAY,
@@ -35,6 +35,16 @@ import {
 } from "./segmentLabels";
 
 const pts = (value: string) => value as Pts;
+
+/** The ids of the segments of the export of one clip (`exportSegmentIds`, ADR 066). */
+const exportIdsOf = (segments: readonly Segment[], sourceId: string | null) =>
+  exportSegmentIds({
+    clips: [],
+    sequenceSegments: [],
+    sequenceSources: {},
+    segments: [...segments],
+    sourceId,
+  });
 
 const tb90k: Rational = { n: 1, d: 90000 };
 const frames25: TimecodeDisplay = {
@@ -531,7 +541,7 @@ describe("numberSegmentsInExportOrder", () => {
     // Two segments on video A, then A is replaced by video B and one segment is marked.
     // The project keeps the segments of A (ADR 027).
     const segments = [segment("a1", "A"), segment("a2", "A"), segment("b1", "B")];
-    const numbering = numberSegmentsInExportOrder(segments, "B");
+    const numbering = numberSegmentsInExportOrder(segments, exportIdsOf(segments, "B"));
     expect(numbering.total).toBe(1);
     expect(numbering.entries).toStrictEqual([
       { segment: segments[2], projectIndex: 2, number: 1 },
@@ -557,14 +567,14 @@ describe("numberSegmentsInExportOrder", () => {
       segment("b2", "B"),
     ];
     expect(
-      numberSegmentsInExportOrder(segments, "A").entries.map(
+      numberSegmentsInExportOrder(segments, exportIdsOf(segments, "A")).entries.map(
         ({ segment: seg, number }) => [seg.id, number],
       ),
     ).toStrictEqual([
       ["a1", 1],
       ["a2", 2],
     ]);
-    const forB = numberSegmentsInExportOrder(segments, "B");
+    const forB = numberSegmentsInExportOrder(segments, exportIdsOf(segments, "B"));
     expect(forB.total).toBe(2);
     expect(
       forB.entries.map(({ projectIndex, number }) => [projectIndex, number]),
@@ -574,8 +584,25 @@ describe("numberSegmentsInExportOrder", () => {
     ]);
   });
 
+  it("numbers each segment by its place among the segments of the export (ADR 066)", () => {
+    const segments = [segment("a", "S"), segment("b", "S"), segment("c", "S")];
+    // An export of several clips can leave out a segment that the timeline holds, or hold one
+    // that the timeline cannot place. The numbers and the total follow the export.
+    const numbering = numberSegmentsInExportOrder(segments, ["c", "a", "offTimeline"]);
+    expect(numbering.total).toBe(3);
+    expect(numbering.entries).toStrictEqual([
+      { segment: segments[0], projectIndex: 0, number: 2 },
+      { segment: segments[2], projectIndex: 2, number: 1 },
+    ]);
+  });
+
   it("has no segments without an active source", () => {
-    expect(numberSegmentsInExportOrder([segment("a1", "A")], null)).toStrictEqual({
+    expect(
+      numberSegmentsInExportOrder(
+        [segment("a1", "A")],
+        exportIdsOf([segment("a1", "A")], null),
+      ),
+    ).toStrictEqual({
       entries: [],
       total: 0,
     });
@@ -727,8 +754,10 @@ describe("segment durations and the export total", () => {
             ? framesOf(timecode, rate)
             : millisecondsOf(timecode);
         let sum = 0n;
-        for (const { segment } of numberSegmentsInExportOrder(segments, "src")
-          .entries) {
+        for (const { segment } of numberSegmentsInExportOrder(
+          segments,
+          exportIdsOf(segments, "src"),
+        ).entries) {
           const times = formatSegmentTimes(
             segment,
             source.videoStartPts,

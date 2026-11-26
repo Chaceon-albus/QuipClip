@@ -8,11 +8,8 @@
  */
 
 import type { ImportMediaResult } from "@/features/media/types";
-import {
-  expandSegment,
-  isValidSequenceSegment,
-  type SequenceSources,
-} from "@/features/timeline/sequence";
+import { sequenceExportSegments } from "@/features/timeline/exportSegments";
+import type { SequenceSources } from "@/features/timeline/sequence";
 import type { Clip, SequenceSegment } from "@/types/project";
 import {
   ExportError,
@@ -160,7 +157,9 @@ export interface SequenceExportPieces {
 
 /**
  * The pieces of the segments on the sequence, in array order (ADR 007). A segment that is not on
- * the sequence, such as a segment of a clip that left it, gives no piece.
+ * the sequence, such as a segment of a clip that left it, gives no piece. The segments are the
+ * segments of the export (`sequenceExportSegments`), which `exportSegmentIds` also reads
+ * (ADR 066).
  */
 export function sequenceExportPieces(
   clips: readonly Clip[],
@@ -170,14 +169,7 @@ export function sequenceExportPieces(
   const pieces: ExportPiece[] = [];
   const sourceIds: string[] = [];
   let segmentCount = 0;
-  for (const segment of segments) {
-    if (!isValidSequenceSegment(segment, clips, sources)) {
-      continue;
-    }
-    const expanded = expandSegment(segment, clips, sources);
-    if (expanded === null || expanded.length === 0) {
-      continue;
-    }
+  for (const { pieces: expanded } of sequenceExportSegments(clips, segments, sources)) {
     segmentCount += 1;
     for (const piece of expanded) {
       if (!sourceIds.includes(piece.sourceId)) {

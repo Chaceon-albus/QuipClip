@@ -12,6 +12,7 @@ import { useNativeMenuActions } from "@/components/layout/useNativeMenuActions";
 import { useQuitGuard } from "@/components/layout/useQuitGuard";
 import { startWindowTitleSync } from "@/components/layout/windowTitleSync";
 import { PreviewPane } from "@/components/preview/PreviewPane";
+import { ExportOrderDialog } from "@/components/timeline/ExportOrderDialog";
 import { SegmentRenameDialog } from "@/components/timeline/SegmentRenameDialog";
 import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
@@ -83,6 +84,9 @@ export function AppShell() {
         {/* The one mount of the Rename Segment dialog (ADR 065). The F2 key and the item of the
             segment menu open it through its store. */}
         <SegmentRenameDialog />
+        {/* The one mount of the Export Order dialog (ADR 066). Its key and the segment summary
+            in the gutter of the track row open it through its store. */}
+        <ExportOrderDialog />
         {/*
          * The one mount of the quit guard dialog. Its portal opens after any dialog that is
          * already open, so it draws above the export dialog.

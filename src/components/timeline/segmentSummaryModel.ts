@@ -3,8 +3,8 @@
  * that the export joins, and their total duration.
  *
  * The values are the ones of the Export tooltip of the title bar (`presentExportAction`): the
- * count of `selectActiveSourceSegmentCount`, and the total of `totalActiveSourceSegments` in the
- * timecode format of the source, written by `formatSegmentTotal` (ADR 024, ADR 028). So the
+ * count of `selectExportSegmentCount` (ADR 066), and the total of `totalExportSegments` in
+ * the timecode format of the source, written by `formatSegmentTotal` (ADR 024, ADR 028). So the
  * gutter and the Export button always show the same two values.
  *
  * It returns translation keys and values, and does not call the i18n runtime (ADR 011).
@@ -15,7 +15,7 @@ import type { TimecodeDisplay } from "@/lib/timecode";
 
 /** What the gutter shows under the lane label. */
 export interface SegmentSummaryView {
-  /** The number of segments of the active source. The count line is its plural form. */
+  /** The number of segments of the export. The count line is its plural form. */
   readonly count: number;
   /** The total duration, as the Export tooltip writes it, such as `00:01:23:04`. */
   readonly duration: string;
@@ -29,11 +29,11 @@ export interface SegmentSummaryView {
 }
 
 export interface SegmentSummaryInput {
-  /** The number of segments of the active source (`selectActiveSourceSegmentCount`). */
+  /** The number of segments of the export (`selectExportSegmentCount`, ADR 066). */
   readonly segmentCount: number;
   /**
-   * Their total duration, from `totalActiveSourceSegments` with `display`, or null when it is
-   * not known.
+   * Their total duration, from `totalExportSegments` with `display`, or null when it is not
+   * known.
    */
   readonly segmentTotal: bigint | null;
   /** The timecode format of the source (`resolveTimecodeDisplay`). */

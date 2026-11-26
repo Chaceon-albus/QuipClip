@@ -160,6 +160,10 @@ function snapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       ...overrides.playback,
     },
     timeline: withSelection({
+      // No clip list: the snapshot reads the derived segments of one clip (ADR 066).
+      clips: [],
+      sequenceSegments: [],
+      sequenceSources: {},
       sourceId: SOURCE_ID,
       segments: [SEGMENT_A, SEGMENT_B],
       currentSegmentId: "b",

@@ -26,8 +26,8 @@ import { useSequenceMediaStore } from "@/features/sequence/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
-  selectActiveSourceSegmentCount,
-  totalActiveSourceSegments,
+  selectExportSegmentCount,
+  totalExportSegments,
   useTimelineStore,
   type TimelineStoreState,
 } from "@/features/timeline";
@@ -113,7 +113,7 @@ export function TitleBar() {
   // Windows title bar.
   const isMac = isMacOS();
   const media = useAttachedMediaStore((state) => state.media);
-  const segmentCount = useTimelineStore(selectActiveSourceSegmentCount);
+  const segmentCount = useTimelineStore(selectExportSegmentCount);
   const exportStatus = useExportStore((state) => state.status);
   const exportTracking = useExportStore((state) => state.tracking);
   const exportDialogOpen = useExportPanelStore((state) => state.open);
@@ -137,15 +137,11 @@ export function TitleBar() {
     [timecodePreference, probe],
   );
   // One bigint or null. Both compare by value, so the title bar renders again only when the
-  // total changes, and not on each edit that keeps it.
+  // total changes, and not on each edit that keeps it. It adds the segments that the count
+  // counts (ADR 066).
   const selectSegmentTotal = useCallback(
     (state: TimelineStoreState) =>
-      totalActiveSourceSegments(
-        state.segments,
-        state.sourceId,
-        probe ?? null,
-        timecodeDisplay,
-      ),
+      totalExportSegments(state, probe ?? null, timecodeDisplay),
     [probe, timecodeDisplay],
   );
   const segmentTotal = useTimelineStore(selectSegmentTotal);

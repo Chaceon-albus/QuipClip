@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PresentedFrame } from "@/features/playback";
+import { exportSegmentIds } from "@/features/timeline";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import type { Pts, Segment } from "@/types/project";
@@ -13,6 +14,25 @@ import {
 } from "./boundaryBadgeModel";
 
 const pts = (value: string | number) => String(value) as Pts;
+
+/**
+ * The boundaries of a timeline of one clip, numbered by the segments of its export
+ * (`exportSegmentIds`, ADR 066).
+ */
+function indexOneClip(
+  segments: readonly Segment[],
+  activeSourceId: string | null,
+  pendingInPts: Pts | null,
+): BoundaryIndex {
+  const ids = exportSegmentIds({
+    clips: [],
+    sequenceSegments: [],
+    sequenceSources: {},
+    segments: [...segments],
+    sourceId: activeSourceId,
+  });
+  return indexSegmentBoundaries(segments, ids, activeSourceId, pendingInPts);
+}
 
 const frameAt = (value: string | number): PresentedFrame => ({
   mediaTime: Number(value) / 1000,
@@ -42,7 +62,7 @@ function pausedAt(
 }
 
 // Segment 1 is [1000, 2000), and segment 2 is [2000, 3000), as after a split at 2000.
-const splitIndex: BoundaryIndex = indexSegmentBoundaries(
+const splitIndex: BoundaryIndex = indexOneClip(
   [segment("a", 1000, 2000), segment("b", 2000, 3000)],
   "s",
   null,
@@ -133,7 +153,7 @@ describe("matchBoundaryBadges", () => {
 
   it("lists every segment that shares a boundary, in export order", () => {
     // Overlapping segments are legal (ADR 007). The project order is the export order.
-    const index = indexSegmentBoundaries(
+    const index = indexOneClip(
       [segment("late", 5000, 9000), segment("a", 1000, 9000), segment("b", 1000, 4000)],
       "s",
       null,
@@ -151,7 +171,7 @@ describe("matchBoundaryBadges", () => {
   });
 
   it("shows In on the pending In mark", () => {
-    const index = indexSegmentBoundaries([segment("a", 1000, 2000)], "s", pts(4000));
+    const index = indexOneClip([segment("a", 1000, 2000)], "s", pts(4000));
     expect(matchBoundaryBadges(pts(4000), index)).toStrictEqual({
       outNumbers: [],
       inNumbers: [],
@@ -161,7 +181,7 @@ describe("matchBoundaryBadges", () => {
 
   it("shows the pending In mark with a segment Out on the same frame", () => {
     // Mark In on the Out frame of a finished segment starts the next segment there.
-    const index = indexSegmentBoundaries([segment("a", 1000, 2000)], "s", pts(2000));
+    const index = indexOneClip([segment("a", 1000, 2000)], "s", pts(2000));
     expect(matchBoundaryBadges(pts(2000), index)).toStrictEqual({
       outNumbers: [1],
       inNumbers: [],
@@ -176,7 +196,7 @@ describe("matchBoundaryBadges", () => {
   it("compares signed i64 PTS values exactly", () => {
     // Both values are beyond the safe integer range of a double, one tick apart.
     const big = "9223372036854775806";
-    const index = indexSegmentBoundaries(
+    const index = indexOneClip(
       [segment("neg", "-9223372036854775808", "-5"), segment("big", "-5", big)],
       "s",
       null,
@@ -197,7 +217,7 @@ describe("matchBoundaryBadges", () => {
 
 describe("indexSegmentBoundaries", () => {
   it("numbers the segments of the active source in export order, as the timeline does", () => {
-    const index = indexSegmentBoundaries(
+    const index = indexOneClip(
       [segment("old", 1000, 2000, "other"), segment("a", 3000, 4000)],
       "s",
       null,
@@ -209,7 +229,7 @@ describe("indexSegmentBoundaries", () => {
   });
 
   it("skips a segment that is not a valid half-open interval and keeps the numbers", () => {
-    const index = indexSegmentBoundaries(
+    const index = indexOneClip(
       [
         segment("empty", 1000, 1000),
         segment("bad", "x", 2000),
@@ -223,13 +243,27 @@ describe("indexSegmentBoundaries", () => {
     expect(matchBoundaryBadges(pts(3000), index)?.inNumbers).toStrictEqual([3]);
   });
 
+  it("numbers the segments by their place in the export (ADR 066)", () => {
+    const index = indexSegmentBoundaries(
+      [segment("a", 1000, 2000), segment("b", 2000, 3000)],
+      ["b", "a"],
+      "s",
+      null,
+    );
+    expect(matchBoundaryBadges(pts(2000), index)).toStrictEqual({
+      outNumbers: [2],
+      inNumbers: [1],
+      pendingIn: false,
+    });
+  });
+
   it("has no boundary without an active source", () => {
-    const index = indexSegmentBoundaries([segment("a", 1000, 2000)], null, pts(1000));
+    const index = indexOneClip([segment("a", 1000, 2000)], null, pts(1000));
     expect(index).toStrictEqual({ segments: [], pendingInPts: null });
   });
 
   it("ignores a pending In mark that does not parse", () => {
-    expect(indexSegmentBoundaries([], "s", "1e3" as Pts).pendingInPts).toBeNull();
+    expect(indexOneClip([], "s", "1e3" as Pts).pendingInPts).toBeNull();
   });
 });
 

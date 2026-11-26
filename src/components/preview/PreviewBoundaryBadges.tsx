@@ -5,7 +5,11 @@ import { isSourceActive } from "@/components/layout/actionConditions";
 import { MarkInIcon, MarkOutIcon } from "@/components/transport/markPointIcons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { type MediaStoreState } from "@/features/media";
-import { useTimelineStore, type TimelineStoreState } from "@/features/timeline";
+import {
+  selectExportSegmentIds,
+  useTimelineStore,
+  type TimelineStoreState,
+} from "@/features/timeline";
 import { cn } from "@/lib/utils";
 import {
   BOUNDARY_BADGE_DELAY_MS,
@@ -118,13 +122,15 @@ export function PreviewBoundaryBadges({
   const { t } = useTranslation();
   const hasMedia = useSequenceMediaStore(selectHasMedia);
   const segments = useTimelineStore(selectSegments);
+  // A badge names a segment by its place in the export, as its bar does (ADR 066).
+  const exportIds = useTimelineStore(selectExportSegmentIds);
   const sourceId = useTimelineStore(selectSourceId);
   const pendingInPts = useTimelineStore(selectPendingInPts);
 
   // Parsed once for each edit, so the test for each frame only compares BigInt values.
   const index = useMemo(
-    () => indexSegmentBoundaries(segments, sourceId, pendingInPts),
-    [segments, sourceId, pendingInPts],
+    () => indexSegmentBoundaries(segments, exportIds, sourceId, pendingInPts),
+    [segments, exportIds, sourceId, pendingInPts],
   );
   const framePts = useSequencePlaybackStore((s) =>
     boundaryBadgeFramePts(s, isSourceActive(hasMedia, s.isAttached, s.isReady)),
