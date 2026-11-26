@@ -22,6 +22,10 @@ QuipClip can do these things:
 - Mark segments on the presentation timestamps (PTS) of the source videos.
 - Change segments on the timeline. You can drag a segment edge, split a segment, and undo
   an edit.
+- Give a segment a name, and change the order in which the export joins the segments.
+- Choose the audio track of a video file that has two or more. This does not apply to an FLV
+  file.
+- Save one frame as a PNG image.
 - Export the segments with a preset. The output can hold the video and the audio, the
   video only, or the audio only. An export of one segment can copy the source audio.
 - Add an export to a queue while another export runs.
@@ -135,6 +139,25 @@ QuipClip numbers the segments in the order that you mark them. A split puts the 
 directly after the left half. The export joins the segments in the order of their numbers,
 not in the order of their positions on the timeline.
 
+When the export has two or more segments, you can change that order. Click the segment count
+at the left of the track, or press `Cmd+Shift+E`. The Export Order dialog lists the segments
+in the order of the export. Drag a row to move it. You can also put the focus on a row and
+press `Alt` (`Option` on macOS) with `↑` or `↓`. **Sort by Timeline Position** puts the rows in
+the order of the timeline. Click **Apply** to keep the new order.
+
+To give a segment a name, right-click the segment and select **Rename…**, or select the
+segment and press `F2`. The name shows in the Export Order dialog. It also shows on the
+segment when the segment has room for it. The export does not write the name into the file.
+
+To save one frame as a PNG image, go to the frame and press `Cmd+Shift+S`, or click the
+Export Frame button below the preview. The image is the first frame of a segment whose In is
+at that position. It has the full display size of the video.
+
+When a video file has two or more audio tracks, click the name of its clip on the timeline and
+select a track in the **Audio Track** submenu. The export, the loudness measurement and the
+waveform use that track. When the preview of the file can play a different track, the submenu
+shows a note. An FLV file has no such submenu.
+
 One export joins at most 256 parts and uses at most 85 source files. A segment that crosses
 the end of a video on the timeline gives one part for each video.
 
@@ -157,6 +180,9 @@ is the macOS key. On Windows, use `Ctrl`.
 | `Esc`                | Finish the current segment. After an In, end a segment at the playhead           |
 | `Delete` `Backspace` | Delete the selected segments                                                     |
 | `Cmd+A`              | Select all segments                                                              |
+| `F2`                 | Rename the selected segment                                                      |
+| `Cmd+Shift+E`        | Change the export order                                                          |
+| `Cmd+Shift+S`        | Save one frame as a PNG image                                                    |
 | `Cmd+Z`              | Undo                                                                             |
 | `Cmd+Shift+Z`        | Redo. On Windows, `Ctrl+Y` also redoes                                           |
 | `=` `-`              | Zoom the timeline in or out                                                      |
