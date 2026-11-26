@@ -4,7 +4,7 @@
 - Date: 2026-11-24
 - Deciders: capric98
 - Amends: ADR 019, ADR 046
-- Amended by: ADR 064
+- Amended by: ADR 064, ADR 070
 
 ## Context
 
@@ -86,6 +86,10 @@ ADR 046. Windows keeps the hidden element of ADR 019.
   window of a native source is an invalid request.
 - A window of a native source needs a file with the size and the modification time of its
   import, as every seek window of ADR 058 does.
+
+(Changed on 2026-11-26.) The PCM windows of the cue map the effective audio stream of the
+source by its absolute index (ADR 070). A change of that stream replaces the cue, with its
+PCM and its windows. The element and its calibration do not change.
 
 ## Measurements
 

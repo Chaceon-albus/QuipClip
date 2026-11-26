@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058, ADR 061
+- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058, ADR 061, ADR 070
 
 ## Context
 
@@ -154,6 +154,14 @@ no size estimate.
 ADR 053 finds: the canvas, the frame rate, the sample rate and the channel layout. The limit of
 `tooManySegments` counts pieces, and the Copy audio switch needs an export of one piece
 (ADR 053).
+
+(Changed on 2026-11-26.) The facts of the step include the effective audio stream of each
+source (ADR 070). The confirm step records them before it opens the save dialog. When they
+differ after the dialog closes, the step sends nothing and returns to the setup step. The
+backend refuses a request with `audioStreamChanged` when a file has no audio stream with the
+index of the request, or when that stream differs from the request in its codec, its sample
+rate or its channel count. "Export anyway" removes only the check of the revision, so that
+refusal stays.
 
 ## Consequences
 

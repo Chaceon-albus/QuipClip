@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-20
 - Deciders: capric98
-- Amended by: ADR 022, ADR 046, ADR 062
+- Amended by: ADR 022, ADR 046, ADR 062, ADR 070
 
 ## Context
 
@@ -224,6 +224,9 @@ The application does not show an error when the cue fails. An element error, or 
 `play` promise that is not an `AbortError`, disables the controller for that source. The
 cue helps the user find a frame. It is not an edit action, and a message about it would
 report a fault that the user cannot correct.
+
+(Changed on 2026-11-26.) The PCM cue plays the effective audio stream of the source (ADR 070).
+The hidden `<audio>` element of the cue still plays the stream that the web view chooses.
 
 ## Consequences
 

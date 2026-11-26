@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 052, ADR 058, ADR 065
+- Amended by: ADR 052, ADR 058, ADR 065, ADR 070
 
 ## Context
 
@@ -119,6 +119,10 @@ mark a video and export it.
 
 The export settings therefore live in the application settings file. See ADR 013. A preset
 belongs to the application, because no project document exists to hold one.
+
+(Changed on 2026-11-26.) The persisted source gets the optional field `audioStreamIndex`: the
+absolute index of the audio stream that the user chose for the source (ADR 070). A document
+without the field has no such choice. Version 1 still writes no project file.
 
 ## Consequences
 

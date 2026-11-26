@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048, ADR 055, ADR 056, ADR 057, ADR 058, ADR 062, ADR 064
+- Amended by: ADR 048, ADR 055, ADR 056, ADR 057, ADR 058, ADR 062, ADR 064, ADR 070
 
 ## Context
 
@@ -803,6 +803,12 @@ that overlap or touch. For each group, it reads the slice of the earliest range 
 to the end of the group, with `-read_intervals %<end>`. It names the head by its full path. All
 the runs share one `PROBE_TIMEOUT`. (Changed on 2026-10-28.) At most eight runs work at the same
 time, and their answers join in the order of the groups (ADR 055).
+
+(Changed on 2026-11-26.) For a source that is not an FLV, the request of a window names the
+effective audio stream of the source, and FFmpeg maps it by its absolute index, not `0:a:0`
+(ADR 070). The page decides between a copy and a transcode of the audio from the codec of that
+stream. A change of the effective stream replaces the preview element through the reload of
+ADR 039, with no stall. An FLV keeps the mapping `0:a:0`.
 
 ## Rejected alternatives
 

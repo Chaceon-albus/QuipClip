@@ -4,7 +4,7 @@
 - Date: 2026-10-28
 - Deciders: capric98
 - Amends: ADR 007, ADR 017, ADR 038, ADR 046, ADR 052
-- Amended by: ADR 057, ADR 058
+- Amended by: ADR 057, ADR 058, ADR 070
 
 ## Context
 
@@ -317,6 +317,11 @@ whether the job reads the file or the cache, so a cache hit never shows it. The 
 progress bar beside the text of the alert, so a screen reader does not read the alert again at
 each percent. The error notice holds the diagnostic text of the failure, so it stays until the
 user closes it.
+
+(Changed on 2026-11-26.) The request of an envelope names the effective audio stream of the
+source (ADR 070). A change of that stream ends the job of the source, removes the envelope
+that the timeline shows for it, and makes the page refuse each later message of that job. An
+FLV keeps its own mapping.
 
 ## Rejected alternatives
 

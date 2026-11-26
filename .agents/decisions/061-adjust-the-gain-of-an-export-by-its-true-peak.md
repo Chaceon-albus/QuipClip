@@ -4,6 +4,7 @@
 - Date: 2026-11-22
 - Deciders: capric98
 - Amends: ADR 016, ADR 017, ADR 024, ADR 036, ADR 043, ADR 048, ADR 049, ADR 054
+- Amended by: ADR 070
 
 ## Context
 
@@ -435,6 +436,9 @@ then becomes slower.
   force.
 - A positive gain that QuipClip puts in the field.
 - A change of the project file or of the settings file (ADR 010, ADR 013).
+
+(Changed on 2026-11-26.) The loudness measurement reads the effective audio stream of each
+source, as the export does, and the key of a kept result includes those streams (ADR 070).
 
 ## Rejected alternatives
 

@@ -90,6 +90,7 @@ document summarizes them and shows how the parts fit together.
 | [`066-change-the-export-order-in-a-dialog.md`](../.agents/decisions/066-change-the-export-order-in-a-dialog.md)                                                         | A dialog lists the segments of the export, and the user puts them in a new order   |
 | [`068-write-no-chapter-of-a-source-into-an-export.md`](../.agents/decisions/068-write-no-chapter-of-a-source-into-an-export.md)                                         | Each command that writes the output file has `-map_chapters -1`                    |
 | [`069-export-one-frame-as-an-image.md`](../.agents/decisions/069-export-one-frame-as-an-image.md)                                                                       | Export Frame saves the frame that Mark In would mark as a PNG file                 |
+| [`070-choose-the-audio-stream-of-a-source.md`](../.agents/decisions/070-choose-the-audio-stream-of-a-source.md)                                                         | The user can choose which audio stream of a source QuipClip reads                  |
 
 ## Shape
 
@@ -483,6 +484,14 @@ that moment would start, at the display size of the source. The action is not a 
 export queue. A command of its own decodes the frame with one FFmpeg process, reads the result
 with ffprobe, and renames it onto the destination. An exit of the application cancels that
 command and waits for it within the budget of ADR 017.
+
+A file can hold several audio streams (ADR 070). The probe lists them. For a source with two or
+more, the menu of a clip label has the submenu "Audio Track", and the choice of the user is the
+effective audio stream of that source. Without a choice, it is the stream that the probe
+prefers. The export, the loudness measurement, the audio envelope, the windows of a
+`MediaSource` preview and the PCM cue read the effective stream. The native `<video>` element
+plays the stream that the web view chooses, and a note in the submenu says so. A source with
+one audio stream looks and behaves as before.
 
 ## ffmpeg lifecycle
 
