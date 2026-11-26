@@ -11,6 +11,10 @@
  *
  * On FLV the PCM comes with the video windows. On MPEG-TS and Matroska the cue requests its own
  * PCM windows of the audio lane where it has none (`ensure`).
+ *
+ * A failed audio process turns the cue off for `FAILURE_OFF_SECONDS` (ADR 064). Then the cue is
+ * on again in the state of a new cue. Only a refusal with the code `sourceChanged` turns it off
+ * for the life of its owner.
  */
 
 import type { ScrubCue } from "../cue";
@@ -38,6 +42,8 @@ export const PCM_WINDOW_SECONDS = 20;
  * render callback, and a voice that starts in the past loses its first samples.
  */
 export const START_LEAD_SECONDS = 0.01;
+/** The time for which a failed audio process turns the cue off (ADR 064). */
+export const FAILURE_OFF_SECONDS = 3;
 /** A burst stops this long before its stop time for a continuation, which needs a voice. */
 const STOP_MARGIN_SECONDS = 0.01;
 /** The PCM that must lie after a target for `ensure` to need no window. */
@@ -90,7 +96,10 @@ export interface PcmCueOptions {
 export interface PcmCue extends ScrubCue {
   /** Adds PCM of window `key`, whose sample 0 is at `startSeconds` of the source. */
   readonly addPcm: (key: number, startSeconds: number, bytes: Uint8Array) => void;
-  /** The PCM of a window ended. A failed audio process disables the cue. */
+  /**
+   * The PCM of a window ended. A failed audio process turns the cue off for
+   * `FAILURE_OFF_SECONDS`.
+   */
   readonly endPcm: (end: WindowEnd) => void;
   /** On MPEG-TS and Matroska, makes PCM at a media time arrive before a burst needs it. */
   readonly ensure: (mediaTime: number) => void;
@@ -173,14 +182,22 @@ function maxLagOf(kind: ScrubAudioRequestKind): number {
 export function createPcmCue(options: PcmCueOptions): PcmCue {
   const timers = options.timers ?? defaultTimers;
   const segments: PcmSegment[] = [];
-  /** The windows whose PCM the bound dropped. Their later pieces go nowhere. */
+  /**
+   * The windows whose PCM the bound dropped, or whose PCM the cue discarded while it was off.
+   * Their later pieces go nowhere.
+   */
   const droppedKeys = new Set<number>();
   let output: CueAudioOutput | null = null;
   let gain = options.gain ?? 1;
   let burst: Burst | null = null;
   let watchdog: number | null = null;
   let pending: PendingBurst | null = null;
+  /** True while the cue is off after a failure. */
   let disabled = false;
+  /** True when the cue stays off for the life of its owner. */
+  let disabledForGood = false;
+  /** The timer that turns the cue on again. */
+  let enableTimer: number | null = null;
   let destroyed = false;
   /**
    * The PCM window of the audio lane. A window that ended normally still covers its range, so
@@ -455,6 +472,10 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
       ensureAt(target);
       return;
     }
+    // The audio output could not start, so the cue is off and keeps no request.
+    if (disabled) {
+      return;
+    }
     // The PCM has not arrived. The request waits for it for the watchdog time of ADR 019.
     stopBurst();
     ensureAt(target);
@@ -484,9 +505,16 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
   };
 
   const addPcm = (key: number, startSeconds: number, bytes: Uint8Array): void => {
+    if (destroyed) {
+      return;
+    }
+    if (disabled) {
+      // A later piece of this window would start a segment at the start of the window,
+      // without the pieces before it, so its samples would play at a wrong time.
+      droppedKeys.add(key);
+      return;
+    }
     if (
-      destroyed ||
-      disabled ||
       bytes.byteLength === 0 ||
       !Number.isFinite(startSeconds) ||
       droppedKeys.has(key)
@@ -526,16 +554,48 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
     }
   };
 
+  const clearEnableTimer = (): void => {
+    if (enableTimer !== null) {
+      timers.clearTimer(enableTimer);
+      enableTimer = null;
+    }
+  };
+
   /**
-   * A failed audio process disables the cue. It never stops the video window. The PCM window
-   * of the cue stops, and the PCM goes.
+   * A failed audio process turns the cue off for `FAILURE_OFF_SECONDS`, and a failure while it
+   * is off starts that time again. With `forGood`, the cue stays off for the life of its owner.
+   * It never stops the video window. The PCM window of the cue stops, and the PCM goes. The
+   * later pieces of a window whose PCM went go nowhere, also after the cue is on again.
    */
-  const disable = (): void => {
+  const disable = (forGood = false): void => {
+    if (destroyed) {
+      return;
+    }
     disabled = true;
     stop();
     pcmWindow?.session.close();
     pcmWindow = null;
+    for (const segment of segments) {
+      droppedKeys.add(segment.key);
+    }
     segments.length = 0;
+    clearEnableTimer();
+    if (forGood) {
+      disabledForGood = true;
+    }
+    if (disabledForGood) {
+      return;
+    }
+    // The cue is on again in the state of a new cue. It opens no window until a request.
+    const handle = timers.setTimer(() => {
+      // Defends against a timer implementation that does not honour clearTimer.
+      if (enableTimer !== handle || destroyed || disabledForGood) {
+        return;
+      }
+      enableTimer = null;
+      disabled = false;
+    }, FAILURE_OFF_SECONDS * 1000);
+    enableTimer = handle;
   };
 
   const endPcm = (end: WindowEnd): void => {
@@ -620,15 +680,19 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
       },
       (error: unknown) => {
         record.failed = true;
-        const superseded =
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          error.code === "superseded";
-        // A newer request of the cue replaces its window. Any other refusal is a failed
-        // audio process.
-        if (!superseded && !session.isClosed()) {
-          disable();
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? error.code
+            : null;
+        // The request of the window was refused. That can happen before FFmpeg starts, and the
+        // client also refuses a reply that it cannot read (`invalidResponse`). `superseded`
+        // means that a newer request of the cue replaced the window, which is no failure. A
+        // refusal of a window that the cue already closed is no failure either. Each other
+        // code turns the cue off for `FAILURE_OFF_SECONDS`, except `sourceChanged`: the
+        // revision check of this open found that the file changed after its import, so the
+        // cue stays off until its owner replaces it.
+        if (code !== "superseded" && !session.isClosed()) {
+          disable(code === "sourceChanged");
         }
       },
     );
@@ -659,6 +723,7 @@ export function createPcmCue(options: PcmCueOptions): PcmCue {
       }
       stop();
       destroyed = true;
+      clearEnableTimer();
       pcmWindow?.session.close();
       pcmWindow = null;
       segments.length = 0;

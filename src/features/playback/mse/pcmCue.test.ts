@@ -7,13 +7,15 @@ import {
   START_LEAD_SECONDS,
   type CueAudioOutput,
   type CueVoice,
+  type PcmCue,
   type PcmCueOptions,
 } from "./pcmCue";
-import type {
-  WindowEnd,
-  WindowListener,
-  WindowOpened,
-  WindowSession,
+import {
+  PreviewWindowError,
+  type WindowEnd,
+  type WindowListener,
+  type WindowOpened,
+  type WindowSession,
 } from "./windowClient";
 
 /** The source starts at 100 s, so media time 0 is 100 s of the source. */
@@ -70,10 +72,18 @@ class FakeOutput implements CueAudioOutput {
 
 class FakeTimers implements ScrubAudioTimers {
   private next = 1;
-  readonly pending = new Map<number, { callback: () => void; milliseconds: number }>();
+  /** The time of the fake clock, in milliseconds since the start of the test. */
+  now = 0;
+  readonly pending = new Map<
+    number,
+    { callback: () => void; milliseconds: number; due: number }
+  >();
+  /** The callback of each timer ever set, also of a cleared one. */
+  readonly callbacks = new Map<number, () => void>();
   setTimer = (callback: () => void, milliseconds: number): number => {
     const handle = this.next++;
-    this.pending.set(handle, { callback, milliseconds });
+    this.pending.set(handle, { callback, milliseconds, due: this.now + milliseconds });
+    this.callbacks.set(handle, callback);
     return handle;
   };
   clearTimer = (handle: number): void => {
@@ -88,7 +98,62 @@ class FakeTimers implements ScrubAudioTimers {
       }
     }
   }
+  /**
+   * Moves the clock `milliseconds` forward and runs each timer that is due, in the order of
+   * its due time. A timer that a callback sets runs too when it is due.
+   */
+  advance(milliseconds: number): void {
+    const end = this.now + milliseconds;
+    for (;;) {
+      let first: [number, { callback: () => void; due: number }] | null = null;
+      for (const entry of this.pending) {
+        if (entry[1].due <= end && (first === null || entry[1].due < first[1].due)) {
+          first = entry;
+        }
+      }
+      if (first === null) {
+        break;
+      }
+      this.pending.delete(first[0]);
+      this.now = first[1].due;
+      first[1].callback();
+    }
+    this.now = end;
+  }
 }
+
+/** The handles of the timers that turn the cue on again: 3 s each (ADR 064). */
+function offTimers(timers: FakeTimers): number[] {
+  return [...timers.pending]
+    .filter(([, timer]) => timer.milliseconds === 3000)
+    .map(([handle]) => handle);
+}
+
+let probeKey = 1000;
+
+/**
+ * True when the cue plays: PCM of a new window at 100 s, then a request inside it. A cue that
+ * is off discards the PCM and plays nothing.
+ */
+function playsNow(cue: PcmCue, output: FakeOutput): boolean {
+  const before = output.voices.length;
+  // A burst that sounds would take the request as its continuation.
+  cue.stop();
+  cue.addPcm(probeKey++, 100, pcm(1));
+  cue.request(0.2, 1);
+  return output.voices.length > before;
+}
+
+/** The end of a PCM window whose audio process failed. */
+const FAILED: WindowEnd = {
+  status: "failed",
+  reachedEnd: false,
+  next: null,
+  bytesRead: 0,
+  nonMonotonic: false,
+  damaged: false,
+  detail: "Decoder not found",
+};
 
 /**
  * PCM of `seconds` in which each sample holds its own index modulo 32768, so a voice shows
@@ -340,22 +405,125 @@ describe("createPcmCue", () => {
       expect(output.voices).toHaveLength(1);
     });
 
-    it("stops and plays nothing more after a failed audio process", () => {
-      const { cue, output } = setup();
+    it("stops and plays nothing until 3 s after a failed audio process", () => {
+      const { cue, output, timers } = setup();
       cue.addPcm(1, 100, pcm(1));
       cue.request(0.2, 1);
-      const failed: WindowEnd = {
-        status: "failed",
-        reachedEnd: false,
-        next: null,
-        bytesRead: 0,
-        nonMonotonic: false,
-        damaged: false,
-        detail: "Decoder not found",
-      };
-      cue.endPcm(failed);
+      cue.endPcm(FAILED);
       expect(output.voices[0]?.lastStop()).toBeNull();
+      expect(offTimers(timers)).toHaveLength(1);
+      // The cue keeps no request, and it discards the PCM that arrives.
       cue.request(0.5, 1);
+      expect(output.voices).toHaveLength(1);
+      expect(timers.pending.size).toBe(1);
+      cue.addPcm(2, 101, pcm(1));
+      cue.request(1.2, 1);
+      expect(output.voices).toHaveLength(1);
+      cue.prime();
+      expect(output.resumes).toBe(0);
+      timers.advance(2999);
+      expect(playsNow(cue, output)).toBe(false);
+      timers.advance(1);
+      expect(playsNow(cue, output)).toBe(true);
+    });
+
+    it("is on again after 3 s with no PCM, and plays the PCM of a new window", () => {
+      const { cue, output, timers } = setup();
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
+      cue.endPcm(FAILED);
+      timers.advance(3000);
+      expect(timers.pending.size).toBe(0);
+      // The PCM went. The request waits for PCM, as the request of a new cue does.
+      cue.request(0.5, 1);
+      expect(output.voices).toHaveLength(1);
+      cue.addPcm(3, 100, pcm(1));
+      expect(output.voices).toHaveLength(2);
+      expect(output.voices[1]?.first()).toBeCloseTo(sampleValue(24000), 9);
+    });
+
+    it("discards the later pieces of a window whose PCM went when the cue turned off", () => {
+      const { cue, output, timers } = setup();
+      cue.addPcm(1, 100, pcm(1));
+      cue.endPcm(FAILED);
+      timers.advance(3000);
+      cue.addPcm(1, 100, pcm(1, PCM_SAMPLE_RATE));
+      cue.request(0.2, 1);
+      expect(output.voices).toHaveLength(0);
+    });
+
+    it("discards the later pieces of a window whose first piece arrived while it was off", () => {
+      const { cue, output, timers } = setup();
+      cue.endPcm(FAILED);
+      cue.addPcm(7, 100, pcm(1));
+      timers.advance(3000);
+      // Without the rule, this piece would start a segment at 100 s, 1 s before its samples.
+      cue.addPcm(7, 100, pcm(1, PCM_SAMPLE_RATE));
+      cue.request(0.2, 1);
+      cue.request(1.2, 1);
+      expect(output.voices).toHaveLength(0);
+      // A window that the cue did not drop plays.
+      cue.addPcm(8, 101, pcm(1));
+      expect(output.voices).toHaveLength(1);
+    });
+
+    it("starts the 3 s again for a failure while it is off", () => {
+      const { cue, output, timers } = setup();
+      cue.endPcm(FAILED);
+      const [first] = offTimers(timers);
+      timers.advance(1000);
+      cue.endPcm(FAILED);
+      const [second] = offTimers(timers);
+      expect(offTimers(timers)).toHaveLength(1);
+      expect(second).not.toBe(first);
+      // 3.999 s after the first failure, 2.999 s after the second one.
+      timers.advance(2999);
+      expect(playsNow(cue, output)).toBe(false);
+      timers.advance(1);
+      expect(playsNow(cue, output)).toBe(true);
+    });
+
+    it("ignores the callback of an off timer that a second failure replaced", () => {
+      const { cue, output, timers } = setup();
+      cue.endPcm(FAILED);
+      const [first] = offTimers(timers);
+      timers.advance(1000);
+      cue.endPcm(FAILED);
+      const [second] = offTimers(timers);
+      // A timer implementation that runs a cleared callback.
+      timers.callbacks.get(first ?? -1)?.();
+      expect(playsNow(cue, output)).toBe(false);
+      expect(offTimers(timers)).toEqual([second]);
+      timers.advance(2999);
+      expect(playsNow(cue, output)).toBe(false);
+      timers.advance(1);
+      expect(playsNow(cue, output)).toBe(true);
+    });
+
+    it("stops a burst that waits for PCM when the PCM of its window fails", () => {
+      const { cue, output, timers } = setup();
+      cue.addPcm(1, 100, pcm(0.01));
+      cue.request(0.2, 1);
+      expect(timers.pending.size).toBe(1);
+      cue.endPcm(FAILED);
+      // Only the off timer is left: the request waits no more.
+      expect([...timers.pending.values()].map((timer) => timer.milliseconds)).toEqual([
+        3000,
+      ]);
+      timers.advance(3000);
+      // The rest of the window goes nowhere, and PCM of a new window plays no old request.
+      cue.addPcm(1, 100, pcm(1));
+      cue.addPcm(2, 100, pcm(1));
+      expect(output.voices).toHaveLength(0);
+    });
+
+    it("treats a canceled or a complete end of the PCM as no failure", () => {
+      const { cue, output, timers } = setup();
+      cue.endPcm({ ...FAILED, status: "canceled", detail: null });
+      cue.endPcm({ ...FAILED, status: "complete", detail: null });
+      expect(timers.pending.size).toBe(0);
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
       expect(output.voices).toHaveLength(1);
     });
   });
@@ -408,6 +576,58 @@ describe("createPcmCue", () => {
       expect(timers.pending.size).toBe(0);
       cue.destroy();
       expect(output.closed).toBe(true);
+      cue.request(0.2, 1);
+      expect(output.voices).toHaveLength(1);
+    });
+
+    it("never turns on again after destroy", () => {
+      const { cue, output, timers } = setup();
+      cue.endPcm(FAILED);
+      const [handle] = offTimers(timers);
+      cue.destroy();
+      expect(timers.pending.size).toBe(0);
+      // A timer implementation that runs a cleared callback.
+      timers.callbacks.get(handle ?? -1)?.();
+      cue.endPcm(FAILED);
+      expect(timers.pending.size).toBe(0);
+      timers.advance(3000);
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
+      cue.prime();
+      expect(output.voices).toHaveLength(0);
+      expect(output.resumes).toBe(0);
+    });
+
+    it("tries to create the output again 3 s after it could not", () => {
+      const output = new FakeOutput();
+      const timers = new FakeTimers();
+      let attempts = 0;
+      const cue = createPcmCue({
+        videoStartSeconds: START,
+        createOutput: () => {
+          attempts++;
+          if (attempts === 1) {
+            throw new Error("no audio device");
+          }
+          return output;
+        },
+        timers,
+      });
+      cue.addPcm(1, 100, pcm(1));
+      cue.request(0.2, 1);
+      expect(attempts).toBe(1);
+      // The cue is off with no output, and it keeps no request.
+      expect(offTimers(timers)).toHaveLength(1);
+      expect(timers.pending.size).toBe(1);
+      cue.prime();
+      cue.request(0.2, 1);
+      expect(attempts).toBe(1);
+
+      timers.advance(3000);
+      cue.prime();
+      expect(attempts).toBe(2);
+      expect(output.resumes).toBe(1);
+      cue.addPcm(2, 100, pcm(1));
       cue.request(0.2, 1);
       expect(output.voices).toHaveLength(1);
     });
@@ -542,12 +762,17 @@ describe("createPcmCue", () => {
       expect(windows[1]?.startSeconds).toBeGreaterThan(119);
     });
 
-    it("turns off after a refused window or a window with no start", async () => {
+    it("turns off for 3 s after a refused window or a window with no start", async () => {
       const refused = withWindows();
       refused.cue.ensure(30);
-      await refused.windows[0]?.refuse({ code: "spawnFailed" });
+      await refused.windows[0]?.refuse(new PreviewWindowError("spawnFailed"));
       refused.cue.ensure(80);
+      refused.cue.request(80, 1);
       expect(refused.windows).toHaveLength(1);
+      expect(offTimers(refused.timers)).toHaveLength(1);
+      refused.timers.advance(3000);
+      refused.cue.ensure(80);
+      expect(refused.windows).toHaveLength(2);
 
       // A newer window replaced this one, so the cue stays on, and a time inside the range that
       // the replaced window would have covered opens a window again.
@@ -556,12 +781,81 @@ describe("createPcmCue", () => {
       await replaced.windows[0]?.refuse({ code: "superseded" });
       replaced.cue.ensure(35);
       expect(replaced.windows).toHaveLength(2);
+      expect(offTimers(replaced.timers)).toHaveLength(0);
 
       const startless = withWindows();
       startless.cue.ensure(30);
       await startless.windows[0]?.open({ pcmStartSeconds: null });
       startless.cue.ensure(80);
       expect(startless.windows).toHaveLength(1);
+      startless.timers.advance(3000);
+      startless.cue.ensure(80);
+      expect(startless.windows).toHaveLength(2);
+    });
+
+    it("opens no window when it is on again, and opens one at the next request", async () => {
+      const { cue, windows, output, timers } = withWindows();
+      cue.ensure(30);
+      await windows[0]?.open({ pcmStartSeconds: 125 });
+      windows[0]?.listener.onChunk(new Uint8Array(pcm(10)));
+      windows[0]?.listener.onEnd(FAILED);
+      expect(windows[0]?.closed).toBe(true);
+      timers.advance(3000);
+      expect(windows).toHaveLength(1);
+      // The PCM and the window went, so a target inside the old window needs a new one.
+      cue.request(30, 1);
+      expect(output.voices).toHaveLength(0);
+      expect(windows.map((window) => window.startSeconds)).toEqual([130, 130]);
+      await windows[1]?.open({ pcmStartSeconds: 129 });
+      windows[1]?.listener.onChunk(new Uint8Array(pcm(2)));
+      expect(output.voices).toHaveLength(1);
+    });
+
+    it("stops a burst that waits for PCM when its window fails before the reply", async () => {
+      const { cue, windows, output, timers } = withWindows();
+      cue.request(30, 1);
+      expect(windows).toHaveLength(1);
+      expect(timers.pending.size).toBe(1);
+      windows[0]?.listener.onEnd(FAILED);
+      expect(windows[0]?.closed).toBe(true);
+      // Only the off timer is left: the request waits no more.
+      expect([...timers.pending.values()].map((timer) => timer.milliseconds)).toEqual([
+        3000,
+      ]);
+      // The reply and the PCM of the closed window arrive late. They play nothing, also after
+      // the cue is on again.
+      await windows[0]?.open({ pcmStartSeconds: 129 });
+      windows[0]?.listener.onChunk(new Uint8Array(pcm(2)));
+      expect(output.voices).toHaveLength(0);
+      timers.advance(3000);
+      windows[0]?.listener.onChunk(new Uint8Array(pcm(2, 2 * PCM_SAMPLE_RATE)));
+      expect(output.voices).toHaveLength(0);
+      expect(windows).toHaveLength(1);
+    });
+
+    it("stays off for the life of its owner after a refusal for a changed file", async () => {
+      const { cue, windows, timers } = withWindows();
+      cue.ensure(30);
+      await windows[0]?.refuse(new PreviewWindowError("sourceChanged"));
+      expect(windows[0]?.closed).toBe(true);
+      expect(timers.pending.size).toBe(0);
+      timers.advance(3000);
+      cue.ensure(80);
+      expect(windows).toHaveLength(1);
+      // A later failure starts no timer.
+      cue.endPcm(FAILED);
+      expect(timers.pending.size).toBe(0);
+    });
+
+    it("ignores a refusal for a changed file of a window that it closed", async () => {
+      const { cue, windows, timers } = withWindows();
+      cue.ensure(30);
+      cue.ensure(60);
+      await windows[0]?.refuse(new PreviewWindowError("sourceChanged"));
+      expect(timers.pending.size).toBe(0);
+      expect(windows[1]?.closed).toBe(false);
+      cue.ensure(90);
+      expect(windows).toHaveLength(3);
     });
 
     it("opens no window again near the end of a window that ended normally", async () => {

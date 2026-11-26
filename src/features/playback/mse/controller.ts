@@ -248,7 +248,10 @@ export interface MseControllerEvents {
     startSeconds: number,
     bytes: Uint8Array<ArrayBuffer>,
   ) => void;
-  /** The PCM of an FLV window ended. A failed audio process disables the cue. */
+  /**
+   * The PCM of an FLV window ended. A failed audio process turns the cue off for a time
+   * (ADR 064).
+   */
   readonly onPcmEnd?: (end: WindowEnd) => void;
   /**
    * An append brought the video at `mediaTime`, the target of a seek that began with no video
