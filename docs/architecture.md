@@ -89,6 +89,7 @@ document summarizes them and shows how the parts fit together.
 | [`065-give-a-segment-a-name.md`](../.agents/decisions/065-give-a-segment-a-name.md)                                                                                     | A segment can have a name of one line, set in a dialog with `F2`                   |
 | [`066-change-the-export-order-in-a-dialog.md`](../.agents/decisions/066-change-the-export-order-in-a-dialog.md)                                                         | A dialog lists the segments of the export, and the user puts them in a new order   |
 | [`068-write-no-chapter-of-a-source-into-an-export.md`](../.agents/decisions/068-write-no-chapter-of-a-source-into-an-export.md)                                         | Each command that writes the output file has `-map_chapters -1`                    |
+| [`069-export-one-frame-as-an-image.md`](../.agents/decisions/069-export-one-frame-as-an-image.md)                                                                       | Export Frame saves the frame that Mark In would mark as a PNG file                 |
 
 ## Shape
 
@@ -475,6 +476,13 @@ expected count, and it reports a mismatch instead of writing an incorrect cut.
 Version 1 writes constant-frame-rate output. Output frame-rate conversion, scaling, codec
 conversion, and audio resampling belong only to this render layer. They never change stored
 source edit points.
+
+The Export Frame action saves one frame of the source as a PNG file (ADR 069). Its key is
+`Cmd+Shift+S` or `Ctrl+Shift+S`. The frame is the first frame of the segment that a Mark In at
+that moment would start, at the display size of the source. The action is not a run of the
+export queue. A command of its own decodes the frame with one FFmpeg process, reads the result
+with ffprobe, and renames it onto the destination. An exit of the application cancels that
+command and waits for it within the budget of ADR 017.
 
 ## ffmpeg lifecycle
 

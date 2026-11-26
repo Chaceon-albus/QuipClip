@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066, ADR 069
 
 ## Context
 
@@ -283,6 +283,11 @@ selected segments. Its command opens a dialog after the menu closes.
 macOS and `Ctrl+Shift+E` on Windows (ADR 066). It opens the Export Order dialog while the export
 has two or more segments. The menu of a segment gets no item for it, because the action is not
 on one segment or on a selection.
+
+(Changed on 2026-11-26.) The key table gains the row Export Frame, with the key `Cmd+Shift+S` on
+macOS and `Ctrl+Shift+S` on Windows (ADR 069). It saves the frame that Mark In would mark as a
+PNG file. The menu of a segment gets no item for it, because the action is at the playhead.
+`Cmd+S` and `Ctrl+S` stay free for a later action that saves the project.
 
 The menu holds only actions whose operand is the segment. Mark In, Mark Out and Split act at
 the playhead, which a right-click does not move. Finish Segment clears the selection that the

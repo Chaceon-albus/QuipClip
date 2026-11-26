@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-06
 - Deciders: capric98
-- Amended by: ADR 027, ADR 043, ADR 046, ADR 049, ADR 050, ADR 055, ADR 056, ADR 059, ADR 061
+- Amended by: ADR 027, ADR 043, ADR 046, ADR 049, ADR 050, ADR 055, ADR 056, ADR 059, ADR 061,
+  ADR 069
 
 ## Context
 
@@ -73,6 +74,11 @@ which would need a second path to resume the exit.
 (Added on 2026-10-28.) The same handler kills the process of an audio envelope job (ADR 056). The
 job writes its cache file only at its end, with one atomic replace, so the handler gives it no
 part of the budget either.
+
+(Added on 2026-11-26.) The same handler cancels an Export Frame command that runs (ADR 069).
+That command writes a temporary file beside its destination. So the handler waits for it as it
+waits for an export, within the same budget: until its process ended and its temporary file is
+gone.
 
 (Added on 2026-11-05.) The same handler signals the cancel of the `ffmpeg` install of ADR 059,
 and it does not wait. The install writes into its `bin` directory only by a rename, so the
