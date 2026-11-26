@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066
 
 ## Context
 
@@ -278,6 +278,11 @@ its accelerator column. The labels come from the catalog.
 (ADR 065). The menu gains the item "Rename…" for it, between two separators, after Play Segment
 and before Delete Segment. The item shows `F2`. It is disabled for a request on several
 selected segments. Its command opens a dialog after the menu closes.
+
+(Changed on 2026-11-26.) The key table gains the row Export Order, with the key `Cmd+Shift+E` on
+macOS and `Ctrl+Shift+E` on Windows (ADR 066). It opens the Export Order dialog while the export
+has two or more segments. The menu of a segment gets no item for it, because the action is not
+on one segment or on a selection.
 
 The menu holds only actions whose operand is the segment. Mark In, Mark Out and Split act at
 the playhead, which a right-click does not move. Finish Segment clears the selection that the

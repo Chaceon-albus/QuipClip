@@ -87,6 +87,7 @@ document summarizes them and shows how the parts fit together.
 | [`063-calibrate-the-preview-again-after-a-calibration-that-failed.md`](../.agents/decisions/063-calibrate-the-preview-again-after-a-calibration-that-failed.md)         | An element that showed no first frame is replaced one time, and again on request   |
 | [`064-keep-the-frame-step-cue-after-a-failure.md`](../.agents/decisions/064-keep-the-frame-step-cue-after-a-failure.md)                                                 | The PCM cue turns on again 3 s after a failure, except after a changed file        |
 | [`065-give-a-segment-a-name.md`](../.agents/decisions/065-give-a-segment-a-name.md)                                                                                     | A segment can have a name of one line, set in a dialog with `F2`                   |
+| [`066-change-the-export-order-in-a-dialog.md`](../.agents/decisions/066-change-the-export-order-in-a-dialog.md)                                                         | A dialog lists the segments of the export, and the user puts them in a new order   |
 
 ## Shape
 
@@ -678,6 +679,14 @@ A segment can have a name of one line (ADR 065). Rename Segment (`F2`, or "Renam
 context menu of the segment) opens a dialog for it. The confirm adds one edit when the name
 changes. A split gives the name to its two halves. The tooltip and the accessible name of the
 segment show the name after the number, and the bar shows it when it has room.
+
+The user changes the export order in the Export Order dialog (ADR 066). It opens from the
+segment summary in the gutter of the track row, and from `Cmd+Shift+E` or `Ctrl+Shift+E`. The
+dialog lists the segments of the export: the segments that a request for an export would take
+at that moment, from one function that the request, the dialog, the summary and the numbers of
+the bars all use. The user drags a row, moves it with `Alt` and an arrow key, or sorts the rows
+by their place on the timeline. The confirm writes the new order into the segment array as one
+edit.
 
 On the first frame of a clip, Mark Out stores the end of the clip before it, so each
 boundary has one form. When that clip has no `videoEndPts`, or when no clip comes before,

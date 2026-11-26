@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 030, ADR 045, ADR 052, ADR 056, ADR 065
+- Amended by: ADR 030, ADR 045, ADR 052, ADR 056, ADR 065, ADR 066
 
 ## Context
 
@@ -140,6 +140,11 @@ user just used.
 
 (Changed on 2026-11-26.) A segment can have a name (ADR 065). A split gives the name of the
 segment to its two halves.
+
+(Changed on 2026-11-26.) The user can change the export order in the Export Order dialog
+(ADR 066). The array is still the only source of that order, and nothing sorts it without a
+request of the user. The numbers `#N` count the segments of the export, as that record defines
+them.
 
 `currentSegmentId` restores through undo and redo only while the restored array still holds that
 segment and it belongs to the active source. That rule is keyed on the source alone and not on
