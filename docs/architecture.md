@@ -85,6 +85,7 @@ document summarizes them and shows how the parts fit together.
 | [`061-adjust-the-gain-of-an-export-by-its-true-peak.md`](../.agents/decisions/061-adjust-the-gain-of-an-export-by-its-true-peak.md)                                     | The Adjust switch measures an export and fills a gain for a true peak of -1 dBTP   |
 | [`062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md`](../.agents/decisions/062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md) | On macOS a native source plays its frame step cue through the PCM cue of ADR 046   |
 | [`063-calibrate-the-preview-again-after-a-calibration-that-failed.md`](../.agents/decisions/063-calibrate-the-preview-again-after-a-calibration-that-failed.md)         | An element that showed no first frame is replaced one time, and again on request   |
+| [`064-keep-the-frame-step-cue-after-a-failure.md`](../.agents/decisions/064-keep-the-frame-step-cue-after-a-failure.md)                                                 | The PCM cue turns on again 3 s after a failure, except after a changed file        |
 
 ## Shape
 
@@ -276,7 +277,9 @@ carries the same asset URL as the preview element. One controller in
 media. `seekNominal` starts a burst, and so does a scrub seek during a drag of the playhead
 (ADR 022). Every other playback action stops one, so a cue and the real playback never
 sound together. A `MediaSource` source has no such element: its cue plays PCM that FFmpeg decodes
-from each window, through Web Audio, with the same rules (ADR 046).
+from each window, through Web Audio, with the same rules (ADR 046). A failure that this cue
+sees turns it off for 3 seconds. The cue then starts again with no PCM. Only a file that
+changed after its import keeps the cue off (ADR 064).
 
 The controller stops the element when its media clock reaches one burst past the latest
 target. A timer is not correct, because the clock of Chrome can stand almost still for 300

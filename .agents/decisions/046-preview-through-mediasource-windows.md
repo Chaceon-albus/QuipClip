@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 014, ADR 017, ADR 019, ADR 022, ADR 026, ADR 028, ADR 039,
   ADR 043
-- Amended by: ADR 048, ADR 055, ADR 056, ADR 057, ADR 058, ADR 062
+- Amended by: ADR 048, ADR 055, ADR 056, ADR 057, ADR 058, ADR 062, ADR 064
 
 ## Context
 
@@ -649,6 +649,12 @@ its own position instead: the start sample of the burst plus the time since its 
 clock check. A request whose PCM has not arrived waits for it for the watchdog time of ADR 019:
 one burst plus 1 s. Then the cue drops it. A failed audio process never stops the video
 window. It disables the cue for that source.
+
+(Changed on 2026-11-25.) A failure that the cue sees now turns it off for 3 seconds (ADR 064).
+The cue discards its PCM, as before. After the 3 seconds, a cue of the audio lane opens a
+window at its next request for PCM. The cue of an FLV plays again when it gets the PCM of a
+video window that it did not discard. A rejected open with the code `sourceChanged` still
+turns the cue off until its owner replaces it.
 
 (Changed on 2026-11-24.) On macOS, a native source also plays its cue through this cue (ADR 062).
 Its PCM windows are windows of the audio lane with the container value `native`. The backend

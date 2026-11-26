@@ -4,6 +4,7 @@
 - Date: 2026-11-24
 - Deciders: capric98
 - Amends: ADR 019, ADR 046
+- Amended by: ADR 064
 
 ## Context
 
@@ -119,7 +120,9 @@ ADR 046. Windows keeps the hidden element of ADR 019.
 - A failed PCM window disables the cue for that source, as in ADR 046. Examples are a file that
   changed after its import (ADR 058) and an FFmpeg that QuipClip no longer finds. The element
   cue does not come back for that source. On macOS that element makes no sound for a single
-  step, so a return to it gives little.
+  step, so a return to it gives little. (Changed on 2026-11-25.) A failed PCM window now turns
+  the cue off for 3 seconds (ADR 064). A rejected open with the code `sourceChanged` still
+  turns it off until its owner replaces it.
 - The cue plays the first audio stream of the file (`0:a:0`). The element plays the stream that
   WebKit chooses. Both are the same stream in a file with one audio stream.
 - The change has no measurement in the real application yet. A measurement of a single step
