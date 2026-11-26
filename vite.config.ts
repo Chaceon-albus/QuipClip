@@ -51,9 +51,9 @@ export default defineConfig(async () => ({
     // Tauri loads the bundle from the application, not over a network, so the 500 kB
     // web default does not apply and code splitting saves no download time. The limit
     // stays as an alarm for an unexpected size increase, set about 40 percent above the
-    // current entry chunk. When the warning fires, find what grew before you raise the
-    // limit again.
-    chunkSizeWarningLimit: 1200,
+    // entry chunk of 2026-11-26, which was 1,216 kB (ADR 032). When the warning fires, find
+    // what grew before you raise the limit again.
+    chunkSizeWarningLimit: 1700,
   },
 
   test: {

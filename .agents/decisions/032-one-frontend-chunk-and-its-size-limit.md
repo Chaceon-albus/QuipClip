@@ -1,4 +1,4 @@
-# 032. Keep the frontend in one chunk, and warn above 1200 kB
+# 032. Keep the frontend in one chunk, and warn above a size limit
 
 - Status: Accepted
 - Date: 2026-09-24
@@ -31,12 +31,28 @@ Vite gives three ways to remove the warning:
 ## Decision
 
 Keep the frontend in one entry chunk. Set `build.chunkSizeWarningLimit` in `vite.config.ts`
-to 1200 kB. That is about 40 percent above the entry chunk of 2026-09-24.
+about 40 percent above the entry chunk. On 2026-09-24 that rule gave a limit of 1200 kB. The
+dated notes below give each later limit.
 
 The limit is an alarm for an unexpected size increase, such as an import that pulls in a
 full icon set. When the warning shows, find the part that grew before you raise the limit.
 
 (Changed on 2026-10-02.) The Settings window loads the same chunk and renders its own root, chosen by the label of the window (ADR 038).
+
+(Changed on 2026-11-26.) The limit is now 1700 kB. The entry chunk was 1,199 kB, and the Export
+Order dialog of ADR 066 takes it to 1,216 kB, so the warning showed again. A measurement from
+the source map of that build gave these parts:
+
+- About 720 kB is application code. On 2026-09-24 it was about 413 kB. The largest parts are the
+  timeline components (103 kB), the Settings components (85 kB), the two message catalogs
+  (80 kB) and the layout components (78 kB).
+- About 494 kB is dependencies. `react-dom` is still the largest, at about 207 kB, and then
+  `i18next` at about 50 kB. No dependency is larger than expected.
+
+In two months the application code grew by about 307 kB, and the dependencies by about 71 kB.
+No part is an unexpected import. The frontend stays in one chunk, because Tauri loads it from
+the application. The new limit is about 40 percent above the chunk of 1,216 kB, by the rule of
+this record.
 
 ## Consequences
 
