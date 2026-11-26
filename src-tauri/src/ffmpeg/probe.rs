@@ -111,6 +111,33 @@ pub struct MediaProbe {
     /// project.
     pub video_end_pts: Option<Pts>,
     pub audio: Option<AudioProbe>,
+    /// Every audio stream of the file, in the order of the file (ADR 070). `audio` is one of
+    /// them, chosen by its own rule. A file with no audio has an empty list.
+    ///
+    /// The default lets a probe that was serialized without the list read back as one with no
+    /// listed streams.
+    #[serde(default)]
+    pub audio_streams: Vec<ListedAudioStream>,
+}
+
+/// The facts of one audio stream that the import lists (ADR 070), so the page can name a stream
+/// other than the preferred one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedAudioStream {
+    /// The absolute stream index, as ffprobe reported it. FFmpeg maps the stream as `0:<index>`.
+    pub index: u32,
+    pub codec: Option<String>,
+    /// The sample rate in hertz, or `None` when ffprobe reports none or `0`.
+    pub sample_rate: Option<u32>,
+    /// The channel count, or `None` when ffprobe reports none or `0`.
+    pub channels: Option<u32>,
+    /// True when the stream carries the `default` disposition.
+    pub default: bool,
+    /// The `language` tag, or `None` when the stream has none.
+    pub language: Option<String>,
+    /// The `title` tag, or `None` when the stream has none.
+    pub title: Option<String>,
 }
 
 /// Basic facts about the preferred audio stream, when one exists.
@@ -2095,6 +2122,84 @@ struct RawStreamTags {
     /// The clockwise rotation that FFmpeg before version 5 reported for an MP4 with a display
     /// matrix, in degrees.
     rotate: Option<String>,
+    /// The tags that the fields above do not take. Only `language` and `title` are kept.
+    #[serde(flatten)]
+    names: NameTags,
+}
+
+/// The `language` and `title` tags of a stream (ADR 070). ffprobe writes a tag in the letter case
+/// of the container, so a Matroska track can carry `TITLE` or `LANGUAGE`. Both keys are read
+/// without regard to letter case.
+#[derive(Default)]
+struct NameTags {
+    language: CaseFreeTag,
+    title: CaseFreeTag,
+}
+
+/// One tag that can occur in several letter cases.
+#[derive(Default)]
+struct CaseFreeTag {
+    /// The text of the key in lower case.
+    lower: Option<String>,
+    /// The text of the first key in another case.
+    other: Option<String>,
+}
+
+impl CaseFreeTag {
+    /// Take the text of `key`, which is the name of this tag in some letter case. A text that is
+    /// blank or not a string counts as no tag.
+    fn offer(&mut self, key: &str, lower_name: &str, value: &Value) {
+        let Some(text) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return;
+        };
+        let slot = if key == lower_name {
+            &mut self.lower
+        } else {
+            &mut self.other
+        };
+        slot.get_or_insert_with(|| text.to_owned());
+    }
+
+    /// The text of the key in lower case, else the text of the first key in another case.
+    fn text(&self) -> Option<&str> {
+        self.lower.as_deref().or(self.other.as_deref())
+    }
+}
+
+impl<'de> Deserialize<'de> for NameTags {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+
+        impl<'de> serde::de::Visitor<'de> for Entries {
+            type Value = NameTags;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("the tags of a stream")
+            }
+
+            // The entries arrive in the order of the answer, so "first" is the order of ffprobe.
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<NameTags, A::Error> {
+                let mut tags = NameTags::default();
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    if key.eq_ignore_ascii_case("language") {
+                        tags.language.offer(&key, "language", &value);
+                    } else if key.eq_ignore_ascii_case("title") {
+                        tags.title.offer(&key, "title", &value);
+                    }
+                }
+                Ok(tags)
+            }
+        }
+
+        deserializer.deserialize_map(Entries)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -2212,7 +2317,55 @@ fn normalize(raw: RawProbe) -> Result<MediaProbe, ProbeDataError> {
         // The first run reads no packet at the end. `probe_media` and the FLV correction set it.
         video_end_pts: None,
         audio: audio.map(normalize_audio).transpose()?,
+        audio_streams: list_audio_streams(&raw.streams),
     })
+}
+
+/// Every audio stream of `streams`, in their order (ADR 070).
+///
+/// Nothing here fails the probe. Before the list existed, the import read only the preferred
+/// stream, and [`normalize_audio`] still checks that one. A field of another stream that does not
+/// parse must not refuse a file that imported before, so it reads as unknown. A stream with no
+/// valid index cannot be mapped, so the list leaves it out.
+fn list_audio_streams(streams: &[RawStream]) -> Vec<ListedAudioStream> {
+    let positive = |value: Option<i128>| {
+        value
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .filter_map(|stream| {
+            let index = stream
+                .index
+                .as_ref()
+                .and_then(|value| json_integer(value, "streams.audio.index").ok())
+                .and_then(|value| u32::try_from(value).ok())?;
+            Some(ListedAudioStream {
+                index,
+                codec: stream.codec_name.clone(),
+                sample_rate: positive(
+                    parse_optional_text_i64(
+                        stream.sample_rate.as_deref(),
+                        "streams.audio.sample_rate",
+                    )
+                    .ok()
+                    .flatten()
+                    .map(i128::from),
+                ),
+                channels: positive(
+                    stream
+                        .channels
+                        .as_ref()
+                        .and_then(|value| json_integer(value, "streams.audio.channels").ok()),
+                ),
+                default: stream.disposition.default != 0,
+                language: stream.tags.names.language.text().map(str::to_owned),
+                title: stream.tags.names.title.text().map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 fn preferred_stream<'a, F>(
@@ -3244,6 +3397,231 @@ mod tests {
         });
         let probe = parse_value(value).unwrap();
         assert_eq!(probe.audio.unwrap().index, 1);
+    }
+
+    #[test]
+    fn a_file_with_no_audio_lists_no_audio_stream() {
+        let probe = parse_value(base_probe()).unwrap();
+        assert_eq!(probe.audio, None);
+        assert!(probe.audio_streams.is_empty());
+    }
+
+    #[test]
+    fn a_file_with_one_audio_stream_lists_that_stream() {
+        let mut value = base_probe();
+        value["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "index": 3, "codec_type": "audio", "codec_name": "aac", "sample_rate": "48000",
+                "channels": 2, "disposition": {"default": 0, "attached_pic": 0}
+            }));
+        let probe = parse_value(value).unwrap();
+        assert_eq!(
+            probe.audio_streams,
+            vec![ListedAudioStream {
+                index: 3,
+                codec: Some("aac".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                default: false,
+                language: None,
+                title: None,
+            }]
+        );
+        assert_eq!(probe.audio.unwrap().index, 3);
+    }
+
+    #[test]
+    fn the_list_holds_every_audio_stream_in_file_order_and_the_preferred_one_does_not_change() {
+        // The default-disposition stream is the second audio stream, so the preferred stream is
+        // stream 3, and the list still starts with stream 1 (ADR 070).
+        let value = serde_json::json!({
+            "streams": [
+                {
+                    "index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920,
+                    "height": 1080, "time_base": "1/1000",
+                    "disposition": {"default": 1, "attached_pic": 0}
+                },
+                {
+                    "index": 1, "codec_type": "audio", "codec_name": "aac",
+                    "sample_rate": "48000", "channels": 2,
+                    "disposition": {"default": 0, "attached_pic": 0},
+                    "tags": {"language": "eng", "title": "Desktop"}
+                },
+                {
+                    "index": 2, "codec_type": "subtitle", "codec_name": "ass",
+                    "disposition": {"default": 0, "attached_pic": 0}
+                },
+                {
+                    "index": 3, "codec_type": "audio", "codec_name": "opus",
+                    "sample_rate": "48000", "channels": 1,
+                    "disposition": {"default": 1, "attached_pic": 0},
+                    "tags": {"title": "Microphone"}
+                },
+                {
+                    "index": 4, "codec_type": "audio", "codec_name": "ac3",
+                    "sample_rate": "0", "disposition": {"default": 0, "attached_pic": 0},
+                    "tags": {"language": " jpn ", "title": "  "}
+                }
+            ],
+            "format": {"format_name": "matroska,webm"}
+        });
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.audio.as_ref().unwrap().index, 3);
+        assert_eq!(
+            probe.audio_streams,
+            vec![
+                ListedAudioStream {
+                    index: 1,
+                    codec: Some("aac".to_owned()),
+                    sample_rate: Some(48_000),
+                    channels: Some(2),
+                    default: false,
+                    language: Some("eng".to_owned()),
+                    title: Some("Desktop".to_owned()),
+                },
+                ListedAudioStream {
+                    index: 3,
+                    codec: Some("opus".to_owned()),
+                    sample_rate: Some(48_000),
+                    channels: Some(1),
+                    default: true,
+                    language: None,
+                    title: Some("Microphone".to_owned()),
+                },
+                // A rate of 0 and no channel count read as unknown, and a blank tag as none.
+                ListedAudioStream {
+                    index: 4,
+                    codec: Some("ac3".to_owned()),
+                    sample_rate: None,
+                    channels: None,
+                    default: false,
+                    language: Some("jpn".to_owned()),
+                    title: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_field_of_a_stream_that_is_not_preferred_does_not_fail_the_probe() {
+        let mut value = base_probe();
+        let streams = value["streams"].as_array_mut().unwrap();
+        streams.push(serde_json::json!({
+            "index": 3, "codec_type": "audio", "codec_name": "aac", "sample_rate": "48000",
+            "channels": 2, "disposition": {"default": 1, "attached_pic": 0}
+        }));
+        streams.push(serde_json::json!({
+            "index": 4, "codec_type": "audio", "codec_name": "mp3", "sample_rate": "fast",
+            "channels": "many", "disposition": {"default": 0, "attached_pic": 0}
+        }));
+        // A stream with no index cannot be mapped, so the list leaves it out.
+        streams.push(serde_json::json!({
+            "codec_type": "audio", "codec_name": "flac",
+            "disposition": {"default": 0, "attached_pic": 0}
+        }));
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.audio.unwrap().index, 3);
+        let listed: Vec<_> = probe
+            .audio_streams
+            .iter()
+            .map(|stream| (stream.index, stream.sample_rate, stream.channels))
+            .collect();
+        assert_eq!(listed, vec![(3, Some(48_000), Some(2)), (4, None, None)]);
+    }
+
+    /// The language and the title that the list reads from an audio stream whose tags are the
+    /// JSON text `tags`. The text goes to the parse as it is, so its keys keep their order, as
+    /// in an answer of ffprobe. A `Value` would sort them.
+    fn listed_names(tags: &str) -> (Option<String>, Option<String>) {
+        let video = &base_probe()["streams"][0];
+        let json = format!(
+            r#"{{"streams": [{video}, {{"index": 3, "codec_type": "audio", "codec_name": "aac",
+            "disposition": {{"default": 1, "attached_pic": 0}}, "tags": {tags}}}],
+            "format": {{"format_name": "matroska,webm"}}}}"#
+        );
+        let stream = parse_probe_json(json.as_bytes())
+            .unwrap()
+            .audio_streams
+            .remove(0);
+        (stream.language, stream.title)
+    }
+
+    #[test]
+    fn the_list_reads_language_and_title_tags_in_upper_case() {
+        // ffprobe writes the tags of a Matroska track in the case of the file, as `TITLE`.
+        assert_eq!(
+            listed_names(r#"{"LANGUAGE": "jpn", "TITLE": "Microphone"}"#),
+            (Some("jpn".to_owned()), Some("Microphone".to_owned()))
+        );
+        assert_eq!(
+            listed_names(r#"{"Language": "ger", "Title": "Desktop"}"#),
+            (Some("ger".to_owned()), Some("Desktop".to_owned()))
+        );
+        // The other tags still read as before.
+        let mut value = base_probe();
+        value["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "index": 3, "codec_type": "audio", "codec_name": "aac",
+                "start_pts": 0, "time_base": "1/1000",
+                "disposition": {"default": 1, "attached_pic": 0},
+                "tags": {"DURATION": "00:00:05.000000000", "TITLE": "Microphone"}
+            }));
+        let probe = parse_value(value).unwrap();
+        assert_eq!(probe.audio.unwrap().duration, Rational::new(5, 1));
+        assert_eq!(probe.audio_streams[0].title.as_deref(), Some("Microphone"));
+    }
+
+    #[test]
+    fn a_tag_in_several_cases_reads_the_lower_case_key_else_the_first_that_is_not_blank() {
+        // The lower-case key wins wherever it stands.
+        assert_eq!(
+            listed_names(
+                r#"{"TITLE": "Upper", "title": "Lower", "Title": "Mixed",
+                "LANGUAGE": "eng", "language": "jpn"}"#
+            ),
+            (Some("jpn".to_owned()), Some("Lower".to_owned()))
+        );
+        // A blank or non-text key counts as no tag, and of the others the first one wins.
+        assert_eq!(
+            listed_names(
+                r#"{"title": "  ", "TITLE": "", "Title": "Mixed", "TiTlE": "Later",
+                "language": 7, "LANGUAGE": "eng"}"#
+            ),
+            (Some("eng".to_owned()), Some("Mixed".to_owned()))
+        );
+        assert_eq!(
+            listed_names(r#"{"TiTlE": "Later", "Title": "Mixed"}"#),
+            (None, Some("Later".to_owned()))
+        );
+        assert_eq!(
+            listed_names(r#"{"title": " ", "TITLE": " "}"#),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn the_list_goes_to_the_page_in_camel_case() {
+        let mut value = base_probe();
+        value["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "index": 3, "codec_type": "audio", "codec_name": "aac", "sample_rate": "44100",
+                "channels": 2, "disposition": {"default": 1, "attached_pic": 0},
+                "tags": {"language": "eng"}
+            }));
+        let json = serde_json::to_value(parse_value(value).unwrap()).unwrap();
+        assert_eq!(
+            json["audioStreams"],
+            serde_json::json!([{
+                "index": 3, "codec": "aac", "sampleRate": 44100, "channels": 2,
+                "default": true, "language": "eng", "title": null
+            }])
+        );
     }
 
     #[test]

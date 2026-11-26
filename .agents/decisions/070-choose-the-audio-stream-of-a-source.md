@@ -37,8 +37,9 @@ behave as before.
 
 The probe keeps a list of all the audio streams of a file, in the order of the file. For each
 one it keeps the absolute index, the codec, the sample rate, the channel count, the `default`
-disposition, and the `language` and `title` tags when the stream has them. The preferred stream
-stays as it is, by the same rule.
+disposition, and the `language` and `title` tags when the stream has them. It reads those two
+tags in each letter case, because some Matroska files have them in upper case. The preferred
+stream stays as it is, by the same rule.
 
 ### The override and the effective stream
 
@@ -102,7 +103,9 @@ job. The entries on disk stay under their keys.
 For a source that is not an FLV, the request of a window names the effective stream, and FFmpeg
 maps it by its absolute index, not `0:a:0`. The page decides between a copy and a transcode of
 the audio from the codec of that stream, with the checks of ADR 046. An FLV has one audio
-stream for QuipClip, and its inputs keep the mapping `0:a:0`.
+stream for QuipClip, and its inputs keep the mapping `0:a:0`. The backend refuses a request
+that reads audio of a source that is not an FLV and names no stream. It does not probe the file
+again for each window. The revision of the source binds the index to the file (ADR 058).
 
 - **A `MediaSource` source.** A change of the effective stream replaces the preview element
   through the reload of ADR 039, with no stall, as a recalibration does (ADR 063). The new
@@ -128,6 +131,11 @@ stream only where the PCM cue is active.
   the preview through a MediaSource and the PCM cue now use the preferred stream, with no action
   of the user. Before, they used the first stream, with the codec decision of the preferred one.
   The sound of such a preview can change, appear or go.
+- FFmpeg writes an MP4 header that is not valid for a window that copies an AC-3 stream with no
+  packet in that window. The preview then shows the decode failure panel. This was so before
+  for the first audio stream of a file. It is now so for the effective stream. A file whose
+  preferred stream is such a stream, and is not its first audio stream, can thus lose a
+  preview that it had.
 - For a native source with several audio streams, the sound of the playback can differ from the
   sound of the export, the envelope and the PCM cue, as it could before. The note says so. A
   later record can set the audio track of the element, after a test of the two web views.

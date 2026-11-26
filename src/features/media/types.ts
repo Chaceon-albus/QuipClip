@@ -98,6 +98,26 @@ export type AudioProbe = {
   channels: number | null;
 };
 
+/**
+ * One audio stream of a file, as the import lists it (ADR 070).
+ */
+export type ListedAudioStream = {
+  /** The absolute stream index (0..=4_294_967_295). FFmpeg maps the stream by it. */
+  index: number;
+  /** Audio codec name, or null if unspecified. */
+  codec: string | null;
+  /** Audio sampling rate in Hertz (1..=4_294_967_295), or null if unspecified. */
+  sampleRate: number | null;
+  /** Number of audio channels (1..=4_294_967_295), or null if unspecified. */
+  channels: number | null;
+  /** True when the stream carries the `default` disposition. */
+  default: boolean;
+  /** The `language` tag of the stream, or null when it has none. */
+  language: string | null;
+  /** The `title` tag of the stream, or null when it has none. */
+  title: string | null;
+};
+
 /** The quarter turns that `MediaProbe.rotation` can hold. */
 export const VIDEO_ROTATIONS = [0, 90, 180, 270] as const;
 
@@ -162,8 +182,18 @@ export type MediaProbe = {
    * than `videoStartPts`.
    */
   videoEndPts: Pts | null;
-  /** Audio stream metadata, or null if the media file has no audio. */
+  /**
+   * The preferred audio stream: the first one with the `default` disposition, or the first audio
+   * stream when none has it. Null if the media file has no audio.
+   */
   audio: AudioProbe | null;
+  /**
+   * Every audio stream of the file, in the order of the file (ADR 070). `audio` is one of them,
+   * and the list is empty when `audio` is null. The import always carries the list, and
+   * `isMediaProbe` refuses a probe without it. It is optional here, as `formatStartTime` is, so a
+   * probe that a test builds can leave it out.
+   */
+  audioStreams?: ListedAudioStream[];
 };
 
 /**

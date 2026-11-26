@@ -20,6 +20,7 @@ import {
   type BackendImportMediaErrorCode,
   type ImportMediaErrorCode,
   type ImportMediaResult,
+  type ListedAudioStream,
   type MediaProbe,
   type VideoRotation,
 } from "./types";
@@ -181,6 +182,49 @@ export function isAudioProbe(value: unknown): value is AudioProbe {
 }
 
 /**
+ * Validates one entry of the list of audio streams of a probe (ADR 070).
+ */
+export function isListedAudioStream(value: unknown): value is ListedAudioStream {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const {
+    index,
+    codec,
+    sampleRate,
+    channels,
+    default: isDefault,
+    language,
+    title,
+  } = value as Record<string, unknown>;
+  return (
+    isNonNegativeU32(index) &&
+    (codec === null || typeof codec === "string") &&
+    (sampleRate === null || isPositiveU32(sampleRate)) &&
+    (channels === null || isPositiveU32(channels)) &&
+    typeof isDefault === "boolean" &&
+    (language === null || typeof language === "string") &&
+    (title === null || typeof title === "string")
+  );
+}
+
+/**
+ * Validates the list of audio streams of a probe against its preferred stream `audio`: each
+ * entry is valid, no index occurs twice, and the list holds the preferred stream, or is empty
+ * when there is none.
+ */
+function isAudioStreamList(value: unknown, audio: AudioProbe | null): boolean {
+  if (!Array.isArray(value) || !value.every(isListedAudioStream)) {
+    return false;
+  }
+  const indexes = new Set(value.map((stream) => stream.index));
+  if (indexes.size !== value.length) {
+    return false;
+  }
+  return audio === null ? value.length === 0 : indexes.has(audio.index);
+}
+
+/**
  * Validates whether a value is one of the clockwise quarter turns 0, 90, 180 and 270.
  */
 export function isVideoRotation(value: unknown): value is VideoRotation {
@@ -272,6 +316,9 @@ export function isMediaProbe(value: unknown): value is MediaProbe {
     return false;
   }
   if (p.audio !== null && !isAudioProbe(p.audio)) {
+    return false;
+  }
+  if (!isAudioStreamList(p.audioStreams, p.audio)) {
     return false;
   }
   return true;

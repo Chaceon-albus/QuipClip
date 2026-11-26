@@ -779,6 +779,7 @@ mod tests {
             rotation: 0,
             video_end_pts: None,
             audio: None,
+            audio_streams: Vec::new(),
         }
     }
 

@@ -3,6 +3,10 @@
 //! A remux window writes fragmented MP4 with `-c copy` and keeps the absolute source timestamps,
 //! so the page can play it through a MediaSource with a known calibration. The PCM process
 //! decodes the audio of the same window for the scrub cue.
+//!
+//! A window of a source that is not an FLV maps its audio stream by the absolute index that the
+//! request names (ADR 070). The input of an FLV window holds the tags that Rust writes, with one
+//! audio stream, so it maps the first audio stream of that input.
 
 use std::path::Path;
 
@@ -54,10 +58,18 @@ fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
 
-fn push_maps(arguments: &mut Vec<String>, audio: AudioMode) {
+/// The map of the audio of an FLV window: the first audio stream of its input.
+const FLV_AUDIO_MAP: &str = "0:a:0";
+
+/// The map of the audio stream with the absolute index `index` (ADR 070, ADR 014).
+fn stream_map(index: u32) -> String {
+    format!("0:{index}")
+}
+
+fn push_maps(arguments: &mut Vec<String>, audio: AudioMode, audio_map: Option<&str>) {
     arguments.extend(strings(&["-map", "0:v:0"]));
-    if audio != AudioMode::Omit {
-        arguments.extend(strings(&["-map", "0:a:0"]));
+    if let Some(map) = audio_map.filter(|_| audio != AudioMode::Omit) {
+        arguments.extend(["-map".to_owned(), map.to_owned()]);
     }
 }
 
@@ -91,7 +103,7 @@ pub fn flv_remux_arguments(audio: AudioMode) -> Vec<String> {
         "-i",
         "pipe:0",
     ]);
-    push_maps(&mut arguments, audio);
+    push_maps(&mut arguments, audio, Some(FLV_AUDIO_MAP));
     push_codecs(&mut arguments, audio, false);
     arguments.extend(strings(MP4_OUTPUT));
     arguments.push("pipe:1".to_owned());
@@ -102,18 +114,30 @@ pub fn flv_remux_arguments(audio: AudioMode) -> Vec<String> {
 /// the container start (ADR 014 measurement 8), and `None` reads from the start of the file.
 /// `length` limits what the input reads. It must stay an input option, before `-i`: an output
 /// `-t` with `-copyts` is compared with the absolute timestamps and writes nothing (ADR 046
-/// measurement 6). `aac` says that the audio stream is AAC.
+/// measurement 6). `audio_stream` is the absolute index of the audio stream that the window maps
+/// (ADR 070). A window with no stream maps no audio, as an `Omit` window. `aac` says that the
+/// audio stream is AAC.
 pub fn seek_remux_arguments(
     path: &Path,
     container: SeekContainer,
     seek: Option<f64>,
     length: f64,
     audio: AudioMode,
+    audio_stream: Option<u32>,
     aac: bool,
 ) -> Vec<String> {
+    let audio = if audio_stream.is_some() {
+        audio
+    } else {
+        AudioMode::Omit
+    };
     let mut arguments = strings(&["-hide_banner", "-loglevel", "error", "-nostdin", "-copyts"]);
     push_seek(&mut arguments, seek, length, path);
-    push_maps(&mut arguments, audio);
+    push_maps(
+        &mut arguments,
+        audio,
+        audio_stream.map(stream_map).as_deref(),
+    );
     push_codecs(
         &mut arguments,
         audio,
@@ -149,8 +173,8 @@ fn pcm_filter(start_samples: i64) -> String {
     format!("aresample={PCM_SAMPLE_RATE},aresample=async=1:first_pts={start_samples}")
 }
 
-fn push_pcm_output(arguments: &mut Vec<String>, start_samples: i64) {
-    arguments.extend(strings(&["-map", "0:a:0", "-af"]));
+fn push_pcm_output(arguments: &mut Vec<String>, audio_map: &str, start_samples: i64) {
+    arguments.extend(["-map".to_owned(), audio_map.to_owned(), "-af".to_owned()]);
     arguments.push(pcm_filter(start_samples));
     arguments.extend(strings(&["-f", "s16le", "-ac", "1", "pipe:1"]));
 }
@@ -168,22 +192,28 @@ pub fn flv_pcm_arguments(start_ms: i64) -> Vec<String> {
         "-i",
         "pipe:0",
     ]);
-    push_pcm_output(&mut arguments, start_ms * i64::from(PCM_SAMPLE_RATE / 1000));
+    push_pcm_output(
+        &mut arguments,
+        FLV_AUDIO_MAP,
+        start_ms * i64::from(PCM_SAMPLE_RATE / 1000),
+    );
     arguments
 }
 
 /// The PCM window of a container that FFmpeg seeks in. `start_seconds` is the absolute time of
-/// sample 0: the container start plus the seek.
+/// sample 0: the container start plus the seek. `audio_stream` is the absolute index of the audio
+/// stream that the window decodes (ADR 070).
 pub fn seek_pcm_arguments(
     path: &Path,
     seek: Option<f64>,
     length: f64,
     start_seconds: f64,
+    audio_stream: u32,
 ) -> Vec<String> {
     let mut arguments = strings(&["-hide_banner", "-loglevel", "error", "-nostdin", "-copyts"]);
     push_seek(&mut arguments, seek, length, path);
     let start_samples = (start_seconds * f64::from(PCM_SAMPLE_RATE)).round() as i64;
-    push_pcm_output(&mut arguments, start_samples);
+    push_pcm_output(&mut arguments, &stream_map(audio_stream), start_samples);
     arguments
 }
 
@@ -218,6 +248,7 @@ mod tests {
             Some(25.5),
             65.0,
             AudioMode::Copy,
+            Some(1),
             true,
         );
         let position = |flag: &str| arguments.iter().position(|a| a == flag).unwrap();
@@ -226,7 +257,7 @@ mod tests {
         assert_eq!(
             joined(&arguments),
             "-hide_banner -loglevel error -nostdin -copyts -ss 25.500000 -t 65.000000 \
-             -i /media/live.ts -map 0:v:0 -map 0:a:0 -bsf:a aac_adtstoasc -c copy -f mp4 \
+             -i /media/live.ts -map 0:v:0 -map 0:1 -bsf:a aac_adtstoasc -c copy -f mp4 \
              -movflags frag_keyframe+empty_moov+default_base_moof+frag_discont+delay_moov \
              -frag_duration 500000 -use_editlist 0 -avoid_negative_ts disabled pipe:1"
         );
@@ -241,6 +272,7 @@ mod tests {
             None,
             60.0,
             AudioMode::Copy,
+            Some(1),
             true,
         ));
         assert!(!matroska.contains("aac_adtstoasc"));
@@ -252,6 +284,7 @@ mod tests {
             Some(10.0),
             60.0,
             AudioMode::Transcode,
+            Some(1),
             true,
         ));
         assert!(!transcoded.contains("aac_adtstoasc"));
@@ -263,6 +296,7 @@ mod tests {
             Some(10.0),
             60.0,
             AudioMode::Copy,
+            Some(1),
             false,
         ));
         assert!(!ac3.contains("aac_adtstoasc"));
@@ -276,10 +310,11 @@ mod tests {
             Some(0.0),
             60.0,
             AudioMode::Omit,
+            Some(1),
             false,
         );
         assert!(!arguments.iter().any(|a| a == "-ss"));
-        assert!(!arguments.iter().any(|a| a == "0:a:0"));
+        assert!(!arguments.iter().any(|a| a == "0:a:0" || a == "0:1"));
     }
 
     #[test]
@@ -294,8 +329,55 @@ mod tests {
             Some(20.0),
             25.0,
             1254.567,
+            1,
         ));
         assert!(seek.contains("-ss 20.000000 -t 25.000000 -i /media/a.mkv"));
         assert!(seek.contains("first_pts=60219216"));
+    }
+
+    #[test]
+    fn a_seek_window_maps_its_audio_stream_by_the_absolute_index() {
+        // The preferred stream of the file is its second audio stream, at index 3 (ADR 070).
+        let path = Path::new("/media/two-tracks.mkv");
+        for audio in [AudioMode::Copy, AudioMode::Transcode] {
+            let remux = seek_remux_arguments(
+                path,
+                SeekContainer::Matroska,
+                Some(10.0),
+                60.0,
+                audio,
+                Some(3),
+                false,
+            );
+            assert!(joined(&remux).contains("-i /media/two-tracks.mkv -map 0:v:0 -map 0:3 -c copy"));
+            assert!(!remux.iter().any(|a| a == "0:a:0"));
+        }
+        let pcm = seek_pcm_arguments(path, Some(10.0), 25.0, 10.0, 3);
+        assert!(joined(&pcm).contains("-i /media/two-tracks.mkv -map 0:3 -af aresample=48000"));
+        assert!(!pcm.iter().any(|a| a == "0:a:0"));
+    }
+
+    #[test]
+    fn a_seek_window_with_no_audio_stream_maps_no_audio() {
+        let remux = joined(&seek_remux_arguments(
+            Path::new("/media/a.ts"),
+            SeekContainer::MpegTs,
+            None,
+            60.0,
+            AudioMode::Copy,
+            None,
+            true,
+        ));
+        assert!(remux.contains("-map 0:v:0 -c copy -f mp4"));
+        assert!(!remux.contains("aac_adtstoasc"));
+        assert_eq!(remux.matches("-map").count(), 1);
+    }
+
+    #[test]
+    fn an_flv_window_keeps_the_first_audio_stream_of_its_input() {
+        for audio in [AudioMode::Copy, AudioMode::Transcode] {
+            assert!(joined(&flv_remux_arguments(audio)).contains("-map 0:v:0 -map 0:a:0 -c copy"));
+        }
+        assert!(joined(&flv_pcm_arguments(0)).contains("-i pipe:0 -map 0:a:0 -af"));
     }
 }

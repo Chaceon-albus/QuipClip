@@ -39,6 +39,7 @@ import type {
   WindowSession,
   WindowStart,
 } from "./windowClient";
+import { audioStreamField } from "./windowRequests";
 
 /** The media time that a window covers, as `WINDOW_MS` in Rust. */
 export const WINDOW_SECONDS = 60;
@@ -196,7 +197,13 @@ export interface MseSource {
   readonly durationSeconds: number;
   /** What the windows do with the audio, as the preview chose it. */
   readonly audio: WindowAudio;
+  /** The codec of the audio stream that the windows read (`previewAudioStreamOf`). */
   readonly audioCodec: string | null;
+  /**
+   * The absolute index of the audio stream that the windows read (`previewAudioStreamOf`), or
+   * null when the source has no audio. Only a source that is not an FLV sends it (ADR 070).
+   */
+  readonly audioStreamIndex: number | null;
   /** On FLV, decode the audio of each window to PCM for the scrub cue. */
   readonly pcm: boolean;
   /**
@@ -1015,6 +1022,7 @@ export function createMseController(
       : { marginSeconds: margin }),
     audio,
     audioCodec: source.audioCodec,
+    ...audioStreamField(source.container, source.audioStreamIndex),
     pcm: source.pcm && source.container === "flv" && audio !== "omit",
     rescanConfig: rescan,
   });

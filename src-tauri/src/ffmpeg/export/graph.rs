@@ -2123,6 +2123,7 @@ mod tests {
                 reported_packets: None,
                 holds_no_packets: false,
             }),
+            audio_streams: Vec::new(),
         };
         let preset = Preset {
             id: "preset-1".to_owned(),

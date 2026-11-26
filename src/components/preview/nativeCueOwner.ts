@@ -25,7 +25,10 @@ export interface NativeCueSource {
   readonly mtime: number;
   /** The container start time of the probe, for the input seek of a window. */
   readonly formatStartTime: Rational | null;
+  /** The codec of the audio stream that the windows decode (`previewAudioStreamOf`). */
   readonly audioCodec: string | null;
+  /** The absolute index of that stream, which the request of each window names (ADR 070). */
+  readonly audioStreamIndex: number;
 }
 
 /** What the owner needs to know of the open source. */

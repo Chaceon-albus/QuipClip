@@ -1824,6 +1824,7 @@ mod tests {
                 Some(5.0),
                 3.0,
                 AudioMode::Copy,
+                Some(1),
                 true,
             ),
             handle,
@@ -1837,8 +1838,15 @@ mod tests {
         assert_eq!(&bytes[4..8], b"ftyp");
     }
 
-    /// The PCM of a seek window from `start_seconds`, as `seek_pcm_arguments` makes it.
-    fn seek_pcm(ffmpeg: &Path, path: &Path, seek: Option<f64>, start_seconds: f64) -> Vec<i16> {
+    /// The PCM of the audio stream `stream` in a seek window from `start_seconds`, as
+    /// `seek_pcm_arguments` makes it.
+    fn seek_pcm(
+        ffmpeg: &Path,
+        path: &Path,
+        seek: Option<f64>,
+        start_seconds: f64,
+        stream: u32,
+    ) -> Vec<i16> {
         let handle = Arc::new(WindowHandle::new(
             1,
             Lane::Audio,
@@ -1848,7 +1856,7 @@ mod tests {
         *sink.handle.lock().unwrap() = Some(handle.clone());
         start_seek_window(
             ffmpeg,
-            &seek_pcm_arguments(path, seek, 10.0, start_seconds),
+            &seek_pcm_arguments(path, seek, 10.0, start_seconds, stream),
             handle,
             sink.clone(),
             Box::new(|| {}),
@@ -1910,14 +1918,294 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let whole = tone_onset(&seek_pcm(&ffmpeg, &mp4, None, 0.0), 0.0);
+        let whole = tone_onset(&seek_pcm(&ffmpeg, &mp4, None, 0.0, 1), 0.0);
         assert!((whole - 3.0).abs() < 0.005, "the tone starts at {whole}");
         for seek in [1.5, 2.9] {
-            let onset = tone_onset(&seek_pcm(&ffmpeg, &mp4, Some(seek), seek), seek);
+            let onset = tone_onset(&seek_pcm(&ffmpeg, &mp4, Some(seek), seek, 1), seek);
             assert!(
                 (onset - whole).abs() < 0.001,
                 "the window from {seek} places the tone at {onset}, not {whole}"
             );
         }
+    }
+
+    /// The frequency of a tone in PCM at [`PCM_SAMPLE_RATE`], from the rising zero crossings of
+    /// its second second.
+    fn tone_frequency(samples: &[i16]) -> f64 {
+        let rate = PCM_SAMPLE_RATE as usize;
+        let second = &samples[rate..2 * rate];
+        let rising = second
+            .windows(2)
+            .filter(|pair| pair[0] < 0 && pair[1] >= 0)
+            .count();
+        rising as f64
+    }
+
+    /// The ffprobe beside `ffmpeg`, or `None`, in which case the test does nothing.
+    fn ffprobe_beside(ffmpeg: &Path) -> Option<PathBuf> {
+        let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        ffprobe.is_file().then_some(ffprobe)
+    }
+
+    /// Write `path`, a 6 s Matroska file, from three inputs: 0 is H.264 video, 1 is a tone at
+    /// 440 Hz, and 2 is a tone at 1000 Hz. `layout` holds further inputs and the maps, codecs and
+    /// dispositions of the output.
+    fn write_tracks(ffmpeg: &Path, path: &Path, layout: &[String]) {
+        let status = command_without_console(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=48000",
+            ])
+            .args(layout)
+            .args([
+                "-t",
+                "6",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+            ])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// The audio streams of the probe of `path`, as (index, codec, default), and the index of its
+    /// preferred stream.
+    fn listed_streams(ffprobe: &Path, path: &Path) -> (Vec<(u32, String, bool)>, u32) {
+        let probe = crate::ffmpeg::probe::probe_media(ffprobe, path).unwrap();
+        let listed = probe
+            .audio_streams
+            .iter()
+            .map(|stream| {
+                (
+                    stream.index,
+                    stream.codec.clone().unwrap_or_default(),
+                    stream.default,
+                )
+            })
+            .collect();
+        (listed, probe.audio.unwrap().index)
+    }
+
+    /// Check that the remux window and the PCM window of `path` deliver the stream that they
+    /// name: the AC-3 stream at 1000 Hz at index `ac3`, and the AAC stream at 440 Hz at index
+    /// `aac` (ADR 070).
+    fn assert_windows_deliver_the_named_stream(ffmpeg: &Path, path: &Path, ac3: u32, aac: u32) {
+        let remux = |stream: u32| {
+            let handle = handle();
+            let sink = Recorder::new();
+            *sink.handle.lock().unwrap() = Some(handle.clone());
+            start_seek_window(
+                ffmpeg,
+                &seek_remux_arguments(
+                    path,
+                    SeekContainer::Matroska,
+                    Some(1.0),
+                    3.0,
+                    AudioMode::Copy,
+                    Some(stream),
+                    false,
+                ),
+                handle,
+                sink.clone(),
+                Box::new(|| {}),
+            )
+            .unwrap();
+            let end = sink.wait_end();
+            assert_eq!(end.status, EndStatus::Complete, "{:?}", end.detail);
+            let bytes = sink.bytes.lock().unwrap().clone();
+            // Only the moov is searched, so the bytes of a sample cannot match by chance.
+            let at = bytes.windows(4).position(|w| w == b"moov").unwrap() - 4;
+            let len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let moov = &bytes[at..at + len];
+            let count = |entry: &[u8]| moov.windows(entry.len()).filter(|w| *w == entry).count();
+            // One video track and one audio track: no other stream entered the window.
+            (count(b"ac-3") > 0, count(b"mp4a") > 0, count(b"trak"))
+        };
+        // The sample entry of the audio track names the codec of the stream that it copied.
+        assert_eq!(remux(ac3), (true, false, 2));
+        assert_eq!(remux(aac), (false, true, 2));
+
+        let tone = |stream: u32| tone_frequency(&seek_pcm(ffmpeg, path, None, 0.0, stream));
+        let ac3_tone = tone(ac3);
+        assert!(
+            (ac3_tone - 1000.0).abs() < 5.0,
+            "the PCM of stream {ac3} is a tone of {ac3_tone} Hz"
+        );
+        let aac_tone = tone(aac);
+        assert!(
+            (aac_tone - 440.0).abs() < 5.0,
+            "the PCM of stream {aac} is a tone of {aac_tone} Hz"
+        );
+    }
+
+    fn strings_of(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_windows_of_a_file_read_its_preferred_audio_stream_when_it_is_not_the_first() {
+        // A Matroska file with two audio streams: AAC at 440 Hz first, and AC-3 at 1000 Hz second
+        // with the `default` disposition. The probe prefers the second, and the remux window and
+        // the PCM window read it by its absolute index (ADR 070).
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let Some(ffprobe) = ffprobe_beside(&ffmpeg) else {
+            return;
+        };
+        let dir = TestDirectory::new();
+        let mkv = dir.path.join("two-tracks.mkv");
+        write_tracks(
+            &ffmpeg,
+            &mkv,
+            &strings_of(&[
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:a:0",
+                "aac",
+                "-c:a:1",
+                "ac3",
+                "-disposition:a:0",
+                "0",
+                "-disposition:a:1",
+                "default",
+                "-metadata:s:a:1",
+                "language=jpn",
+                "-metadata:s:a:1",
+                "title=Microphone",
+            ]),
+        );
+
+        let probe = crate::ffmpeg::probe::probe_media(&ffprobe, &mkv).unwrap();
+        let second = &probe.audio_streams[1];
+        assert_eq!(
+            (second.language.as_deref(), second.title.as_deref()),
+            (Some("jpn"), Some("Microphone"))
+        );
+        assert_eq!(
+            listed_streams(&ffprobe, &mkv),
+            (
+                vec![(1, "aac".to_owned(), false), (2, "ac3".to_owned(), true)],
+                2
+            )
+        );
+        assert_windows_deliver_the_named_stream(&ffmpeg, &mkv, 2, 1);
+    }
+
+    #[test]
+    fn the_windows_read_an_audio_stream_at_index_0_in_front_of_the_video() {
+        // AC-3 at index 0 with the `default` disposition, the video at 1, and AAC at 2.
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let Some(ffprobe) = ffprobe_beside(&ffmpeg) else {
+            return;
+        };
+        let dir = TestDirectory::new();
+        let mkv = dir.path.join("audio-first.mkv");
+        write_tracks(
+            &ffmpeg,
+            &mkv,
+            &strings_of(&[
+                "-map",
+                "2:a",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:a:0",
+                "ac3",
+                "-c:a:1",
+                "aac",
+                "-disposition:a:0",
+                "default",
+                "-disposition:a:1",
+                "0",
+            ]),
+        );
+        let probe = crate::ffmpeg::probe::probe_media(&ffprobe, &mkv).unwrap();
+        assert_eq!(probe.video_stream_index, 1);
+        assert_eq!(
+            listed_streams(&ffprobe, &mkv),
+            (
+                vec![(0, "ac3".to_owned(), true), (2, "aac".to_owned(), false)],
+                0
+            )
+        );
+        assert_windows_deliver_the_named_stream(&ffmpeg, &mkv, 0, 2);
+    }
+
+    #[test]
+    fn the_windows_read_an_audio_stream_after_a_subtitle_stream() {
+        // The video at 0, AAC at 1, a subtitle stream at 2, and AC-3 at 3 with the `default`
+        // disposition.
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let Some(ffprobe) = ffprobe_beside(&ffmpeg) else {
+            return;
+        };
+        let dir = TestDirectory::new();
+        let subtitles = dir.path.join("words.srt");
+        std::fs::write(&subtitles, "1\n00:00:00,500 --> 00:00:02,000\nWords\n\n").unwrap();
+        let mkv = dir.path.join("subtitle-between.mkv");
+        let mut layout = strings_of(&["-i"]);
+        layout.push(subtitles.to_string_lossy().into_owned());
+        layout.extend(strings_of(&[
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "3:s",
+            "-map",
+            "2:a",
+            "-c:a:0",
+            "aac",
+            "-c:a:1",
+            "ac3",
+            "-c:s",
+            "srt",
+            "-disposition:a:0",
+            "0",
+            "-disposition:a:1",
+            "default",
+        ]));
+        write_tracks(&ffmpeg, &mkv, &layout);
+        assert_eq!(
+            listed_streams(&ffprobe, &mkv),
+            (
+                vec![(1, "aac".to_owned(), false), (3, "ac3".to_owned(), true)],
+                3
+            )
+        );
+        assert_windows_deliver_the_named_stream(&ffmpeg, &mkv, 3, 1);
     }
 }

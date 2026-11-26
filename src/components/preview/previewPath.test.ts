@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
+import { previewAudioStreamOf } from "@/features/media";
 import type { Pts } from "@/types/project";
 import { choosePreviewPath, type PreviewPathProbe } from "./previewPath";
 
 const FLV: PreviewPathProbe = {
   formatNames: ["flv"],
   videoCodec: "h264",
-  audio: { index: 1, codec: "aac", sampleRate: 48000, channels: 2 },
   approximateDurationSeconds: 240.04,
   videoStartPts: "1234567" as Pts,
   videoTimeBase: { n: 1, d: 1000 },
 };
+
+/** The audio stream of the FLV that the windows read. */
+const AAC = { codec: "aac" };
 
 /** The answers of WKWebView in ADR 046 measurement 15. */
 function webKit(type: string): boolean {
@@ -21,6 +24,7 @@ describe("choosePreviewPath", () => {
     expect(
       choosePreviewPath({
         probe: FLV,
+        audioStream: AAC,
         fileName: "live.flv",
         platform: "macos",
         isTypeSupported: webKit,
@@ -37,10 +41,8 @@ describe("choosePreviewPath", () => {
   it("transcodes MP3 and audio that the web view refuses, and leaves out no audio", () => {
     const path = (codec: string | null, hasAudio = true) =>
       choosePreviewPath({
-        probe: {
-          ...FLV,
-          audio: hasAudio ? { index: 1, codec, sampleRate: 44100, channels: 2 } : null,
-        },
+        probe: FLV,
+        audioStream: hasAudio ? { codec } : null,
         fileName: "a.flv",
         platform: "macos",
         isTypeSupported: webKit,
@@ -61,6 +63,7 @@ describe("choosePreviewPath", () => {
     ) => {
       const chosen = choosePreviewPath({
         probe: { ...FLV, formatNames },
+        audioStream: AAC,
         fileName,
         platform,
         isTypeSupported: webKit,
@@ -82,6 +85,7 @@ describe("choosePreviewPath", () => {
     ) =>
       choosePreviewPath({
         probe: { ...FLV, ...probe },
+        audioStream: AAC,
         fileName: "a.flv",
         platform: "macos",
         isTypeSupported: supported,
@@ -103,10 +107,47 @@ describe("choosePreviewPath", () => {
     ).toBe("native");
   });
 
+  it("decides the audio from the stream that the windows read, not the first stream", () => {
+    // A Matroska file whose first audio stream is AAC and whose preferred stream is MP3: the
+    // windows map the preferred stream, so they transcode it (ADR 070).
+    const audioStreams = [
+      {
+        index: 1,
+        codec: "aac",
+        sampleRate: 48000,
+        channels: 2,
+        default: false,
+        language: null,
+        title: null,
+      },
+      {
+        index: 2,
+        codec: "mp3",
+        sampleRate: 44100,
+        channels: 2,
+        default: true,
+        language: null,
+        title: null,
+      },
+    ];
+    const audio = { index: 2, codec: "mp3", sampleRate: 44100, channels: 2 };
+    const probe = { ...FLV, formatNames: ["matroska", "webm"], audio, audioStreams };
+    expect(
+      choosePreviewPath({
+        probe,
+        audioStream: previewAudioStreamOf(probe),
+        fileName: "two-tracks.mkv",
+        platform: "macos",
+        isTypeSupported: webKit,
+      }),
+    ).toMatchObject({ kind: "mediaSource", audio: "transcode" });
+  });
+
   it("takes HEVC where the web view accepts it", () => {
     expect(
       choosePreviewPath({
         probe: { ...FLV, videoCodec: "hevc" },
+        audioStream: AAC,
         fileName: "a.flv",
         platform: "windows",
         isTypeSupported: webKit,

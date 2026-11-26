@@ -40,6 +40,12 @@ export interface WindowRequest {
   readonly audio: WindowAudio;
   /** The codec name of the audio stream from the probe. */
   readonly audioCodec?: string | null;
+  /**
+   * The absolute index of the audio stream that the window reads, for a source that is not an
+   * FLV (ADR 070). Rust refuses such a request that reads audio without it. Build it with
+   * `audioStreamField` of `windowRequests`.
+   */
+  readonly audioStreamIndex?: number;
   /** On FLV, also decode the audio of the window to PCM into the second channel. */
   readonly pcm?: boolean;
   /** Scan for decoder configurations before the window, after a window failed to decode. */

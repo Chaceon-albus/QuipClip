@@ -19,6 +19,7 @@ import {
   getGeneratedSourceId,
   getSourceRevisionKey,
   mediaStore,
+  previewAudioStreamOf,
   useMediaStore,
   VIDEO_FILE_EXTENSIONS,
   type ImportMediaResult,
@@ -54,6 +55,7 @@ import { createPcmCue } from "@/features/playback/mse/pcmCue";
 import { ANCHOR_MEDIA_TIME, videoStartSeconds } from "@/features/playback/mse/timeline";
 import { createWebAudioOutput } from "@/features/playback/mse/webAudio";
 import { openPreviewWindow } from "@/features/playback/mse/windowClient";
+import { pcmWindowRequest } from "@/features/playback/mse/windowRequests";
 import {
   previewCueGain,
   previewElementVolume,
@@ -214,6 +216,7 @@ function stopPictureCheckTimer(check: PictureCheck | null): void {
 function previewPathOf(media: ImportMediaResult): PreviewPath {
   return choosePreviewPath({
     probe: media.probe,
+    audioStream: previewAudioStreamOf(media.probe),
     fileName: media.fileName,
     platform: currentPlatform(),
     isTypeSupported: mediaSourceSupport(),
@@ -226,6 +229,8 @@ function toMseSource(
   path: Extract<PreviewPath, { kind: "mediaSource" }>,
   rescanConfig: boolean,
 ): MseSource {
+  // The stream whose codec chose `path.audio` is the stream that the windows map (ADR 070).
+  const stream = previewAudioStreamOf(media.probe);
   return {
     path: media.path,
     size: media.size,
@@ -235,8 +240,9 @@ function toMseSource(
     videoStartSeconds: path.videoStartSeconds,
     durationSeconds: path.durationSeconds,
     audio: path.audio,
-    audioCodec: media.probe.audio?.codec ?? null,
-    pcm: media.probe.audio !== null,
+    audioCodec: stream?.codec ?? null,
+    audioStreamIndex: stream?.index ?? null,
+    pcm: stream !== null,
     rescanConfig,
   };
 }
@@ -286,17 +292,7 @@ function createPreviewNativeCueOwner(): NativeCueOwner {
         gain,
         openPcmWindow: (startSeconds, listener) =>
           openPreviewWindow(
-            {
-              path: target.source.path,
-              size: target.source.size,
-              mtime: target.source.mtime,
-              lane: "audio",
-              container: "native",
-              start: { kind: "time", seconds: startSeconds },
-              formatStartTime: target.source.formatStartTime,
-              audio: "copy",
-              audioCodec: target.source.audioCodec,
-            },
+            pcmWindowRequest({ ...target.source, container: "native" }, startSeconds),
             listener,
           ),
       }),
@@ -326,20 +322,7 @@ function createPreviewMediaSourceOwner(pane: MediaSourcePaneReports): MediaSourc
           source.container === "flv"
             ? undefined
             : (startSeconds, listener) =>
-                openPreviewWindow(
-                  {
-                    path: source.path,
-                    size: source.size,
-                    mtime: source.mtime,
-                    lane: "audio",
-                    container: source.container,
-                    start: { kind: "time", seconds: startSeconds },
-                    formatStartTime: source.formatStartTime,
-                    audio: "copy",
-                    audioCodec: source.audioCodec,
-                  },
-                  listener,
-                ),
+                openPreviewWindow(pcmWindowRequest(source, startSeconds), listener),
       }),
     setScrubCue,
     listenForGestures: listenForPreviewGestures,
@@ -865,7 +848,7 @@ export function PreviewPane() {
                 playbackStore.getState().reloadGeneration,
               ),
             ),
-            hasAudio: current.probe.audio !== null,
+            hasAudio: previewAudioStreamOf(current.probe) !== null,
           },
           previewCueGain(audioLevel),
         );
@@ -883,7 +866,7 @@ export function PreviewPane() {
   const usesNativePcmCue =
     NATIVE_SOURCE_PCM_CUE &&
     media !== null &&
-    media.probe.audio !== null &&
+    previewAudioStreamOf(media.probe) !== null &&
     !isMediaSource &&
     !decodeFailed &&
     !isRecalibrating &&
@@ -898,9 +881,11 @@ export function PreviewPane() {
     // key, keeps the cue that runs.
     const current = attachedMediaStore.getState().media;
     const element = videoRef.current;
+    const stream = current === null ? null : previewAudioStreamOf(current.probe);
     if (
       current === null ||
       element === null ||
+      stream === null ||
       getSourceRevisionKey(current) !== sourceRevisionKey
     ) {
       return;
@@ -925,7 +910,8 @@ export function PreviewPane() {
           size: current.size,
           mtime: current.mtime,
           formatStartTime: current.probe.formatStartTime ?? null,
-          audioCodec: current.probe.audio?.codec ?? null,
+          audioCodec: stream.codec,
+          audioStreamIndex: stream.index,
         },
         originSeconds,
       },

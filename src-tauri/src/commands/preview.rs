@@ -88,6 +88,11 @@ pub struct OpenPreviewWindowRequest {
     /// ADTS filter only when it is AAC.
     #[serde(default)]
     pub audio_codec: Option<String>,
+    /// The absolute index of the audio stream that the window reads, for a source that is not an
+    /// FLV (ADR 070). A request of such a source that reads audio must name it. An FLV window
+    /// reads the one audio stream of the tags that Rust writes, so it does not read this field.
+    #[serde(default)]
+    pub audio_stream_index: Option<u32>,
     /// On FLV, also decode the audio of the window to PCM for the scrub cue, into the second
     /// channel.
     #[serde(default)]
@@ -352,11 +357,22 @@ fn check_request(request: &OpenPreviewWindowRequest) -> Result<(), PreviewWindow
     // The web view plays a native source itself, so only its PCM comes from a window.
     let not_native_video =
         request.lane == Lane::Audio || request.container != ContainerHint::Native;
-    if finite && margin && resume_on_flv && pcm_lane && not_native_video {
+    // FFmpeg maps the audio of a seek window by the index of the request, so a seek window that
+    // reads audio cannot guess it (ADR 070). When the file has no stream with that index, FFmpeg
+    // refuses the map, and the window ends as failed.
+    let names_stream = request.audio_stream_index.is_some() || !reads_seek_audio(request);
+    if finite && margin && resume_on_flv && pcm_lane && not_native_video && names_stream {
         Ok(())
     } else {
         Err(error(PreviewWindowErrorCode::InvalidRequest))
     }
+}
+
+/// True when the request reads the audio of a source that FFmpeg seeks in: a PCM window, or a
+/// video window that copies or transcodes its audio.
+fn reads_seek_audio(request: &OpenPreviewWindowRequest) -> bool {
+    request.container != ContainerHint::Flv
+        && (request.lane == Lane::Audio || request.audio != AudioMode::Omit)
 }
 
 /// The keyframe where an FLV window starts, as (offset, decode time, first keyframe
@@ -552,14 +568,27 @@ fn open_seek(
                 seek,
                 WINDOW_MS as f64 / 1000.0 + margin,
                 request.audio,
+                request.audio_stream_index,
                 request.audio_codec.as_deref() == Some("aac"),
             ),
             None,
         ),
-        Lane::Audio => (
-            seek_pcm_arguments(path, seek, PCM_WINDOW_SECONDS + margin, start_seconds),
-            Some(start_seconds),
-        ),
+        Lane::Audio => {
+            // `check_request` refused a PCM request that names no stream.
+            let stream = request
+                .audio_stream_index
+                .ok_or_else(|| error(PreviewWindowErrorCode::InvalidRequest))?;
+            (
+                seek_pcm_arguments(
+                    path,
+                    seek,
+                    PCM_WINDOW_SECONDS + margin,
+                    start_seconds,
+                    stream,
+                ),
+                Some(start_seconds),
+            )
+        }
     };
     if !windows.is_current(&ticket) {
         return Err(error(PreviewWindowErrorCode::Superseded));
@@ -629,7 +658,8 @@ mod tests {
     fn refuses_a_request_that_cannot_be_served() {
         let base = request(serde_json::json!({
             "path": "/media/a.ts", "size": 10, "mtime": 1, "lane": "video", "sequence": 1,
-            "container": "mpegTs", "audio": "copy", "start": {"kind": "fileStart"}
+            "container": "mpegTs", "audio": "copy", "audioStreamIndex": 1,
+            "start": {"kind": "fileStart"}
         }))
         .unwrap();
         assert!(check_request(&base).is_ok());
@@ -670,7 +700,8 @@ mod tests {
     fn a_native_source_opens_only_pcm_windows_of_the_audio_lane() {
         let parsed = request(serde_json::json!({
             "path": "/media/a.mp4", "size": 10, "mtime": 1, "lane": "audio", "sequence": 1,
-            "container": "native", "audio": "copy", "start": {"kind": "time", "seconds": 134.5}
+            "container": "native", "audio": "copy", "audioStreamIndex": 1,
+            "start": {"kind": "time", "seconds": 134.5}
         }))
         .unwrap();
         assert_eq!(parsed.container, ContainerHint::Native);
@@ -683,6 +714,77 @@ mod tests {
             ..parsed
         };
         assert!(check_request(&resume).is_err());
+    }
+
+    #[test]
+    fn a_request_that_reads_the_audio_of_a_seek_source_names_its_stream() {
+        let base = request(serde_json::json!({
+            "path": "/media/a.mkv", "size": 10, "mtime": 1, "lane": "video", "sequence": 1,
+            "container": "matroska", "audio": "copy", "audioStreamIndex": 3,
+            "start": {"kind": "fileStart"}
+        }))
+        .unwrap();
+        assert_eq!(base.audio_stream_index, Some(3));
+        assert!(check_request(&base).is_ok());
+        let unnamed = |request: OpenPreviewWindowRequest| OpenPreviewWindowRequest {
+            audio_stream_index: None,
+            ..request
+        };
+        // A video window that copies or transcodes, and every PCM window, needs the stream.
+        for audio in [AudioMode::Copy, AudioMode::Transcode] {
+            let video = OpenPreviewWindowRequest {
+                audio,
+                ..unnamed(base.clone())
+            };
+            assert!(check_request(&video).is_err());
+        }
+        for container in [
+            ContainerHint::MpegTs,
+            ContainerHint::Matroska,
+            ContainerHint::Native,
+        ] {
+            let pcm = OpenPreviewWindowRequest {
+                lane: Lane::Audio,
+                container,
+                start: WindowStart::Time { seconds: 1.0 },
+                ..unnamed(base.clone())
+            };
+            assert!(check_request(&pcm).is_err(), "{container:?}");
+        }
+        // A video window with no audio reads no stream.
+        let omit = OpenPreviewWindowRequest {
+            audio: AudioMode::Omit,
+            ..unnamed(base.clone())
+        };
+        assert!(check_request(&omit).is_ok());
+        // An FLV window maps the first audio stream of its input, with or without the field.
+        let flv = OpenPreviewWindowRequest {
+            container: ContainerHint::Flv,
+            ..unnamed(base.clone())
+        };
+        assert!(check_request(&flv).is_ok());
+        let flv_named = OpenPreviewWindowRequest {
+            container: ContainerHint::Flv,
+            ..base
+        };
+        assert!(check_request(&flv_named).is_ok());
+    }
+
+    #[test]
+    fn an_audio_stream_index_that_is_not_a_u32_does_not_parse() {
+        let mut json = serde_json::json!({
+            "path": "/media/a.mkv", "size": 10, "mtime": 1, "lane": "audio", "sequence": 1,
+            "container": "matroska", "audio": "copy", "start": {"kind": "fileStart"}
+        });
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            json["audioStreamIndex"] = bad.clone();
+            assert!(request(json.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]

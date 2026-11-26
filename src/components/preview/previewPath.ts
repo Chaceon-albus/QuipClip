@@ -3,7 +3,7 @@
  * MediaSource plays remux windows of it.
  */
 
-import type { MediaProbe } from "@/features/media";
+import type { AudioProbe, MediaProbe } from "@/features/media";
 import { mediaDurationFor, videoStartSeconds } from "@/features/playback/mse/timeline";
 import type {
   WindowAudio,
@@ -31,7 +31,6 @@ export type PreviewPathProbe = Pick<
   MediaProbe,
   | "formatNames"
   | "videoCodec"
-  | "audio"
   | "approximateDurationSeconds"
   | "videoStartPts"
   | "videoTimeBase"
@@ -39,6 +38,11 @@ export type PreviewPathProbe = Pick<
 
 export interface PreviewPathInput {
   readonly probe: PreviewPathProbe;
+  /**
+   * The audio stream that the windows read (`previewAudioStreamOf`), or null when the source has
+   * no audio. Its codec decides whether a window copies or transcodes the audio (ADR 070).
+   */
+  readonly audioStream: Pick<AudioProbe, "codec"> | null;
   /** The base name of the open file. Only its extension is read. */
   readonly fileName: string;
   readonly platform: PreviewPlatform;
@@ -107,20 +111,20 @@ export function choosePreviewPath(input: PreviewPathInput): PreviewPath {
   return {
     kind: "mediaSource",
     container,
-    audio: audioOf(probe.audio?.codec ?? null, probe.audio !== null, isTypeSupported),
+    audio: audioOf(input.audioStream, isTypeSupported),
     videoStartSeconds: startSeconds,
     durationSeconds,
   };
 }
 
 function audioOf(
-  codec: string | null,
-  hasAudio: boolean,
+  stream: Pick<AudioProbe, "codec"> | null,
   isTypeSupported: (type: string) => boolean,
 ): WindowAudio {
-  if (!hasAudio) {
+  if (stream === null) {
     return "omit";
   }
+  const { codec } = stream;
   const string = codec === null ? undefined : AUDIO_CODECS[codec.trim().toLowerCase()];
   return string !== undefined &&
     supports(isTypeSupported, `audio/mp4; codecs="${string}"`)

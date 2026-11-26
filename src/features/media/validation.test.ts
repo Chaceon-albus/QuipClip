@@ -16,6 +16,7 @@ import {
   isBackendImportMediaErrorCode,
   isI32,
   isImportMediaErrorCode,
+  isListedAudioStream,
   isMediaProbe,
   isNonNegativeRational,
   isNonNegativeU32,
@@ -57,6 +58,17 @@ function createValidProbe(): ImportMediaResult["probe"] {
       sampleRate: 48000,
       channels: 2,
     },
+    audioStreams: [
+      {
+        index: 0,
+        codec: "aac",
+        sampleRate: 48000,
+        channels: 2,
+        default: true,
+        language: null,
+        title: null,
+      },
+    ],
   };
 }
 
@@ -379,6 +391,137 @@ describe("Media Validation & Normalization", () => {
     });
   });
 
+  describe("isListedAudioStream", () => {
+    const valid = {
+      index: 3,
+      codec: "opus",
+      sampleRate: 48000,
+      channels: 1,
+      default: true,
+      language: "eng",
+      title: "Microphone",
+    };
+
+    it("accepts an entry with every field, and with every nullable field null", () => {
+      expect(isListedAudioStream(valid)).toBe(true);
+      expect(
+        isListedAudioStream({
+          ...valid,
+          codec: null,
+          sampleRate: null,
+          channels: null,
+          language: null,
+          title: null,
+        }),
+      ).toBe(true);
+    });
+
+    it("refuses an entry with a field of the wrong shape or a missing field", () => {
+      const malformed: Record<string, unknown>[] = [
+        { ...valid, index: -1 },
+        { ...valid, index: 1.5 },
+        { ...valid, index: U32_MAX + 1 },
+        { ...valid, codec: 1 },
+        { ...valid, sampleRate: 0 },
+        { ...valid, channels: 0 },
+        { ...valid, default: 1 },
+        { ...valid, default: null },
+        { ...valid, language: 7 },
+        { ...valid, title: false },
+      ];
+      for (const entry of malformed) {
+        expect(isListedAudioStream(entry)).toBe(false);
+      }
+      for (const field of Object.keys(valid)) {
+        const without: Record<string, unknown> = { ...valid };
+        delete without[field];
+        expect(isListedAudioStream(without)).toBe(false);
+      }
+      expect(isListedAudioStream(null)).toBe(false);
+      expect(isListedAudioStream("stream")).toBe(false);
+    });
+  });
+
+  describe("isMediaProbe audioStreams", () => {
+    const entry = (index: number, isDefault: boolean) => ({
+      index,
+      codec: "aac",
+      sampleRate: 48000,
+      channels: 2,
+      default: isDefault,
+      language: null,
+      title: null,
+    });
+
+    it("accepts a list that holds the preferred stream in any place", () => {
+      // The preferred stream is the second audio stream of the file (ADR 070).
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          audio: { index: 2, codec: "aac", sampleRate: 48000, channels: 2 },
+          audioStreams: [entry(1, false), entry(2, true)],
+        }),
+      ).toBe(true);
+      expect(
+        isMediaProbe({ ...createValidProbe(), audio: null, audioStreams: [] }),
+      ).toBe(true);
+    });
+
+    it("refuses a probe without the list, or with a list that is not an array", () => {
+      const without: Record<string, unknown> = { ...createValidProbe() };
+      delete without.audioStreams;
+      expect(isMediaProbe(without)).toBe(false);
+      expect(isMediaProbe({ ...createValidProbe(), audioStreams: null })).toBe(false);
+      expect(isMediaProbe({ ...createValidProbe(), audioStreams: {} })).toBe(false);
+    });
+
+    it("refuses a list with a malformed entry", () => {
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          audioStreams: [entry(0, true), { ...entry(1, false), default: "no" }],
+        }),
+      ).toBe(false);
+    });
+
+    it("refuses a list that does not agree with the preferred stream", () => {
+      // The preferred stream is missing from the list.
+      expect(
+        isMediaProbe({ ...createValidProbe(), audioStreams: [entry(1, false)] }),
+      ).toBe(false);
+      // A file with no audio lists no audio stream.
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          audio: null,
+          audioStreams: [entry(0, true)],
+        }),
+      ).toBe(false);
+      // A file with audio lists at least the preferred stream.
+      expect(isMediaProbe({ ...createValidProbe(), audioStreams: [] })).toBe(false);
+      // No index occurs twice.
+      expect(
+        isMediaProbe({
+          ...createValidProbe(),
+          audioStreams: [entry(0, true), entry(0, false)],
+        }),
+      ).toBe(false);
+    });
+
+    it("refuses an import result whose list is malformed", () => {
+      expect(() =>
+        validateImportMediaResult(
+          createValidImportResult({
+            probe: {
+              ...createValidProbe(),
+              audioStreams: [{ ...entry(0, true), index: "0" as unknown as number }],
+            },
+          }),
+        ),
+      ).toThrow(TypeError);
+    });
+  });
+
   describe("isMediaProbe", () => {
     it("returns true for a valid MediaProbe object", () => {
       expect(isMediaProbe(createValidProbe())).toBe(true);
@@ -523,6 +666,7 @@ describe("Media Validation & Normalization", () => {
           rFrameRate: null,
           reportedFrameCount: null,
           audio: null,
+          audioStreams: [],
         },
       });
       expect(validateImportMediaResult(validWithNulls)).toEqual(validWithNulls);

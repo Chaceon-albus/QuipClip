@@ -340,6 +340,7 @@ mod tests {
                 duration: None,
                 tagged_end: None,
             }),
+            audio_streams: Vec::new(),
         }
     }
 

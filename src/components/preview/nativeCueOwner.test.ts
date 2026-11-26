@@ -19,6 +19,7 @@ const TARGET: NativeCueTarget = {
     mtime: 1,
     formatStartTime: { n: 0, d: 1 },
     audioCodec: "aac",
+    audioStreamIndex: 1,
   },
   originSeconds: 0.25,
 };

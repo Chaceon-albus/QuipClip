@@ -50,6 +50,7 @@ const SOURCE: MseSource = {
   durationSeconds: 240,
   audio: "copy",
   audioCodec: "aac",
+  audioStreamIndex: 1,
   pcm: true,
   rescanConfig: false,
 };
@@ -1554,6 +1555,29 @@ describe("createMseController", () => {
       formatStartTime: { n: 9, d: 1 },
       pcm: false,
     };
+
+    it("names the audio stream of the source by its absolute index", () => {
+      // The preferred stream of the file is its second audio stream (ADR 070).
+      const { windows, element } = playing(0, 30, {
+        source: { ...tsSource, audioStreamIndex: 3 },
+      });
+      element.seek(100);
+      expect(windows.map((window) => window.request.audioStreamIndex)).toEqual([3, 3]);
+    });
+
+    it("sends no audio stream for an FLV or a source with no audio", () => {
+      const flv = playing(0, 30);
+      expect(flv.windows[0]?.request).not.toHaveProperty("audioStreamIndex");
+      const silent = playing(0, 30, {
+        source: {
+          ...tsSource,
+          audio: "omit",
+          audioCodec: null,
+          audioStreamIndex: null,
+        },
+      });
+      expect(silent.windows[0]?.request).not.toHaveProperty("audioStreamIndex");
+    });
 
     it("doubles the margin when the window starts after its target", async () => {
       const { last, windows, element } = playing(0, 30, { source: tsSource });

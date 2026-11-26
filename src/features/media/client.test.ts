@@ -47,6 +47,17 @@ function createValidImportResult(): ImportMediaResult {
         sampleRate: 48000,
         channels: 2,
       },
+      audioStreams: [
+        {
+          index: 0,
+          codec: "aac",
+          sampleRate: 48000,
+          channels: 2,
+          default: false,
+          language: "eng",
+          title: null,
+        },
+      ],
     },
   };
 }
@@ -133,6 +144,7 @@ describe("Media Import Client", () => {
         rFrameRate: null,
         reportedFrameCount: null,
         audio: null,
+        audioStreams: [],
       },
     };
     const mockInvoke = vi.fn().mockResolvedValue(withNulls);

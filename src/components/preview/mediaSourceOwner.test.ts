@@ -25,6 +25,7 @@ const SOURCE: MseSource = {
   durationSeconds: 240,
   audio: "copy",
   audioCodec: "aac",
+  audioStreamIndex: 1,
   pcm: true,
   rescanConfig: false,
 };
