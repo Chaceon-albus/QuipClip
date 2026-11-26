@@ -128,11 +128,19 @@ import {
   DecodeStallBanner,
   ImportErrorBanner,
   ImportErrorEmptyState,
+  FrameExportNoticeBanner,
   MediaSourceNoticeBanner,
   PlaybackErrorBanner,
   WaveformNoticeBanner,
 } from "./PreviewNotices";
+import { showsNoticeArea } from "./previewNoticeRules";
 import { resolveWaveformNotices } from "./waveformNoticeRules";
+import { presentFrameExportNotice } from "./frameExportNoticeRules";
+import {
+  frameExportController,
+  useFrameExportStore,
+  type FrameExportState,
+} from "@/features/frameExport";
 import { createSourceLifecycleGuard, formatPreviewTotalDuration } from "./previewFrame";
 import { PreviewTimecode } from "./PreviewTimecode";
 
@@ -440,6 +448,28 @@ const selectWaveformSources = (state: WaveformStoreState) => state.sources;
 const selectWaveformRunning = (state: WaveformStoreState) => state.runningSourceId;
 const selectHasWaveformNotice = (state: WaveformStoreState) =>
   resolveWaveformNotices(state, () => "").length > 0;
+const selectFrameExportNotice = (state: FrameExportState) => state.notice;
+const selectHasFrameExportNotice = (state: FrameExportState) => state.notice !== null;
+
+/**
+ * The notice of Export Frame (ADR 069). It belongs to the action, not to the attached clip, so it
+ * stays while the preview changes the clip.
+ */
+function FrameExportNotice({ onReturnFocus }: { onReturnFocus: () => void }) {
+  const notice = presentFrameExportNotice(useFrameExportStore(selectFrameExportNotice));
+  if (notice === null) {
+    return null;
+  }
+  return (
+    <FrameExportNoticeBanner
+      // A new notice starts with a full timer.
+      key={notice.id}
+      notice={notice}
+      onDismiss={() => frameExportController.dismissNotice(notice.id)}
+      onReturnFocus={onReturnFocus}
+    />
+  );
+}
 
 /**
  * The notices of the audio envelope (ADR 056). They belong to a source of the sequence, not to
@@ -467,6 +497,7 @@ function WaveformNotices({ onReturnFocus }: { onReturnFocus: () => void }) {
 export function PreviewPane() {
   const { t } = useTranslation();
   const hasWaveformNotice = useWaveformStore(selectHasWaveformNotice);
+  const hasFrameExportNotice = useFrameExportStore(selectHasFrameExportNotice);
   // The media of the clip that the sequence attached (ADR 052). A switch of clip changes it, and
   // the element below mounts again for the new source: the cold switch.
   const status = useAttachedMediaStore((s) => s.status);
@@ -1300,7 +1331,8 @@ export function PreviewPane() {
     showsPlaybackErrorBanner ||
     shownStall !== null ||
     shownMediaSourceNotices.length > 0 ||
-    hasWaveformNotice;
+    hasWaveformNotice ||
+    hasFrameExportNotice;
 
   const totalTimeDisplay = sequenceMedia
     ? formatPreviewTotalDuration(
@@ -1597,70 +1629,80 @@ export function PreviewPane() {
                   videoRef={videoRef}
                 />
               )}
-
-              {/* The notification area. The notices stack from the top, so a loading
-                  chip, an import error and a playback error never cover each other. The
-                  area lets the pointer through, and each notice takes it back, so the
-                  gaps between the notices pass the pointer to the picture. The area ends
-                  above the bottom of the preview area (`preview-notice-area`), and the
-                  stack scrolls when it is taller, so it never covers the timecode row. The
-                  stack widens past a frame too narrow to read the notices in, centred on
-                  the frame, and the chip keeps to the left edge of the banners
-                  (`preview-notice-fit`). */}
-              <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex preview-notice-area flex-col">
-                {/* The up and down arrows scroll the stack while it overflows and one of
-                    its controls has the focus (`SCROLL_KEYS_ATTRIBUTE`). */}
-                <div
-                  className="preview-notice-fit flex min-h-0 flex-col gap-2 overflow-y-auto empty:hidden"
-                  data-scroll-keys
-                >
-                  {showLoading && (
-                    <div
-                      className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
-                      aria-live="polite"
-                    >
-                      <Loader2 className="size-3.5 animate-spin text-primary" />
-                      <span>{t("preview.loading")}</span>
-                    </div>
-                  )}
-                  {hasImportError && (
-                    <ImportErrorBanner
-                      error={error}
-                      onDismiss={dismissImportError}
-                      onReturnFocus={returnFocusToPreview}
-                    />
-                  )}
-                  {showsPlaybackErrorBanner && (
-                    <PlaybackErrorBanner
-                      key={playbackError}
-                      code={playbackError}
-                      onDismiss={dismissPlaybackError}
-                      onReturnFocus={returnFocusToPreview}
-                    />
-                  )}
-                  {shownStall !== null && (
-                    <DecodeStallBanner
-                      notice={presentDecodeStall(shownStall, timecodeDisplay)}
-                      onDismiss={() => setDismissedStall(shownStall)}
-                      onReturnFocus={returnFocusToPreview}
-                    />
-                  )}
-                  <WaveformNotices onReturnFocus={returnFocusToPreview} />
-                  {shownMediaSourceNotices.map((messageKey) => (
-                    <MediaSourceNoticeBanner
-                      key={messageKey}
-                      messageKey={messageKey}
-                      onDismiss={() =>
-                        setMediaSourceNotices((current) =>
-                          dismissMediaSourceNotice(current, messageKey),
-                        )
-                      }
-                      onReturnFocus={returnFocusToPreview}
-                    />
-                  ))}
-                </div>
-              </div>
             </>
+          )}
+
+          {/* The notification area. The notices stack from the top, so a loading
+              chip, an import error and a playback error never cover each other. The
+              area lets the pointer through, and each notice takes it back, so the
+              gaps between the notices pass the pointer to the picture. The area ends
+              above the bottom of the preview area (`preview-notice-area`), and the
+              stack scrolls when it is taller, so it never covers the timecode row. The
+              stack widens past a frame too narrow to read the notices in, centred on
+              the frame, and the chip keeps to the left edge of the banners
+              (`preview-notice-fit`). The area also shows for the
+              notice of Export Frame when no clip is attached (`showsNoticeArea`). */}
+          {showsNoticeArea(media !== null, hasFrameExportNotice) && (
+            <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex preview-notice-area flex-col">
+              {/* The up and down arrows scroll the stack while it overflows and one of
+                  its controls has the focus (`SCROLL_KEYS_ATTRIBUTE`). */}
+              <div
+                className="preview-notice-fit flex min-h-0 flex-col gap-2 overflow-y-auto empty:hidden"
+                data-scroll-keys
+              >
+                {media && (
+                  <>
+                    {showLoading && (
+                      <div
+                        className="pointer-events-auto flex items-center gap-2 self-start rounded-md border border-border/80 bg-background/90 px-2.5 py-1 text-xs text-foreground shadow-md backdrop-blur-xs"
+                        aria-live="polite"
+                      >
+                        <Loader2 className="size-3.5 animate-spin text-primary" />
+                        <span>{t("preview.loading")}</span>
+                      </div>
+                    )}
+                    {hasImportError && (
+                      <ImportErrorBanner
+                        error={error}
+                        onDismiss={dismissImportError}
+                        onReturnFocus={returnFocusToPreview}
+                      />
+                    )}
+                    {showsPlaybackErrorBanner && (
+                      <PlaybackErrorBanner
+                        key={playbackError}
+                        code={playbackError}
+                        onDismiss={dismissPlaybackError}
+                        onReturnFocus={returnFocusToPreview}
+                      />
+                    )}
+                    {shownStall !== null && (
+                      <DecodeStallBanner
+                        notice={presentDecodeStall(shownStall, timecodeDisplay)}
+                        onDismiss={() => setDismissedStall(shownStall)}
+                        onReturnFocus={returnFocusToPreview}
+                      />
+                    )}
+                    <WaveformNotices onReturnFocus={returnFocusToPreview} />
+                    {shownMediaSourceNotices.map((messageKey) => (
+                      <MediaSourceNoticeBanner
+                        key={messageKey}
+                        messageKey={messageKey}
+                        onDismiss={() =>
+                          setMediaSourceNotices((current) =>
+                            dismissMediaSourceNotice(current, messageKey),
+                          )
+                        }
+                        onReturnFocus={returnFocusToPreview}
+                      />
+                    ))}
+                  </>
+                )}
+                {/* The notice of Export Frame belongs to the action, so it stays
+                    when no clip is attached (ADR 069). */}
+                <FrameExportNotice onReturnFocus={returnFocusToPreview} />
+              </div>
+            </div>
           )}
         </div>
       </div>

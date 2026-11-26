@@ -40,6 +40,7 @@ export const zhCN: TranslationCatalog = {
   dialog: {
     videoFilter: "视频文件",
     audioFilter: "音频文件",
+    pngFilter: "PNG 图像",
   },
   preview: {
     empty: {
@@ -122,6 +123,9 @@ export const zhCN: TranslationCatalog = {
     notice: {
       dismiss: "关闭提示",
     },
+    frameExport: {
+      saved: "帧已保存为“{{name}}”。",
+    },
     mediaSource: {
       timestampsDecrease: "此视频的时间戳出现回退。预览可以播放，但无法精确标记。",
       noSound: "预览无法转换此视频的音频，因此播放时没有声音。",
@@ -201,6 +205,7 @@ export const zhCN: TranslationCatalog = {
       nextStep: "前进一帧",
       mute: "静音",
       volume: "预览音量",
+      exportFrame: "导出帧",
     },
     state: {
       inPending: "已有待定的入点。请标记出点以生成片段。",
@@ -209,6 +214,7 @@ export const zhCN: TranslationCatalog = {
       finishCompletesSegment: "生成从待定入点到播放头的片段。",
       finishDiscardsIn: "放弃待定的入点。将播放头移到入点之后即可生成片段。",
       volumeMuted: "{{level}}，已静音",
+      exportingFrame: "正在导出帧…",
     },
     segmentDuration: {
       segment: "片段 {{index}} 时长",
@@ -1005,5 +1011,36 @@ export const zhCN: TranslationCatalog = {
     commandExecutionFailed: "无法运行音频测量。",
     preparationTimedOut:
       "无法在限定时间内完成测量准备。某个驱动器或共享位置可能没有响应。",
+  },
+  frameExportError: {
+    frameExportRunning: "另一个帧导出仍在进行。请在其结束后重试。",
+    appDataUnavailable: "应用程序数据目录不可用。",
+    workDirectoryUnavailable: "无法在应用程序缓存目录中创建工作目录。",
+    outputNotPng: "图像的文件名必须以 .png 结尾。",
+    outputPathInvalid: "图像路径无效。",
+    outputDirectoryMissing: "目标文件夹不存在。",
+    outputReadOnly: "图像文件为只读。请解除只读保护，或用其他文件名保存该帧。",
+    outputEqualsSource: "图像不能替换 QuipClip 中已打开的源文件。",
+    sourceNotFound: "未找到源视频文件。",
+    sourceRevisionMismatch: "打开之后，磁盘上的视频文件已更改，因此未导出该帧。",
+    ffmpegPairMissing: "无法找到所需的 FFmpeg 或 ffprobe 程序。",
+    sourceProbeFailed: "ffprobe 无法检查源视频文件。",
+    positionInvalid: "无法确定该帧在源视频中的位置。",
+    flvInputUnavailable:
+      "无法从该帧的位置读取此 FLV 文件。QuipClip 不会读取整个文件，因此未导出该帧。",
+    outputNotWritable: "无法写入目标文件夹。",
+    ffmpegSpawnFailed: "无法启动 FFmpeg 进程。",
+    ffmpegProcessFailed: "FFmpeg 在导出帧期间失败。",
+    ffmpegTimedOut: "FFmpeg 未在 60 秒内导出该帧。",
+    noFrame: "源视频在此位置及之后没有帧。",
+    imageCheckFailed: "FFmpeg 写出的图像不正确，因此未保存。",
+    outputRenameFailed: "无法将图像保存到目标路径。",
+    preparationTimedOut:
+      "无法在限定时间内完成帧导出的准备。某个驱动器或共享位置可能没有响应。",
+    canceled: "帧导出已停止。",
+    commandFailed: "无法运行导出帧的命令。",
+    dialogFailed: "无法打开保存对话框。",
+    invalidResponse: "帧导出返回了无法识别的结果。",
+    unknown: "导出帧时发生未知错误。",
   },
 };

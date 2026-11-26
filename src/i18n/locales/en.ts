@@ -41,6 +41,9 @@ export const en = {
     videoFilter: "Video Files",
     // The file filter of the save dialog for an export of the audio only.
     audioFilter: "Audio Files",
+    // The file filter of the save dialog of Export Frame, which saves one frame as a PNG image
+    // (ADR 069).
+    pngFilter: "PNG Images",
   },
   preview: {
     empty: {
@@ -171,6 +174,11 @@ export const en = {
     notice: {
       dismiss: "Dismiss",
     },
+    // The notice of Export Frame when the image is saved (ADR 069). {{name}} is the file name of
+    // the image. A failure shows its message from `frameExportError` in the same place.
+    frameExport: {
+      saved: "Saved the frame as “{{name}}”.",
+    },
     // The notices over a video that plays through FFmpeg (ADR 046). Each stays until the user
     // dismisses it or opens another video. `timestampsDecrease`: the timestamps of the file go
     // back, as after a reconnect of a live recording, so the preview cannot name the exact
@@ -300,6 +308,10 @@ export const en = {
       // tooltip. The second line is the level as a percentage, such as "75%". It sets the
       // level of the preview and the frame step sound, not of the export.
       volume: "Preview Volume",
+      // Saves the frame on screen as a PNG image (ADR 069). The image is the first frame of the
+      // segment that Mark In would start at the playhead. The item of the macOS File menu has the
+      // same name with "…" after it.
+      exportFrame: "Export Frame",
     },
     // The descriptions of Mark In, Mark Out and Finish. Each is the second line of its
     // tooltip, and assistive technology reads it on the button. `inPending` shows on Mark In
@@ -324,6 +336,9 @@ export const en = {
       finishDiscardsIn:
         "Discards the pending In point. Move the playhead after it to make a segment.",
       volumeMuted: "{{level}}, muted",
+      // The second line of the tooltip of Export Frame while the action runs: from the save
+      // dialog to the end of the export of the image (ADR 069).
+      exportingFrame: "Exporting the frame…",
     },
     // The label above the duration at the right end of the transport bar. `segment` names the
     // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the
@@ -1354,5 +1369,48 @@ export const en = {
     commandExecutionFailed: "QuipClip could not run the measurement of the audio.",
     preparationTimedOut:
       "QuipClip could not prepare the measurement in time. A drive or a network share might not be answering.",
+  },
+  // The failures of Export Frame (ADR 069), in the notice of the preview. The image is one PNG
+  // file of the frame that Mark In would mark at the playhead.
+  frameExportError: {
+    frameExportRunning: "Another frame is being exported. Try again when it ends.",
+    appDataUnavailable: "The application data directory is unavailable.",
+    workDirectoryUnavailable:
+      "QuipClip could not create a work folder in the application cache folder.",
+    outputNotPng: "The file name of the image must end in .png.",
+    outputPathInvalid: "The path of the image is invalid.",
+    outputDirectoryMissing: "The destination folder does not exist.",
+    outputReadOnly:
+      "The image file is read-only. Unlock it, or save the frame with a different file name.",
+    outputEqualsSource:
+      "The image cannot replace a source file that is open in QuipClip.",
+    sourceNotFound: "The source video file was not found.",
+    sourceRevisionMismatch:
+      "The video file on disk changed after it was opened, so QuipClip did not export the frame.",
+    ffmpegPairMissing:
+      "QuipClip could not find the required FFmpeg or ffprobe program.",
+    sourceProbeFailed: "ffprobe could not examine the source video file.",
+    positionInvalid:
+      "QuipClip could not find the position of the frame in the source video.",
+    flvInputUnavailable:
+      "QuipClip cannot read this FLV file from the position of the frame. It does not read the whole file, so it did not export the frame.",
+    outputNotWritable: "QuipClip cannot write to the destination folder.",
+    ffmpegSpawnFailed: "QuipClip could not start the FFmpeg process.",
+    ffmpegProcessFailed: "FFmpeg failed while it exported the frame.",
+    // 60 is FRAME_FFMPEG_LIMIT of the Rust module of Export Frame.
+    ffmpegTimedOut: "FFmpeg did not export the frame within 60 seconds.",
+    noFrame: "The source video has no frame at or after this position.",
+    imageCheckFailed:
+      "The image that FFmpeg wrote was not correct, so QuipClip did not save it.",
+    outputRenameFailed: "QuipClip could not save the image to the destination path.",
+    // A step before FFmpeg did not end within the time limit of the preparation of an export.
+    preparationTimedOut:
+      "QuipClip could not prepare the export of the frame in time. A drive or a network share might not be answering.",
+    canceled: "The export of the frame was stopped.",
+    commandFailed: "QuipClip could not run the command that exports the frame.",
+    dialogFailed: "QuipClip could not open the save dialog.",
+    invalidResponse:
+      "The export of the frame gave a result that QuipClip does not recognize.",
+    unknown: "An unknown error occurred while QuipClip exported the frame.",
   },
 } as const;

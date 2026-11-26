@@ -955,6 +955,8 @@ where
                 expected: resolved.sources[index]
                     .expected_revision
                     .map(|revision| (revision.size, revision.mtime)),
+                // A video export takes a changed file as it is now, as before (ADR 058).
+                strict_revision: false,
             },
             preview_windows,
             cancel,
@@ -1382,7 +1384,7 @@ where
 /// slice that starts an input first ([`check_slices`]), and a slice that does not decode as the
 /// probe keeps the input seek for the whole export. A slice that starts no input is never opened:
 /// its piece reads the `split` of an input that starts earlier (ADR 055).
-fn flv_input_for(
+pub(super) fn flv_input_for(
     ffprobe: &Path,
     source: &Path,
     probe: &MediaProbe,
@@ -1438,6 +1440,7 @@ fn flv_input_for(
             windows: preview_windows,
             cancel: Some(reader_cancel.clone()),
             expected: place.expected,
+            strict_revision: place.strict_revision,
         })
     });
     let input = match located {
@@ -1448,6 +1451,12 @@ fn flv_input_for(
         Ok(input) => input,
         Err(FlvInputFallback::Canceled) => {
             return Err(ExportCommandError::new(ExportErrorCode::Canceled))
+        }
+        // Only a strict request gets this answer (`FlvPlace::strict_revision`).
+        Err(FlvInputFallback::RevisionChanged) => {
+            return Err(ExportCommandError::new(
+                ExportErrorCode::SourceRevisionMismatch,
+            ))
         }
         Err(reason) => {
             eprintln!("export: the FLV source keeps the input seek: {reason:?}");
@@ -1499,9 +1508,9 @@ fn flv_input_for(
 /// The pieces of one source of an export, in export order, and the inputs that read them: for each
 /// input of the source, in the order of the assignment, the positions of its pieces in `pieces`.
 #[derive(Clone, Copy)]
-struct SourcePieces<'a> {
-    pieces: &'a [SegmentBoundary],
-    inputs: &'a [Vec<usize>],
+pub(super) struct SourcePieces<'a> {
+    pub(super) pieces: &'a [SegmentBoundary],
+    pub(super) inputs: &'a [Vec<usize>],
 }
 
 /// For each input of the source `source` in `inputs`, the positions of its pieces among the pieces
@@ -1530,20 +1539,24 @@ fn input_ordinals(
 /// application cache directory (ADR 046, ADR 057), and the export writes the head into its work
 /// directory (ADR 055).
 #[derive(Clone, Copy)]
-struct FlvPlace<'a> {
+pub(super) struct FlvPlace<'a> {
     /// The application cache directory, which holds the cache of the FLV reader.
-    cache_directory: &'a Path,
+    pub(super) cache_directory: &'a Path,
     /// The work directory of the export, which receives the head.
-    work_directory: &'a WorkDirectory,
+    pub(super) work_directory: &'a WorkDirectory,
     /// The index of the source in the plan, which names its head.
-    source_index: usize,
+    pub(super) source_index: usize,
     /// The size and the modification time of the revision that the pieces were marked against,
     /// when the request names one (ADR 058).
-    expected: Option<(u64, i64)>,
+    pub(super) expected: Option<(u64, i64)>,
+    /// True to end the run with `sourceRevisionMismatch` when the file no longer holds
+    /// [`Self::expected`] at the locate, instead of taking the file as it is now. The Export Frame
+    /// command sets it (ADR 069). A video export does not.
+    pub(super) strict_revision: bool,
 }
 
 /// Sets its flag when it drops, also during the unwind of a panic.
-struct SetOnDrop<'a>(&'a AtomicBool);
+pub(super) struct SetOnDrop<'a>(pub(super) &'a AtomicBool);
 
 impl Drop for SetOnDrop<'_> {
     fn drop(&mut self) {
@@ -1729,7 +1742,7 @@ const FLV_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20
 ///
 /// An FLV that a recorder still writes holds its revision in its first `size` bytes, as its
 /// fingerprint shows, and the FLV input of the source stops at that size (ADR 058).
-fn check_source_revision(source: &ExportSourceWire) -> Result<(), ExportCommandError> {
+pub(super) fn check_source_revision(source: &ExportSourceWire) -> Result<(), ExportCommandError> {
     let Some(expected) = source.expected_revision else {
         return Ok(());
     };
@@ -1970,6 +1983,17 @@ impl PreparationLimits {
         grace: PREPARATION_CANCEL_GRACE,
         poll: PREPARATION_POLL,
     };
+
+    /// Limits of a test of another command that runs [`prepare_on_helper`], such as Export Frame
+    /// (ADR 069).
+    #[cfg(test)]
+    pub(super) const fn for_test(timeout: Duration, grace: Duration, poll: Duration) -> Self {
+        Self {
+            timeout,
+            grace,
+            poll,
+        }
+    }
 
     /// These limits for a preparation of `sources` sources: the timeout multiplied by their
     /// number, at least one. Preparation runs its bounded steps once for each source (ADR 050,
@@ -3404,6 +3428,7 @@ pub(crate) mod tests {
                     work_directory: &work,
                     source_index: 2,
                     expected: None,
+                    strict_revision: false,
                 },
                 &windows,
                 cancel,

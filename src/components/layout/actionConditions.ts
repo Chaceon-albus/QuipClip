@@ -102,6 +102,48 @@ export function canOpenExportOrder(exportSegmentCount: number): boolean {
   return Number.isSafeInteger(exportSegmentCount) && exportSegmentCount >= 2;
 }
 
+/** The facts that decide whether Export Frame can start (ADR 069). */
+export interface ExportFrameConditions {
+  /** Media is open, and its element is attached and ready (`isSourceActive`). */
+  readonly hasActiveSource: boolean;
+  /** The calibration of the attached element is ready (ADR 003). */
+  readonly isCalibrated: boolean;
+  /** The playback store holds a confirmed frame with an inferred PTS. */
+  readonly hasConfirmedFrame: boolean;
+  /** The attached element is stopped by a decode stall (ADR 039). */
+  readonly isDecodeStalled: boolean;
+  /** A recalibration retired the attached element (ADR 063). */
+  readonly isRecalibrating: boolean;
+  /** A drag trims the edge of a segment (ADR 030). */
+  readonly isTrimDragging: boolean;
+  /**
+   * A press on a segment edge is armed and has not become a trim yet. The save dialog would
+   * open while the pointer is held, as the dialogs of ADR 065 and ADR 066 would.
+   */
+  readonly isTrimArmed: boolean;
+  /** Another Export Frame action is in progress. */
+  readonly isBusy: boolean;
+}
+
+/**
+ * Export Frame starts only under the condition of Mark In with no current segment: a confirmed
+ * frame of the attached element while the calibration is ready (ADR 003, ADR 007). The element
+ * must not be stalled or retired, no drag may trim a segment edge, no press on a segment edge
+ * may be armed, and no other Export Frame action may be in progress (ADR 069).
+ */
+export function canExportFrame(conditions: ExportFrameConditions): boolean {
+  return (
+    conditions.hasActiveSource &&
+    conditions.isCalibrated &&
+    conditions.hasConfirmedFrame &&
+    !conditions.isDecodeStalled &&
+    !conditions.isRecalibrating &&
+    !conditions.isTrimDragging &&
+    !conditions.isTrimArmed &&
+    !conditions.isBusy
+  );
+}
+
 /**
  * The Export button and the Export item of the File menu need open media, and nothing more.
  * The export flow itself reports a missing segment in its dialog (ADR 024).

@@ -229,6 +229,14 @@ describe("shortcutBindings", () => {
         action: "exportOrder",
         repeat: "taken",
       },
+      // ADR 069. Shift makes the browser report the capital letter.
+      {
+        name: "primary+Shift+S",
+        press: (platform) =>
+          press({ key: "S", code: "KeyS", shiftKey: true, ...primary(platform) }),
+        action: "exportFrame",
+        repeat: "taken",
+      },
       {
         name: "primary+,",
         press: (platform) => press({ key: ",", code: "Comma", ...primary(platform) }),
@@ -818,6 +826,30 @@ describe("shortcutBindings", () => {
         actionOf(
           press({ key: "E", code: "KeyE", shiftKey: true, metaKey: true }),
           "windows",
+        ),
+      ).toBeNull();
+    });
+
+    it("binds primary+Shift+S to Export Frame, and leaves primary+S free (ADR 069)", () => {
+      for (const platform of PLATFORMS) {
+        expect(
+          actionOf(
+            press({ key: "S", code: "KeyS", shiftKey: true, ...primary(platform) }),
+            platform,
+          ),
+        ).toBe("exportFrame");
+        // `primary` with S alone stays free for a later Save of the project.
+        expect(
+          actionOf(press({ key: "s", code: "KeyS", ...primary(platform) }), platform),
+        ).toBeNull();
+        expect(
+          actionOf(press({ key: "S", code: "KeyS", shiftKey: true }), platform),
+        ).not.toBe("exportFrame");
+      }
+      expect(
+        actionOf(
+          press({ key: "S", code: "KeyS", shiftKey: true, ctrlKey: true }),
+          "macos",
         ),
       ).toBeNull();
     });

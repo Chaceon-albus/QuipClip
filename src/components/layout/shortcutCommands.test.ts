@@ -33,6 +33,7 @@ import {
   type ShortcutSnapshot,
 } from "./shortcutCommands";
 import { TIME_JUMP_SECONDS, type TimeJumpAction } from "./timeJump";
+import type { FrameExportSnapshot } from "./frameExportPlan";
 
 const pts = (value: string): Pts => value as Pts;
 const ticks = (value: string): TickCount => value as TickCount;
@@ -112,6 +113,33 @@ function createSnapshot(overrides: SnapshotOverrides = {}): ShortcutSnapshot {
       maxZoom: 8,
       ...overrides.viewport,
     },
+  };
+}
+
+/**
+ * The state of the plan of Export Frame (ADR 069) that accepts the action: the element of
+ * `clip.mp4` shows its frame at PTS 270000, a source PTS that differs from the sequence PTS of
+ * `createSnapshot`, so a test sees which of the two the plan records.
+ */
+function acceptingFrameExport(
+  overrides: Partial<FrameExportSnapshot> = {},
+): FrameExportSnapshot {
+  const media = { path: "/media/clip.mp4", fileName: "clip.mp4", size: 1000, mtime: 7 };
+  return {
+    playback: {
+      isAttached: true,
+      isReady: true,
+      calibrationStatus: "ready",
+      presentedFrame: { mediaTime: 3, inferredSourcePts: pts("270000") },
+      decodeStall: null,
+      isRecalibrating: false,
+      attachedSourceRevisionKey: getSourceRevisionKey(media),
+    },
+    attachedMedia: media,
+    sessionSourcePaths: ["/media/clip.mp4", "/media/other.mov"],
+    displayedTime: "00:00:01.000",
+    isBusy: false,
+    ...overrides,
   };
 }
 
@@ -1846,10 +1874,12 @@ describe("planShortcutCommand", () => {
       expect(
         planShortcutCommand("renameSegment", { ...current, isTrimArmed: true }),
       ).toBeNull();
-      // Export Order opens a modal dialog too (ADR 066).
+      // Export Order opens a modal dialog too (ADR 066), and Export Frame the save dialog of
+      // the system (ADR 069).
       expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual([
         "renameSegment",
         "exportOrder",
+        "exportFrame",
       ]);
       // An armed press locks no other action: a click on an edge still seeks at its release.
       expect(
@@ -2025,6 +2055,68 @@ describe("planShortcutCommand", () => {
     });
   });
 
+  describe("Export Frame (ADR 069)", () => {
+    it("records the facts of its plan, with the PTS of the element and not of the sequence", () => {
+      const snapshot: ShortcutSnapshot = {
+        ...createSnapshot(),
+        frameExport: acceptingFrameExport(),
+      };
+      expect(planShortcutCommand("exportFrame", snapshot)).toEqual({
+        kind: "exportFrame",
+        facts: {
+          sourcePath: "/media/clip.mp4",
+          sourceFileName: "clip.mp4",
+          sourceRevision: { size: 1000, mtime: 7 },
+          pts: "270000",
+          displayedTime: "00:00:01.000",
+          sessionSourcePaths: ["/media/clip.mp4", "/media/other.mov"],
+        },
+      });
+    });
+
+    it("does nothing without the state of its plan, or while the plan refuses", () => {
+      expect(planShortcutCommand("exportFrame", createSnapshot())).toBeNull();
+      expect(
+        planShortcutCommand("exportFrame", {
+          ...createSnapshot(),
+          frameExport: acceptingFrameExport({ isBusy: true }),
+        }),
+      ).toBeNull();
+    });
+
+    it("does nothing while a trim drags or an edge press is armed", () => {
+      const snapshot: ShortcutSnapshot = {
+        ...createSnapshot(),
+        frameExport: acceptingFrameExport(),
+      };
+      expect(
+        planShortcutCommand("exportFrame", { ...snapshot, isTrimDragging: true }),
+      ).toBeNull();
+      // The press on an edge has not crossed the drag threshold yet: a move can still start
+      // a trim behind the save dialog.
+      expect(
+        planShortcutCommand("exportFrame", { ...snapshot, isTrimArmed: true }),
+      ).toBeNull();
+      // The button plans through the same lock.
+      expect(
+        planControlCommand("exportFrame", false, { ...snapshot, isTrimArmed: true }),
+      ).toBeNull();
+      expect(TRIM_LOCKED_ACTIONS.has("exportFrame")).toBe(true);
+      expect(EDGE_PRESS_LOCKED_ACTIONS.has("exportFrame")).toBe(true);
+    });
+
+    it("plans nothing for the button while an overlay of the page is open", () => {
+      const snapshot: ShortcutSnapshot = {
+        ...createSnapshot(),
+        frameExport: acceptingFrameExport(),
+      };
+      expect(planControlCommand("exportFrame", true, snapshot)).toBeNull();
+      expect(planControlCommand("exportFrame", false, snapshot)).toEqual(
+        planShortcutCommand("exportFrame", snapshot),
+      );
+    });
+  });
+
   describe("Delete, Escape, undo and redo", () => {
     it("deletes the current segment only", () => {
       expect(planShortcutCommand("deleteSegment", createSnapshot())).toBeNull();
@@ -2187,14 +2279,18 @@ describe("planShortcutCommand", () => {
     it("takes the edit keys and does nothing while a trim drags", () => {
       // The frame on screen (PTS 90000) lies inside the segment, so each action can act. A
       // second segment gives Export Order an order to change (ADR 066).
-      const editable = createSnapshot({
-        timeline: {
-          segments: [segment("a", "0", "180000"), segment("b", "270000", "360000")],
-          currentSegmentId: "a",
-          canUndo: true,
-          canRedo: true,
-        },
-      });
+      // Export Frame reads the state of its own plan (ADR 069).
+      const editable: ShortcutSnapshot = {
+        ...createSnapshot({
+          timeline: {
+            segments: [segment("a", "0", "180000"), segment("b", "270000", "360000")],
+            currentSegmentId: "a",
+            canUndo: true,
+            canRedo: true,
+          },
+        }),
+        frameExport: acceptingFrameExport(),
+      };
       for (const action of TRIM_LOCKED_ACTIONS) {
         expect(planShortcutCommand(action, editable)).not.toBeNull();
         expect(
@@ -2204,6 +2300,7 @@ describe("planShortcutCommand", () => {
       expect([...TRIM_LOCKED_ACTIONS].sort()).toEqual(
         [
           "deleteSegment",
+          "exportFrame",
           "exportOrder",
           "markIn",
           "markOut",

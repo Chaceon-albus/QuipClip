@@ -57,10 +57,12 @@ const EXIT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// would hold the exit for the budget twice.
 static EXIT_WAIT: ExitWait = ExitWait::new();
 
-/// One deadline for every exit wait, and one log line for a wait that ran out.
+/// One deadline for every exit wait, and one log line for each kind of wait that ran out: the
+/// export, and the Export Frame command (ADR 069).
 struct ExitWait {
     deadline: OnceLock<Instant>,
     reported: AtomicBool,
+    frame_reported: AtomicBool,
 }
 
 impl ExitWait {
@@ -68,6 +70,7 @@ impl ExitWait {
         Self {
             deadline: OnceLock::new(),
             reported: AtomicBool::new(false),
+            frame_reported: AtomicBool::new(false),
         }
     }
 
@@ -81,6 +84,11 @@ impl ExitWait {
     fn take_report(&self) -> bool {
         !self.reported.swap(true, Ordering::SeqCst)
     }
+
+    /// [`Self::take_report`] for the wait for the Export Frame command.
+    fn take_frame_report(&self) -> bool {
+        !self.frame_reported.swap(true, Ordering::SeqCst)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,6 +100,9 @@ pub fn run() {
         // the registry and outlives the command that claimed it, so the managed value is the
         // `Arc` itself rather than the registry.
         .manage(Arc::new(ffmpeg::export::ExportRegistry::default()))
+        // The one slot of the Export Frame command (ADR 069), apart from the export queue. The
+        // blocking thread of the command owns its slot, so the managed value is the `Arc`.
+        .manage(Arc::new(ffmpeg::export::frame::FrameExports::default()))
         // The remux windows of the preview, one for each lane (ADR 046). The commands share it
         // with the threads of each window, so the managed value is the `Arc`.
         .manage(Arc::new(ffmpeg::preview::PreviewWindows::default()))
@@ -224,6 +235,7 @@ pub fn run() {
             commands::preset_test::preset_test_results,
             commands::export::start_export,
             commands::export::cancel_export,
+            commands::frame_export::export_frame,
             commands::export_journal::export_queue_snapshot,
             commands::export_output::reveal_export_output,
             commands::media::import_media,
@@ -404,10 +416,18 @@ fn page_floor() -> u64 {
 /// `EXIT_CANCEL_BUDGET` from then. A second call therefore returns at once when the slot is
 /// free, and otherwise waits only for what remains.
 fn stop_export_before_exit(handle: &tauri::AppHandle) {
+    // ADR 069: the Export Frame command is asked to stop first, so it stops while the wait for
+    // the export runs, and then its own wait takes what remains of the same deadline.
+    let frames = handle.try_state::<Arc<ffmpeg::export::frame::FrameExports>>();
+    if let Some(frames) = &frames {
+        frames.close_for_exit();
+    }
+    let frame_running = frames.as_ref().is_some_and(|frames| frames.is_running());
     let Some(registry) = handle.try_state::<Arc<ffmpeg::export::ExportRegistry>>() else {
+        stop_frame_export_before_exit(frames.as_deref());
         return;
     };
-    if registry.active_run_id().is_some() {
+    if registry.active_run_id().is_some() || frame_running {
         // The blocked event loop cannot draw, so a window left on screen would sit frozen for
         // up to the whole budget (ADR 027). The call runs on this thread, so the window hides
         // before the wait starts. A window that fails to hide changes nothing else.
@@ -420,6 +440,46 @@ fn stop_export_before_exit(handle: &tauri::AppHandle) {
     // the log a user can send back with a report of an orphaned process or a stray file.
     if stop_export_within_deadline(&registry, &EXIT_WAIT, Instant::now(), EXIT_CANCEL_BUDGET) {
         eprintln!("quit: the export slot was still held after {EXIT_CANCEL_BUDGET:?}");
+    }
+    stop_frame_export_before_exit(frames.as_deref());
+}
+
+/// Waits for the Export Frame command until the exit deadline, and logs a wait that ran out
+/// (ADR 017, ADR 069). [`stop_export_before_exit`] asked it to stop already.
+fn stop_frame_export_before_exit(frames: Option<&Arc<ffmpeg::export::frame::FrameExports>>) {
+    let Some(frames) = frames else {
+        return;
+    };
+    if stop_frame_export_within_deadline(frames, &EXIT_WAIT, Instant::now(), EXIT_CANCEL_BUDGET) {
+        eprintln!("quit: the export frame slot was still held after {EXIT_CANCEL_BUDGET:?}");
+    }
+}
+
+/// Cancels the Export Frame command, and waits until the shared deadline of `wait` for its slot
+/// to go free.
+///
+/// The slot drops after the process guard, the guard of the temporary file and the work
+/// directory of the command, so a free slot means that the process ended and the temporary file
+/// is gone, as for an export. The deadline is the one of the export wait, so the two waits
+/// together take at most [`EXIT_CANCEL_BUDGET`]. Returns true when the wait ran out with the slot
+/// still held and no earlier call has reported that.
+#[must_use]
+fn stop_frame_export_within_deadline(
+    frames: &ffmpeg::export::frame::FrameExports,
+    wait: &ExitWait,
+    now: Instant,
+    budget: Duration,
+) -> bool {
+    let deadline = wait.deadline(now, budget);
+    frames.close_for_exit();
+    loop {
+        if !frames.is_running() {
+            return false;
+        }
+        if Instant::now() >= deadline {
+            return wait.take_frame_report();
+        }
+        std::thread::sleep(EXIT_CANCEL_POLL_INTERVAL);
     }
 }
 
@@ -714,6 +774,232 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
+    #[test]
+    fn an_exit_cancels_the_export_frame_command_and_returns_when_its_slot_is_released() {
+        let frames = Arc::new(ffmpeg::export::frame::FrameExports::default());
+        let slot = frames.begin().expect("the slot starts free");
+        let wait = ExitWait::new();
+
+        // Stands for the blocking thread of the command: it notices the flag, drops its guards
+        // and then its slot.
+        let worker = std::thread::spawn(move || {
+            while !slot.is_canceled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(slot);
+        });
+
+        assert!(!stop_frame_export_within_deadline(
+            &frames,
+            &wait,
+            Instant::now(),
+            Duration::from_secs(5)
+        ));
+        assert!(!frames.is_running());
+        assert!(frames.begin().is_err(), "the exit refuses a later command");
+        worker.join().expect("the worker thread must not panic");
+    }
+
+    #[test]
+    fn an_export_frame_command_that_never_stops_shares_the_budget_of_the_export_wait() {
+        let registry = Arc::new(ExportRegistry::default());
+        let _export = registry.begin("run-1").expect("the slot starts free");
+        let frames = Arc::new(ffmpeg::export::frame::FrameExports::default());
+        let _frame = frames.begin().expect("the slot starts free");
+        let wait = ExitWait::new();
+        let budget = Duration::from_millis(300);
+        let started = Instant::now();
+
+        // Both are wedged. The export wait spends the budget, and the frame wait then finds the
+        // shared deadline passed and returns at once.
+        assert!(stop_export_within_deadline(
+            &registry,
+            &wait,
+            Instant::now(),
+            budget
+        ));
+        assert!(stop_frame_export_within_deadline(
+            &frames,
+            &wait,
+            Instant::now(),
+            budget
+        ));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= budget, "took {elapsed:?}");
+        assert!(
+            elapsed < budget + Duration::from_millis(250),
+            "the two waits must share one budget, took {elapsed:?}"
+        );
+        // A later wait logs nothing again.
+        assert!(!stop_frame_export_within_deadline(
+            &frames,
+            &wait,
+            Instant::now(),
+            budget
+        ));
+    }
+
+    #[test]
+    fn an_exit_with_no_export_frame_command_waits_for_nothing() {
+        let frames = Arc::new(ffmpeg::export::frame::FrameExports::default());
+        let wait = ExitWait::new();
+        let started = Instant::now();
+        assert!(!stop_frame_export_within_deadline(
+            &frames,
+            &wait,
+            Instant::now(),
+            Duration::from_secs(5)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// A rename of an image that another process holds on Windows waits at most
+    /// `FRAME_PUBLISH_BUDGET` (ADR 069). With the removal of the work directory, which comes
+    /// before it, and a margin for the report, it must fit in the exit wait, which cannot end a
+    /// rename.
+    #[test]
+    fn the_rename_of_an_image_fits_in_the_exit_budget() {
+        const REPORT_MARGIN: Duration = Duration::from_millis(500);
+        assert!(
+            ffmpeg::export::frame::FRAME_PUBLISH_BUDGET
+                + app_cache::work::WORK_DIRECTORY_REMOVAL_BUDGET
+                + REPORT_MARGIN
+                < EXIT_CANCEL_BUDGET
+        );
+    }
+
+    /// A queued export that keeps the slot it receives, and records its start.
+    struct HoldingRun {
+        name: &'static str,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+        slots: Arc<std::sync::Mutex<Vec<ffmpeg::export::ExportSlot>>>,
+    }
+
+    impl ffmpeg::export::WaitingRun for HoldingRun {
+        fn start(self: Box<Self>, slot: ffmpeg::export::ExportSlot) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("start {}", self.name));
+            self.slots.lock().unwrap().push(slot);
+        }
+
+        fn withdraw(self: Box<Self>) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("withdraw {}", self.name));
+        }
+    }
+
+    /// Two exports: the first starts, the second waits, the first ends, the second starts and
+    /// ends. Answers what the queue did at each step. With `frames`, an Export Frame command
+    /// holds its slot for the whole time, and must keep it.
+    fn queue_of_two(frames: Option<&Arc<ffmpeg::export::frame::FrameExports>>) -> Vec<String> {
+        let registry = Arc::new(ExportRegistry::default());
+        let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let slots: Arc<std::sync::Mutex<Vec<ffmpeg::export::ExportSlot>>> = Arc::default();
+        let run = |name: &'static str| {
+            Box::new(HoldingRun {
+                name,
+                log: Arc::clone(&log),
+                slots: Arc::clone(&slots),
+            })
+        };
+        let state = |log: &Arc<std::sync::Mutex<Vec<String>>>| {
+            let line = format!(
+                "active {:?} queued {:?}",
+                registry.active_run_id(),
+                registry.queued_run_ids()
+            );
+            log.lock().unwrap().push(line);
+            if let Some(frames) = frames {
+                assert!(frames.is_running(), "the frame command keeps its slot");
+            }
+        };
+        let first = registry.submit("run-1", run("run-1"));
+        let second = registry.submit("run-2", run("run-2"));
+        log.lock()
+            .unwrap()
+            .push(format!("submitted {first:?} {second:?}"));
+        state(&log);
+        // The first export ends: its slot drops, and the second starts.
+        let ended = slots.lock().unwrap().remove(0);
+        drop(ended);
+        state(&log);
+        let ended = slots.lock().unwrap().remove(0);
+        drop(ended);
+        state(&log);
+        let lines = log.lock().unwrap().clone();
+        lines
+    }
+
+    #[test]
+    fn an_export_frame_command_leaves_the_export_queue_as_it_is() {
+        // ADR 069: the command is not a run of the queue, and the queue does not see it.
+        let alone = queue_of_two(None);
+        let frames = Arc::new(ffmpeg::export::frame::FrameExports::default());
+        let held = frames.begin().expect("the slot starts free");
+        let beside = queue_of_two(Some(&frames));
+        assert_eq!(beside, alone);
+        assert_eq!(
+            alone,
+            [
+                "start run-1",
+                "submitted Started Queued",
+                "active Some(\"run-1\") queued [\"run-2\"]",
+                "start run-2",
+                "active Some(\"run-2\") queued []",
+                "active None queued []",
+            ]
+        );
+        // The frame command still holds its slot, and a second one is refused.
+        assert!(frames.is_running());
+        assert!(frames.begin().is_err());
+        drop(held);
+        assert!(!frames.is_running());
+    }
+
+    #[test]
+    fn an_export_and_its_queue_leave_the_export_frame_command_as_it_is() {
+        let registry = Arc::new(ExportRegistry::default());
+        let running = registry.begin("run-1").expect("the slot starts free");
+        let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let slots: Arc<std::sync::Mutex<Vec<ffmpeg::export::ExportSlot>>> = Arc::default();
+        registry.submit(
+            "run-2",
+            Box::new(HoldingRun {
+                name: "run-2",
+                log: Arc::clone(&log),
+                slots: Arc::clone(&slots),
+            }),
+        );
+        let frames = Arc::new(ffmpeg::export::frame::FrameExports::default());
+        // A frame command starts and ends while an export runs and another waits.
+        let frame = frames
+            .begin()
+            .expect("an export does not hold the frame slot");
+        assert_eq!(registry.active_run_id().as_deref(), Some("run-1"));
+        assert_eq!(registry.queued_run_ids(), ["run-2"]);
+        drop(frame);
+        assert_eq!(registry.active_run_id().as_deref(), Some("run-1"));
+        assert_eq!(registry.queued_run_ids(), ["run-2"]);
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "the end of a frame starts no export"
+        );
+        // The export ends, the next one starts, and a frame command can start again.
+        drop(running);
+        assert_eq!(*log.lock().unwrap(), ["start run-2"]);
+        let frame = frames
+            .begin()
+            .expect("the queue does not hold the frame slot");
+        assert!(!frame.is_canceled());
+        drop(slots.lock().unwrap().remove(0));
+        assert!(registry.active_run_id().is_none());
+        assert!(frames.is_running());
+    }
+
     /// The labels of the windows that a configuration file builds.
     fn configured_labels(source: &str) -> Vec<String> {
         let config: serde_json::Value =
@@ -834,6 +1120,8 @@ mod tests {
         "preset_test_results",
         "start_export",
         "cancel_export",
+        // The Export Frame action (`features/frameExport/client.ts`, ADR 069).
+        "export_frame",
         // The list of the export queue for a page that loaded again (ADR 049).
         "export_queue_snapshot",
         "reveal_export_output",

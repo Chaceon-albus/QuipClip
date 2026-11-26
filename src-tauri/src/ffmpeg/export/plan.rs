@@ -337,7 +337,8 @@ pub fn build_plan(
     // Checks 7 to 11 are about the output file. A request with no destination, such as the
     // measurement of ADR 061, writes no file, so it skips them.
     if let Some(destination) = request.destination {
-        check_destination(destination, sources, &source_identities, &inspect)?;
+        let source_paths: Vec<&Path> = sources.iter().map(|source| source.path).collect();
+        check_destination(destination, &source_paths, &source_identities, &inspect)?;
     }
 
     let preset = request.preset;
@@ -368,7 +369,6 @@ pub fn build_plan(
     };
 
     let zero = zero_rational();
-    let margin = seek_margin_rational();
     // An audio-only export of sources with no audio would write nothing at all, so it is
     // refused here, before the rate question below can be asked of a stream that is absent. A
     // stream that holds no packets is no audio either: the export would be silence alone.
@@ -513,16 +513,8 @@ pub fn build_plan(
             None => zero,
         });
 
-        let raw_seek = in_seconds
-            .sub(format_start_time)
-            .and_then(|value| value.sub(margin))
+        let seek_seconds = input_seek_seconds(in_seconds, format_start_time)
             .ok_or(ExportErrorCode::InvalidSegment)?;
-        // ADR 014's "The seek" section clamps at zero and requires the renderer to omit
-        // `-ss` for a clamped input rather than emit a trailing `-ss 0` (measurement 7).
-        // `Rational` always stores a positive denominator, so the sign lives entirely in
-        // the numerator: `num() > 0` is an exact "is this strictly positive" test, so an
-        // exact zero clamps to `None` exactly like a negative value does.
-        let seek_seconds = (raw_seek.num() > 0).then_some(raw_seek);
 
         let (audio_in_tick, audio_out_tick) = match (&audio, &source_audio[segment.source]) {
             (Some(_), Some(stream)) => {
@@ -806,6 +798,16 @@ struct DisplayGeometry {
     square: bool,
 }
 
+/// The display size of `probe` as `(width, height)`: the coded size with the SAR and the rotation
+/// applied, as the plan reads it before it fits a picture into a canvas (ADR 053). `None` for a
+/// frame without a size, or when the arithmetic overflows.
+///
+/// The Export Frame command (ADR 069) writes its picture at this size.
+#[must_use]
+pub fn display_size(probe: &MediaProbe) -> Option<(u32, u32)> {
+    display_geometry(probe).map(|geometry| (geometry.width, geometry.height))
+}
+
 /// The [`DisplayGeometry`] of `probe`, or `None` for a frame without a size. An unknown SAR
 /// counts as 1.
 fn display_geometry(probe: &MediaProbe) -> Option<DisplayGeometry> {
@@ -977,10 +979,14 @@ fn source_path_is_valid(path: &Path) -> bool {
 /// Checks 7 to 11 of [`build_plan`], for a request that has a destination: the output path is
 /// valid, its parent directory exists, the path is not a directory or another kind of special
 /// file, it does not name a source, and the user did not protect it against writing.
-/// `source_identities` holds the identity of each source, which checks 4 to 6 read.
-fn check_destination(
+/// `source_paths` holds the path of each source, and `source_identities` the identity of each
+/// source file, which checks 4 to 6 read.
+///
+/// The Export Frame command (ADR 069) runs the same checks on its output path, with every source
+/// of the session, so an image and an export refuse the same destinations.
+pub fn check_destination(
     destination: &Path,
-    sources: &[PlanSource<'_>],
+    source_paths: &[&Path],
     source_identities: &[PathIdentity],
     inspect: &impl Fn(&Path) -> PathFacts,
 ) -> Result<(), ExportErrorCode> {
@@ -1019,7 +1025,7 @@ fn check_destination(
         destination_facts,
         PathFacts::File { identity, .. } if source_identities.contains(&identity)
     );
-    if sources.iter().any(|source| source.path == destination) || same_identity {
+    if source_paths.contains(&destination) || same_identity {
         return Err(ExportErrorCode::OutputEqualsSource);
     }
 
@@ -1075,6 +1081,30 @@ fn zero_rational() -> Rational {
 fn seek_margin_rational() -> Rational {
     Rational::new(SEEK_MARGIN_SECONDS, 1)
         .expect("SEEK_MARGIN_SECONDS/1 always reduces to a valid Rational")
+}
+
+/// The input seek of ADR 014 for a cut that starts at `in_seconds` on the timeline of the
+/// container: `in_seconds` less the start time of the container less [`SEEK_MARGIN_SECONDS`].
+/// `None` inside the answer means no seek: the value is not above zero. `None` as the answer
+/// means that the arithmetic overflowed.
+///
+/// ADR 014's "The seek" section clamps at zero and requires the renderer to omit `-ss` for a
+/// clamped input rather than emit a trailing `-ss 0` (measurement 7). `Rational` always stores a
+/// positive denominator, so the sign lives entirely in the numerator: `num() > 0` is an exact "is
+/// this strictly positive" test, so an exact zero clamps to `None` exactly like a negative value
+/// does.
+///
+/// [`build_plan`] seeks each piece with it, and the Export Frame command (ADR 069) seeks its one
+/// frame with it, so both read a source from the same point.
+#[must_use]
+pub fn input_seek_seconds(
+    in_seconds: Rational,
+    format_start_time: Rational,
+) -> Option<Option<Rational>> {
+    let raw_seek = in_seconds
+        .sub(format_start_time)?
+        .sub(seek_margin_rational())?;
+    Some((raw_seek.num() > 0).then_some(raw_seek))
 }
 
 /// The longest channel layout name [`silence_layout`] copies from the probe into the graph.

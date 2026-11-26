@@ -56,6 +56,7 @@ export const SHORTCUT_ACTIONS = [
   "redo",
   "openMedia",
   "export",
+  "exportFrame",
   "openSettings",
   "zoomIn",
   "zoomOut",
@@ -455,6 +456,13 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     key: letter("E"),
     modifiers: ["primary", "shift"],
     action: "exportOrder",
+    repeat: "taken",
+  },
+  // ADR 069. `primary` with S alone stays free for a later Save of the project.
+  {
+    key: letter("S"),
+    modifiers: ["primary", "shift"],
+    action: "exportFrame",
     repeat: "taken",
   },
   {

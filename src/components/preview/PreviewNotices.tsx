@@ -7,7 +7,8 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, X } from "lucide-react";
+import type { FrameExportNoticeView } from "./frameExportNoticeRules";
 import type { WaveformNotice } from "./waveformNoticeRules";
 import { ProgressBar } from "@/components/common/ProgressBar";
 import { DiagnosticDetails } from "@/components/common/DiagnosticDetails";
@@ -120,7 +121,7 @@ function NoticeBanner({
   children?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const isWarning = previewNoticeTone(kind) === "warning";
+  const tone = previewNoticeTone(kind);
   const [phase, setPhase] = useState<PreviewNoticePhase>("shown");
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -184,7 +185,11 @@ function NoticeBanner({
     <div
       className={cn(
         "pointer-events-auto flex items-start gap-2 rounded-md border bg-preview-background/95 px-3 py-2 text-xs text-preview-foreground shadow-floating",
-        isWarning ? "border-warning/50" : "border-destructive/50",
+        tone === "warning"
+          ? "border-warning/50"
+          : tone === "success"
+            ? "border-success/50"
+            : "border-destructive/50",
         phase === "leaving"
           ? "animate-out fade-out-0 fill-mode-forwards"
           : "animate-in fade-in-0 slide-in-from-top-1",
@@ -199,13 +204,20 @@ function NoticeBanner({
     >
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div role="alert" className="flex items-start gap-2">
-          <AlertCircle
-            aria-hidden="true"
-            className={cn(
-              "mt-px size-4 shrink-0",
-              isWarning ? "text-warning" : "text-destructive",
-            )}
-          />
+          {tone === "success" ? (
+            <CheckCircle2
+              aria-hidden="true"
+              className="mt-px size-4 shrink-0 text-success"
+            />
+          ) : (
+            <AlertCircle
+              aria-hidden="true"
+              className={cn(
+                "mt-px size-4 shrink-0",
+                tone === "warning" ? "text-warning" : "text-destructive",
+              )}
+            />
+          )}
           <p className="min-w-0 flex-1 pt-px font-medium wrap-break-word">{message}</p>
         </div>
         {/* The controls line up with the message, past the 16px icon and its 8px gap. */}
@@ -354,6 +366,43 @@ export function WaveformNoticeBanner({
     <NoticeBanner
       kind="waveformError"
       message={t(notice.messageKey, { name: notice.name })}
+      onDismiss={onDismiss}
+      onReturnFocus={onReturnFocus}
+    >
+      {notice.detail ? <ImportErrorDetails text={notice.detail} /> : undefined}
+    </NoticeBanner>
+  );
+}
+
+/**
+ * The notice of Export Frame (ADR 069): the file name of the saved image, or the failure with
+ * the diagnostic text of FFmpeg when there is one. The first leaves by itself, and the second
+ * stays until the user dismisses it.
+ */
+export function FrameExportNoticeBanner({
+  notice,
+  onDismiss,
+  onReturnFocus,
+}: {
+  notice: FrameExportNoticeView;
+  onDismiss: () => void;
+  onReturnFocus: () => void;
+}) {
+  const { t } = useTranslation();
+  if (notice.kind === "frameExport") {
+    return (
+      <NoticeBanner
+        kind="frameExport"
+        message={t(notice.messageKey, { name: notice.name })}
+        onDismiss={onDismiss}
+        onReturnFocus={onReturnFocus}
+      />
+    );
+  }
+  return (
+    <NoticeBanner
+      kind="frameExportError"
+      message={t(notice.messageKey, { defaultValue: t("frameExportError.unknown") })}
       onDismiss={onDismiss}
       onReturnFocus={onReturnFocus}
     >

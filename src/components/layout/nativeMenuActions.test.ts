@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { getSourceRevisionKey } from "@/features/media";
 import { en } from "@/i18n/locales/en";
 import type { Pts, TickCount } from "@/types/project";
 import {
@@ -108,6 +109,7 @@ describe("parseNativeMenuAction", () => {
   it("accepts the action of each command item that sends one", () => {
     expect(parseNativeMenuAction("openMedia")).toBe("openMedia");
     expect(parseNativeMenuAction("export")).toBe("export");
+    expect(parseNativeMenuAction("exportFrame")).toBe("exportFrame");
   });
 
   it("refuses every other payload", () => {
@@ -165,6 +167,37 @@ describe("planNativeMenuCommand", () => {
     }
   });
 
+  it("exports no frame while a press on a segment edge is armed (ADR 069)", () => {
+    const media = { path: "/media/clip.mp4", fileName: "clip.mp4", size: 1, mtime: 2 };
+    const snapshot: ShortcutSnapshot = {
+      ...createSnapshot(),
+      frameExport: {
+        playback: {
+          isAttached: true,
+          isReady: true,
+          calibrationStatus: "ready",
+          presentedFrame: { mediaTime: 1, inferredSourcePts: pts("90000") },
+          decodeStall: null,
+          isRecalibrating: false,
+          attachedSourceRevisionKey: getSourceRevisionKey(media),
+        },
+        attachedMedia: media,
+        sessionSourcePaths: [media.path],
+        displayedTime: "00:00:01.000",
+        isBusy: false,
+      },
+    };
+    expect(planNativeMenuCommand("exportFrame", FREE, snapshot)).toMatchObject({
+      kind: "exportFrame",
+    });
+    expect(
+      planNativeMenuCommand("exportFrame", FREE, { ...snapshot, isTrimArmed: true }),
+    ).toBeNull();
+    expect(
+      planNativeMenuCommand("exportFrame", FREE, { ...snapshot, isTrimDragging: true }),
+    ).toBeNull();
+  });
+
   it("does nothing for a payload that names no command item", () => {
     expect(planNativeMenuCommand("markIn", FREE, createSnapshot())).toBeNull();
     expect(planNativeMenuCommand(null, FREE, createSnapshot())).toBeNull();
@@ -197,15 +230,20 @@ describe("the command items of the Rust menu", () => {
       if (binding === null) {
         continue;
       }
-      // `CmdOrCtrl` is Cmd on macOS, which is `primary` there, and no other modifier is held.
-      expect(binding.modifiers).toEqual(["primary"]);
+      // `CmdOrCtrl` is Cmd on macOS, which is `primary` there. Shift is the one other modifier
+      // that a command item holds (Export Frame, ADR 069).
+      expect(binding.modifiers[0]).toBe("primary");
+      expect(binding.modifiers.slice(1).every((modifier) => modifier === "shift")).toBe(
+        true,
+      );
       const key =
         binding.key.kind === "letter"
           ? binding.key.letter
           : binding.key.kind === "character"
             ? binding.key.character
             : null;
-      expect(item.accelerator).toBe(`CmdOrCtrl+${key}`);
+      const shift = binding.modifiers.includes("shift") ? "Shift+" : "";
+      expect(item.accelerator).toBe(`CmdOrCtrl+${shift}${key}`);
     }
   });
 
@@ -215,6 +253,9 @@ describe("the command items of the Rust menu", () => {
     );
     expect(labels.get("openMedia")).toBe(en.titleBar.menu.openMedia);
     expect(labels.get("export")).toBe(en.titleBar.menu.export);
+    // The title bar has no Export Frame item. The label is the name of the action in the
+    // transport bar, with the ellipsis of an item that opens a dialog (ADR 069).
+    expect(labels.get("exportFrame")).toBe(`${en.transport.action.exportFrame}…`);
     // The title bar has no Settings item. The label is the standard macOS label, with the
     // ellipsis character of the catalogs.
     expect(labels.get("openSettings")).toBe(`${en.settings.title}…`);

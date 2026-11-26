@@ -101,6 +101,9 @@ pub enum FlvInputFallback {
     HeadNotWritten(String),
     /// The export was canceled.
     Canceled,
+    /// The file no longer holds the revision of [`FlvInputRequest::expected`], and the request
+    /// asked for that revision only ([`FlvInputRequest::strict_revision`]).
+    RevisionChanged,
 }
 
 /// What [`locate_flv_input`] reads.
@@ -123,6 +126,11 @@ pub struct FlvInputRequest<'a> {
     /// The size and the modification time of the revision that the pieces were marked against,
     /// when the request names one. Preparation checked that the file still holds it.
     pub expected: Option<(u64, i64)>,
+    /// True to refuse a file that no longer holds [`Self::expected`] with
+    /// [`FlvInputFallback::RevisionChanged`], instead of taking the file as it is now. The
+    /// Export Frame command asks for this (ADR 069): its image must come from the recorded
+    /// revision. A video export keeps the fallback.
+    pub strict_revision: bool,
 }
 
 /// The target of a locate in milliseconds: the time rounded down to the millisecond.
@@ -165,17 +173,26 @@ pub fn locate_flv_input(request: &FlvInputRequest<'_>) -> Result<FlvInput, FlvIn
         size: media.size,
         mtime: media.mtime,
     };
-    let revision = request
-        .expected
-        .map(|(size, mtime)| Revision {
-            path: media.path_text.clone(),
-            size,
-            mtime,
-        })
-        .filter(|expected| {
-            growth::verdict(expected, &media.path, media.size, media.mtime) != Verdict::Changed
-        })
-        .unwrap_or(now);
+    let revision = match request.expected {
+        Some((size, mtime)) => {
+            let expected = Revision {
+                path: media.path_text.clone(),
+                size,
+                mtime,
+            };
+            if growth::verdict(&expected, &media.path, media.size, media.mtime) != Verdict::Changed
+            {
+                // The same revision, or a recording that only grew: the reads stop at the
+                // recorded size (ADR 058).
+                expected
+            } else if request.strict_revision {
+                return Err(FlvInputFallback::RevisionChanged);
+            } else {
+                now
+            }
+        }
+        None => now,
+    };
     let (source, cache) = request
         .windows
         .flv_source(
@@ -366,6 +383,7 @@ mod tests {
             windows: &PreviewWindows::default(),
             cancel: None,
             expected: None,
+            strict_revision: false,
         })
     }
 
@@ -424,6 +442,16 @@ mod tests {
     /// The FLV input of `path` for one piece at 2.067 s, for pieces marked against the revision
     /// `expected`.
     fn locate_expecting(path: &Path, cache_root: &Path, expected: Option<(u64, i64)>) -> FlvInput {
+        locate_expecting_with(path, cache_root, expected, false).unwrap()
+    }
+
+    /// [`locate_expecting`], with the strict mode of the Export Frame command when `strict`.
+    fn locate_expecting_with(
+        path: &Path,
+        cache_root: &Path,
+        expected: Option<(u64, i64)>,
+        strict: bool,
+    ) -> Result<FlvInput, FlvInputFallback> {
         let work = WorkDirectory::create(
             &crate::app_cache::work_directory(cache_root),
             EXPORT_WORK_DIRECTORY,
@@ -439,8 +467,8 @@ mod tests {
             windows: &PreviewWindows::default(),
             cancel: None,
             expected,
+            strict_revision: strict,
         })
-        .unwrap()
     }
 
     /// True when the keyframe cache holds a directory for `revision`.
@@ -514,6 +542,55 @@ mod tests {
 
         assert_eq!(input.source_size, restarted.len() as u64);
         assert!(!cached(&cache_root, &revision));
+    }
+
+    #[test]
+    fn a_strict_locate_refuses_a_file_that_changed_after_the_check() {
+        // The Export Frame command (ADR 069): the file is replaced between the revision check
+        // and the locate, and the image must not come from the replacement.
+        let recording = recording(&RecordingOptions::default());
+        let size = recording.bytes.len() / 2;
+        let (directory, path) = write_source("live.flv", &recording.bytes[..size]);
+        let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
+        let revision = Revision {
+            path: media.path_text.clone(),
+            size: size as u64,
+            mtime: media.mtime,
+        };
+        growth::remember(&revision, &media.path);
+        let mut restarted = recording.bytes.clone();
+        restarted[size - 10] ^= 0xFF;
+        fs::write(&path, &restarted).unwrap();
+        let cache_root = directory.path.join("cache");
+
+        let result =
+            locate_expecting_with(&path, &cache_root, Some((size as u64, media.mtime)), true);
+
+        assert_eq!(result, Err(FlvInputFallback::RevisionChanged));
+        assert!(!cached(&cache_root, &revision));
+    }
+
+    #[test]
+    fn a_strict_locate_keeps_the_recorded_size_of_a_recording_that_only_grew() {
+        let recording = recording(&RecordingOptions::default());
+        let size = recording.bytes.len() / 2;
+        let (directory, path) = write_source("live.flv", &recording.bytes[..size]);
+        let media = crate::commands::media::validate_media(&path.to_string_lossy()).unwrap();
+        let revision = Revision {
+            path: media.path_text.clone(),
+            size: size as u64,
+            mtime: media.mtime,
+        };
+        growth::remember(&revision, &media.path);
+        fs::write(&path, &recording.bytes).unwrap();
+        let cache_root = directory.path.join("cache");
+
+        let input =
+            locate_expecting_with(&path, &cache_root, Some((size as u64, media.mtime)), true)
+                .unwrap();
+
+        assert!(input.source_size <= size as u64);
+        assert!(cached(&cache_root, &revision));
     }
 
     #[test]
@@ -713,6 +790,7 @@ mod tests {
             windows: &windows,
             cancel: None,
             expected: None,
+            strict_revision: false,
         });
         assert_eq!(result, Err(FlvInputFallback::ConfigChange));
     }

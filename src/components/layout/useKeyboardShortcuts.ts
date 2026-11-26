@@ -3,11 +3,13 @@ import { exportOrderDialogStore } from "@/components/timeline/exportOrderDialogS
 import { segmentRenameDialogStore } from "@/components/timeline/segmentRenameDialogStore";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { exportPanelStore } from "@/features/export";
+import { frameExportController } from "@/features/frameExport";
 import { openMediaFileDialog } from "@/features/media";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
 import { openExportFlow } from "./exportFlowController";
+import { readFrameExportSnapshot } from "./frameExportSnapshot";
 import { isPageOverlayOpen } from "./nativeContextMenuState";
 import {
   OPEN_TOOLTIP_SELECTOR,
@@ -41,6 +43,7 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
     viewport: timelineViewportStore.getState(),
     isTrimDragging: segmentTrimSession.isDragging(),
     isTrimArmed: segmentTrimSession.isPressArmed(),
+    frameExport: readFrameExportSnapshot(),
   };
 }
 
@@ -133,6 +136,11 @@ export function runShortcutCommand(command: ShortcutCommand): void {
         filterName: i18n.t("dialog.videoFilter"),
         audioFilterName: i18n.t("dialog.audioFilter"),
       });
+      return;
+    case "exportFrame":
+      // The facts were recorded when the plan accepted the action (ADR 069). The controller
+      // opens the save dialog and sends the command.
+      void frameExportController.start(command.facts);
       return;
     case "openSettings":
       // The call of the settings button of the status bar. The Settings window is a window

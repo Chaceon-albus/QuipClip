@@ -18,6 +18,7 @@ const APP_COMMANDS: &[&str] = &[
     "preset_test_results",
     "start_export",
     "cancel_export",
+    "export_frame",
     "export_queue_snapshot",
     "reveal_export_output",
     "import_media",

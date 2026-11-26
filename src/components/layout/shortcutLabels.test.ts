@@ -299,6 +299,14 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Meta+Shift+E",
     ariaWindows: "Control+Shift+E",
   },
+  // ADR 069.
+  {
+    id: "exportFrame:primary:shift:S",
+    macos: "⇧⌘S",
+    windows: "Ctrl+Shift+S",
+    ariaMacos: "Meta+Shift+S",
+    ariaWindows: "Control+Shift+S",
+  },
   {
     id: "openSettings:primary:,",
     macos: "⌘,",

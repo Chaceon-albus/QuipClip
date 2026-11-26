@@ -36,6 +36,7 @@ import {
   type TimelineState,
   type TimelineViewportState,
 } from "@/features/timeline";
+import type { FrameExportFacts } from "@/features/frameExport/controller";
 import { I64_MAX, isPtsString, isTickCountString } from "@/lib/time";
 import { frameIndexOfTicks, lastFrameIndexOfExtent } from "@/lib/timecode";
 import type { Pts, Segment } from "@/types/project";
@@ -54,6 +55,7 @@ import {
   isSourceActive,
 } from "./actionConditions";
 import { findEditPoint } from "./editPointJump";
+import { planFrameExport, type FrameExportSnapshot } from "./frameExportPlan";
 import type { ShortcutAction } from "./shortcutBindings";
 import {
   PLAYING_ARROW_JUMP_SECONDS,
@@ -153,6 +155,12 @@ export interface ShortcutSnapshot {
    * the actions of `EDGE_PRESS_LOCKED_ACTIONS` do nothing. Absent means false.
    */
   readonly isTrimArmed?: boolean;
+  /**
+   * The state that the plan of Export Frame reads (ADR 069): the playback store of the attached
+   * element, whose PTS is a source PTS, and the facts that the action records. Absent means that
+   * Export Frame does nothing.
+   */
+  readonly frameExport?: FrameExportSnapshot;
 }
 
 /**
@@ -161,7 +169,7 @@ export interface ShortcutSnapshot {
  * trim, and the limit, the snap and the preview of the trim would then be stale. Select All
  * would move the selection away from the segment that the trim selected (ADR 045). Rename
  * Segment and Export Order would open a modal dialog while the drag holds the pointer (ADR 065,
- * ADR 066).
+ * ADR 066). Export Frame does nothing during a trim (ADR 069).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
   [
@@ -170,6 +178,7 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
     "deleteSegment",
     "renameSegment",
     "exportOrder",
+    "exportFrame",
     "selectAllSegments",
     "undo",
     "redo",
@@ -179,10 +188,11 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
 /**
  * The actions that also do nothing while an edge press is armed (`isTrimArmed`), before it
  * becomes a trim. Rename Segment and Export Order open a modal dialog, and a move of the held
- * pointer behind it would start a trim while the dialog is open (ADR 065, ADR 066).
+ * pointer behind it would start a trim while the dialog is open (ADR 065, ADR 066). Export
+ * Frame opens the save dialog of the system, which is modal in the same way (ADR 069).
  */
 export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
-  new Set<ShortcutAction>(["renameSegment", "exportOrder"]);
+  new Set<ShortcutAction>(["renameSegment", "exportOrder", "exportFrame"]);
 
 /**
  * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
@@ -254,6 +264,11 @@ export type ShortcutCommand =
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
   | { readonly kind: "export" }
+  | {
+      readonly kind: "exportFrame";
+      /** The facts that the plan recorded when it accepted the action (ADR 069). */
+      readonly facts: FrameExportFacts;
+    }
   | { readonly kind: "openSettings" }
   | { readonly kind: "zoomIn" }
   | { readonly kind: "zoomOut" }
@@ -989,6 +1004,20 @@ export function planShortcutCommand(
 
     case "export":
       return canExportMedia(hasMedia) ? { kind: "export" } : null;
+
+    case "exportFrame": {
+      // ADR 069. The plan reads the playback store of the attached element, and records the
+      // facts of the action at once. The locks above already refused a drag and an armed edge
+      // press. The plan reads both again, for the button.
+      if (snapshot.frameExport === undefined) {
+        return null;
+      }
+      const facts = planFrameExport(snapshot.frameExport, {
+        isTrimDragging: snapshot.isTrimDragging === true,
+        isTrimArmed: snapshot.isTrimArmed === true,
+      });
+      return facts === null ? null : { kind: "exportFrame", facts };
+    }
 
     case "openSettings":
       // The settings button of the status bar has no condition.

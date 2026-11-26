@@ -39,7 +39,7 @@ The plan accepts the action only while all of these conditions are true:
 - The playback store holds a confirmed frame of the attached element, and the calibration is
   ready. This is the condition of Mark In with no current segment (ADR 003, ADR 007).
 - The attached element is not stalled (ADR 039) and not retired (ADR 063).
-- No drag trims the edge of a segment (ADR 030).
+- No drag trims the edge of a segment, and no press on an edge is armed (ADR 030).
 - No other Export Frame action is in progress.
 
 When the plan accepts the action, it records these facts at once, and the action is in
@@ -70,7 +70,7 @@ path of the output.
 
 The command refuses the request when one of these is true:
 
-- The path of the output does not end in `.png`.
+- The path of the output does not end in `.png`. The letters can have either case.
 - The path fails the destination check of an export (ADR 016): it is not absolute, its folder
   does not exist, or it is a folder.
 - The path is one of the sources of the request, by its path or by the identity of its file.
@@ -103,9 +103,21 @@ One FFmpeg process decodes and writes one frame:
 - The picture has 8 bits for each of red, green and blue, and no alpha.
 
 The process writes a temporary file beside the destination. The command then reads that file
-with ffprobe. The command fails when FFmpeg fails, when FFmpeg runs for more than 60 seconds,
-or when the file is not one PNG picture of the planned width and height. Otherwise the command
-renames the file onto the destination, as an export does (ADR 004).
+itself. The command fails when FFmpeg fails, when FFmpeg has not ended 60 seconds after it
+started, or when the file is not one complete PNG picture of the planned width and height. The
+command reads the clock when the guard of the process returns, so an FFmpeg that ends in the
+last moments before the limit can count as late. A
+complete picture has the PNG signature, an `IHDR` chunk with that size, 8 bits, the colour type
+RGB, and a compression, a filter and an interlace method that PNG defines, one run of one or
+more `IDAT` chunks, a correct CRC in each chunk, and an `IEND` chunk at the end of the file. The
+command does not decompress the picture data. Otherwise the command renames the file onto the destination, as an export does
+(ADR 004). On Windows that rename waits at most 2 seconds for another process that holds the
+destination.
+
+The steps before FFmpeg have the time limit of the preparation of an export, for one source
+(ADR 050): the checks of the request, the probe, and the FLV input. When a step has not
+answered at that limit, the command ends with an error. A step that answers after the command
+ended starts no FFmpeg, and it removes what it made, as the helper of an export does.
 
 One Export Frame command runs at a time. It can run while a video export runs. It is not a run
 of the export queue.
@@ -120,7 +132,12 @@ not ask about it.
 
 When the command ends, a notice in the notification area of the preview gives the name of the
 file. When it fails, the notice gives the error and the detail of FFmpeg when there is one. The
-notice belongs to the action, so a change of the clip does not remove it.
+notice belongs to the action, so a change of the clip does not remove it, and the removal of
+each clip does not remove it.
+
+The notice of a success goes after 5 seconds, by the rule of the other notices of the preview
+that go by themselves: the pointer or the focus on the notice holds it. The notice of a failure
+stays until the user closes it, or until the plan accepts the action again.
 
 ## Consequences
 
@@ -138,6 +155,18 @@ notice belongs to the action, so a change of the clip does not remove it.
 - A user who gives an export a name that ends in `.png`, and then gives an image the same path
   while that export waits or runs, gets the file of the one that ends last. Neither command
   knows the destination of the other.
+- The command checks the revision of the source before FFmpeg starts, and for an FLV again
+  when it builds the input. A file that is replaced after those checks, before FFmpeg opens it,
+  is not detected. An export has the same limit.
+- The read of the result and the rename have no time limit of their own, as the rename of an
+  export has none. A file system that stops answering at that moment keeps the action in
+  progress until it answers. An exit does not wait for it longer than the budget of ADR 017.
+- The temporary file gets the mode of a destination that exists. So a destination that the user
+  can write and cannot read makes the check of the result fail, and the destination stays as it
+  was.
+- When the user moves or renames the folder of the destination while the command runs, the
+  command fails, and its temporary file can stay in that folder, as the temporary file of an
+  export can.
 - The notice has no button that shows the file in the file manager. ADR 029 permits that action
   only for the path of an export run.
 - JPEG is not offered. A later record can add it.

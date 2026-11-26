@@ -146,7 +146,10 @@ export interface SegmentTrimSession {
    * its message each time the count goes up.
    */
   readonly getNoticeCount: () => number;
-  /** Subscribes to changes of the view and of the notice count. */
+  /**
+   * Subscribes to changes of the view, of the notice count, and of the armed edge press. The
+   * button of Export Frame reads the armed press to show itself disabled (ADR 069).
+   */
   readonly subscribe: (listener: () => void) => () => void;
   /** The trim that the pointer drags, or null when no trim is in its `dragging` phase. */
   readonly getDraggingTrim: () => SegmentTrim | null;
@@ -428,7 +431,12 @@ export function createSegmentTrimSession(
     isDragging: () => draggingTrim() !== null,
 
     armPress: (press) => {
+      const changed = (armedPress === null) !== (press === null);
       armedPress = press;
+      // Only a change between armed and not armed is news to a listener.
+      if (changed) {
+        notify();
+      }
     },
 
     isPressArmed: () => armedPress !== null,

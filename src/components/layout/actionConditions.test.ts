@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canDeleteSegment,
+  canExportFrame,
   canExportMedia,
   canFitTimeline,
   canOpenExportOrder,
@@ -24,6 +25,24 @@ describe("actionConditions", () => {
     expect(canOpenExportOrder(256)).toBe(true);
     expect(canOpenExportOrder(Number.NaN)).toBe(false);
     expect(canOpenExportOrder(2.5)).toBe(false);
+  });
+
+  it("exports a frame only under the condition of Mark In and no other blocker (ADR 069)", () => {
+    const ready = {
+      hasActiveSource: true,
+      isCalibrated: true,
+      hasConfirmedFrame: true,
+      isDecodeStalled: false,
+      isRecalibrating: false,
+      isTrimDragging: false,
+      isTrimArmed: false,
+      isBusy: false,
+    };
+    expect(canExportFrame(ready)).toBe(true);
+    // Each fact alone, turned the other way, refuses the action.
+    for (const key of Object.keys(ready) as (keyof typeof ready)[]) {
+      expect(canExportFrame({ ...ready, [key]: !ready[key] }), key).toBe(false);
+    }
   });
 
   it("makes a source active only with open media, an attached element and metadata", () => {

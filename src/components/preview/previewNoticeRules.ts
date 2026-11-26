@@ -78,24 +78,50 @@ export function importErrorHintKey(
  * - `waveform`: a job reads a file for its audio envelope, so the preview can stutter
  *   (ADR 056).
  * - `waveformError`: a job of the audio envelope failed (ADR 056).
+ * - `frameExport`: Export Frame saved its image (ADR 069).
+ * - `frameExportError`: Export Frame failed (ADR 069).
  */
 export type PreviewNoticeKind =
-  "import" | "playback" | "decodeStall" | "mediaSource" | "waveform" | "waveformError";
+  | "import"
+  | "playback"
+  | "decodeStall"
+  | "mediaSource"
+  | "waveform"
+  | "waveformError"
+  | "frameExport"
+  | "frameExportError";
 
 /**
  * The colour of a notice. A failed import, play or seek is an error. A decode stall is a
  * warning: the preview continues at the next seek, and the export does not depend on it. A
  * notice about a video that plays through FFmpeg (ADR 046) is a warning too: the video plays.
  * The notice of an envelope job that reads a file is a warning: the preview works, and can
- * stutter. A failed envelope job is an error (ADR 056).
+ * stutter. A failed envelope job is an error (ADR 056). The image that Export Frame saved is a
+ * success, and a failed Export Frame is an error (ADR 069).
  */
-export type PreviewNoticeTone = "destructive" | "warning";
+export type PreviewNoticeTone = "destructive" | "warning" | "success";
 
 /** The colour of a notice of each kind. */
 export function previewNoticeTone(kind: PreviewNoticeKind): PreviewNoticeTone {
+  if (kind === "frameExport") {
+    return "success";
+  }
   return kind === "decodeStall" || kind === "mediaSource" || kind === "waveform"
     ? "warning"
     : "destructive";
+}
+
+/**
+ * True while the preview shows its notification area. The notices of the attached media need
+ * it while media is attached. The notice of Export Frame belongs to the action, so the area
+ * also shows for it when no clip is attached, for example after the removal of the last clip
+ * while the command ran (ADR 069).
+ */
+export function showsNoticeArea(
+  hasAttachedMedia: boolean,
+  hasFrameExportNotice: boolean,
+): boolean {
+  return hasAttachedMedia || hasFrameExportNotice;
 }
 
 /**
@@ -131,6 +157,10 @@ export type NoticeTimerStep = {
  * is over it or the focus is in it, it is paused and gets no timer. When the pause ends, the
  * full duration starts again, so the user always has the whole time to read it.
  *
+ * The notice of a saved image (`frameExport`, ADR 069) leaves as a playback error does: it only
+ * reports that the action ended. A failed Export Frame stays until the user dismisses it,
+ * because it can hold diagnostic text.
+ *
  * @param paused True while the pointer is over the notice or the focus is in it.
  */
 export function resolveNoticeTimer(
@@ -138,7 +168,7 @@ export function resolveNoticeTimer(
   phase: PreviewNoticePhase,
   paused: boolean,
 ): NoticeTimerStep | null {
-  if (kind !== "playback" || paused) {
+  if ((kind !== "playback" && kind !== "frameExport") || paused) {
     return null;
   }
   return phase === "shown"

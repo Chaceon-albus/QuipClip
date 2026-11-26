@@ -2,8 +2,9 @@
  * The command items of the macOS application menu, and the rule that decides what each one
  * does.
  *
- * `src-tauri/src/menu.rs` builds three command items: Settings, Open Media and Export. A click
- * on Open Media or Export, or its key equivalent, sends `BACKEND_EVENTS.MENU_ACTION` to the
+ * `src-tauri/src/menu.rs` builds four command items: Settings, Open Media, Export and Export
+ * Frame. A click on Open Media, Export or Export Frame, or its key equivalent, sends
+ * `BACKEND_EVENTS.MENU_ACTION` to the
  * main window with the name of its action. The name is an action of the key table (ADR 026),
  * and this module plans the same command for it as the window keyboard layer plans for the
  * key, from the same predicates in `actionConditions.ts`. The Settings item sends no event:
@@ -50,6 +51,7 @@ import {
 export const NATIVE_MENU_ACTIONS = [
   "openMedia",
   "export",
+  "exportFrame",
 ] as const satisfies readonly ShortcutAction[];
 
 export type NativeMenuAction = (typeof NATIVE_MENU_ACTIONS)[number];

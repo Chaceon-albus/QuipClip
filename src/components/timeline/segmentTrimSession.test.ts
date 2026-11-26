@@ -327,6 +327,23 @@ describe("segmentTrimSession: the armed edge press and the dialogs (ADR 065)", (
     expect(h.session.isLocked()).toBe(false);
   });
 
+  it("tells its listeners when a press is armed and when it ends (ADR 069)", () => {
+    // The button of Export Frame shows itself disabled while a press is armed.
+    const h = createHarness();
+    const listener = vi.fn();
+    const unsubscribe = h.session.subscribe(listener);
+    h.session.armPress({ segmentId: "a", edge: "out" });
+    expect(listener).toHaveBeenCalledTimes(1);
+    // A second press on another edge is still an armed press.
+    h.session.armPress({ segmentId: "a", edge: "in" });
+    expect(listener).toHaveBeenCalledTimes(1);
+    h.session.armPress(null);
+    expect(listener).toHaveBeenCalledTimes(2);
+    h.session.armPress(null);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
+
   it("does not let an armed press become a trim while a modal dialog is open", () => {
     const h = createHarness();
     const input = {

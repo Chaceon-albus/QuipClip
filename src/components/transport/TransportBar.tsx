@@ -1,8 +1,10 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronLeft,
   ChevronRight,
+  ImageDown,
+  Loader2,
   Pause,
   Play,
   Redo2,
@@ -25,8 +27,17 @@ import {
   canUndoEdit,
   isSourceActive,
 } from "@/components/layout/actionConditions";
+import { isFrameExportAvailable } from "@/components/layout/frameExportPlan";
+import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
+import { isPageOverlayOpen } from "@/components/layout/nativeContextMenuState";
+import { planControlCommand } from "@/components/layout/shortcutCommands";
+import {
+  readShortcutSnapshot,
+  runShortcutCommand,
+} from "@/components/layout/useKeyboardShortcuts";
+import { useFrameExportStore } from "@/features/frameExport";
 import { type MediaStoreState } from "@/features/media";
-import { hasNominalFrameRate } from "@/features/playback";
+import { hasNominalFrameRate, usePlaybackStore } from "@/features/playback";
 import {
   canMarkIn,
   canMarkOut,
@@ -83,6 +94,22 @@ const selectDeleteSelectedSegments = (s: TimelineStoreState) =>
   s.deleteSelectedSegments;
 const selectUndo = (s: TimelineStoreState) => s.undo;
 const selectRedo = (s: TimelineStoreState) => s.redo;
+
+/**
+ * Runs Export Frame from the button: the plan of the key on the state at click time (ADR 069).
+ * The button does nothing while an overlay of the page owns the commands, as the key does not
+ * (`planControlCommand`).
+ */
+const exportFrame = () => {
+  const command = planControlCommand(
+    "exportFrame",
+    isPageOverlayOpen(),
+    readShortcutSnapshot(),
+  );
+  if (command !== null) {
+    runShortcutCommand(command);
+  }
+};
 
 /** Each glyph of the Play button: one grid cell, and the cross-fade of the two states. */
 const PLAY_GLYPH_CLASS =
@@ -286,6 +313,34 @@ export function TransportBar() {
   const previousStepShortcut = shortcutOf("stepBackOneFrame");
   const playShortcut = shortcutOf("togglePlayback");
   const nextStepShortcut = shortcutOf("stepForwardOneFrame");
+  const exportFrameShortcut = shortcutOf("exportFrame");
+
+  // Export Frame reads the playback store of the attached element, whose PTS is a source PTS,
+  // and the media of the attached clip (ADR 052, ADR 069). The selector settles on a boolean, so
+  // a presented frame that does not change the answer does not render this tree.
+  const attachedMedia = useAttachedMediaStore(selectMedia);
+  const isExportingFrame = useFrameExportStore((s) => s.busy);
+  // A drag or an armed press on a segment edge locks the action, as for the key (ADR 069).
+  const isTrimDragging = useSyncExternalStore(
+    segmentTrimSession.subscribe,
+    segmentTrimSession.isDragging,
+  );
+  const isTrimArmed = useSyncExternalStore(
+    segmentTrimSession.subscribe,
+    segmentTrimSession.isPressArmed,
+  );
+  const canExportFrameNow = usePlaybackStore((s) =>
+    isFrameExportAvailable(
+      s,
+      attachedMedia,
+      { isTrimDragging, isTrimArmed },
+      isExportingFrame,
+    ),
+  );
+  const exportFrameStateId = useId();
+  const exportFrameStateText = isExportingFrame
+    ? t("transport.state.exportingFrame")
+    : null;
 
   const isUndoDisabled = !canUndoEdit(hasActiveSource, canUndo);
   const isRedoDisabled = !canRedoEdit(hasActiveSource, canRedo);
@@ -335,8 +390,10 @@ export function TransportBar() {
    * controls in English and 388 px in Chinese. The right one holds 274 px of controls, and
    * 404 px with the widest duration label, "New segment duration", in English, and 376 px in
    * Chinese. The volume slider takes 84 px of that, its 80 px and the 4 px gap after the
-   * toggle. A column never shrinks below its content, so a longer label moves the play group
-   * off the centre and does not make the controls overlap.
+   * toggle. The Export Frame button (ADR 069) adds 56 px to the right column, its 40 px and
+   * the 16 px gap after it; those figures do not count it. A column never shrinks below its
+   * content, so a longer label moves the play group off the centre and does not make the
+   * controls overlap.
    *
    * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
    * takes the 40 px row size, with the flex direction and the padding changed for the stack,
@@ -715,6 +772,43 @@ export function TransportBar() {
         </div>
 
         <Separator orientation="vertical" className="h-8 bg-border" />
+
+        {/* Export Frame (ADR 069): the frame that Mark In would mark, saved as a PNG image. An
+            icon only, so the column keeps its width. While the action runs, from the save dialog
+            to the end of the command, the button is disabled, shows a spinner and says why. The
+            span is the tooltip trigger while the button is disabled, as for the edit buttons. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex">
+              <Button
+                variant="tool-ghost"
+                size="tool-icon"
+                className="disabled:delay-150 motion-reduce:duration-0"
+                disabled={!canExportFrameNow}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={exportFrame}
+                aria-label={t("transport.action.exportFrame")}
+                aria-busy={isExportingFrame}
+                aria-describedby={exportFrameStateId}
+                aria-keyshortcuts={exportFrameShortcut?.aria}
+              >
+                {isExportingFrame ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ImageDown className="size-4" />
+                )}
+              </Button>
+              <span id={exportFrameStateId} className="sr-only">
+                {exportFrameStateText}
+              </span>
+            </span>
+          </TooltipTrigger>
+          <ShortcutTooltipContent
+            label={t("transport.action.exportFrame")}
+            keys={exportFrameShortcut?.keys}
+            reason={exportFrameStateText}
+          />
+        </Tooltip>
 
         {/* Group 5: Mute and volume. A preference and not an edit action, so it needs no
             source and is never disabled (VolumeControl). */}

@@ -10,12 +10,12 @@
 //! `ExitRequested`, so the quit goes through the gate in `commands::quit` and the dialog of
 //! the frontend. The application submenu also gets Show All, which the default menu omits and
 //! the standard macOS application menu has. And the menu holds the commands of the
-//! application: Settings in the application submenu, and Open Media and Export in the File
-//! submenu.
+//! application: Settings in the application submenu, and Open Media, Export and Export Frame in
+//! the File submenu.
 //!
 //! # The command items
 //!
-//! A command item is an ordinary item. Open Media and Export bring the main window forward
+//! A command item is an ordinary item. Open Media, Export and Export Frame bring the main window forward
 //! and send it [`MENU_ACTION_EVENT`] with the name of their action, and Rust decides nothing
 //! else. The frontend runs that action with the conditions of the window keyboard layer (ADR
 //! 026), and it does nothing while a dialog or a menu of the page is open. The items stay
@@ -109,8 +109,23 @@ const EXPORT_ITEM: CommandItem = CommandItem {
     action: MenuAction::Frontend("export"),
 };
 
+/// Export Frame, in the File submenu (ADR 069). The title bar of Windows has no item for it, so
+/// its label is the name of the action in the transport bar, with the ellipsis of an item that
+/// opens a dialog.
+const EXPORT_FRAME_ITEM: CommandItem = CommandItem {
+    id: "quipclip.export-frame",
+    label: "Export Frame…",
+    accelerator: "CmdOrCtrl+Shift+S",
+    action: MenuAction::Frontend("exportFrame"),
+};
+
 /// Every command item. [`menu_action_for`] reads this list.
-const COMMAND_ITEMS: [&CommandItem; 3] = [&SETTINGS_ITEM, &OPEN_MEDIA_ITEM, &EXPORT_ITEM];
+const COMMAND_ITEMS: [&CommandItem; 4] = [
+    &SETTINGS_ITEM,
+    &OPEN_MEDIA_ITEM,
+    &EXPORT_ITEM,
+    &EXPORT_FRAME_ITEM,
+];
 
 /// Builds the menu item of one command. The item is always enabled (see the module comment).
 fn command_menu_item<R: Runtime>(
@@ -124,7 +139,8 @@ fn command_menu_item<R: Runtime>(
 /// macOS, with the Quit item replaced, Show All added, and the command items added.
 ///
 /// The application submenu has the standard macOS order: About, Settings, Services, the Hide
-/// and Show items, and Quit. The File submenu has Open Media, Export, and Close Window. Close
+/// and Show items, and Quit. The File submenu has Open Media, Export, Export Frame, and Close
+/// Window. Close
 /// Window is the predefined item of the default File submenu. It raises the close request of
 /// the window, so the quit decision of ADR 027 still runs.
 ///
@@ -184,6 +200,7 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         &[
             &command_menu_item(handle, &OPEN_MEDIA_ITEM)?,
             &command_menu_item(handle, &EXPORT_ITEM)?,
+            &command_menu_item(handle, &EXPORT_FRAME_ITEM)?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
         ],
@@ -316,6 +333,10 @@ mod tests {
             menu_action_for(EXPORT_ITEM.id),
             Some(MenuAction::Frontend("export"))
         );
+        assert_eq!(
+            menu_action_for(EXPORT_FRAME_ITEM.id),
+            Some(MenuAction::Frontend("exportFrame"))
+        );
     }
 
     #[test]
@@ -358,6 +379,8 @@ mod tests {
         assert_eq!(OPEN_MEDIA_ITEM.accelerator, "CmdOrCtrl+O");
         assert_eq!(EXPORT_ITEM.accelerator, "CmdOrCtrl+E");
         assert_eq!(SETTINGS_ITEM.accelerator, "CmdOrCtrl+,");
+        // ADR 069 binds S with `primary` and Shift.
+        assert_eq!(EXPORT_FRAME_ITEM.accelerator, "CmdOrCtrl+Shift+S");
     }
 
     #[test]
@@ -368,5 +391,7 @@ mod tests {
         assert_eq!(OPEN_MEDIA_ITEM.label, "Open Media…");
         assert_eq!(EXPORT_ITEM.label, "Export…");
         assert_eq!(SETTINGS_ITEM.label, "Settings…");
+        // `transport.action.exportFrame`, the name of the action in the transport bar.
+        assert_eq!(EXPORT_FRAME_ITEM.label, "Export Frame…");
     }
 }

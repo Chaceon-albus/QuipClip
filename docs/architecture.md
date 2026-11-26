@@ -481,9 +481,10 @@ source edit points.
 The Export Frame action saves one frame of the source as a PNG file (ADR 069). Its key is
 `Cmd+Shift+S` or `Ctrl+Shift+S`. The frame is the first frame of the segment that a Mark In at
 that moment would start, at the display size of the source. The action is not a run of the
-export queue. A command of its own decodes the frame with one FFmpeg process, reads the result
-with ffprobe, and renames it onto the destination. An exit of the application cancels that
-command and waits for it within the budget of ADR 017.
+export queue. A command of its own decodes the frame with one FFmpeg process. It renames the
+result onto the destination only when the result is one complete PNG picture of the planned
+size. An exit of the application cancels that command and waits for it within the budget of
+ADR 017.
 
 A file can hold several audio streams (ADR 070). The probe lists them. For a source with two or
 more, the menu of a clip label has the submenu "Audio Track", and the choice of the user is the

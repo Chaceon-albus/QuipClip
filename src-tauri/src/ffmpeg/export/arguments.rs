@@ -50,6 +50,7 @@
 //! `render_seek` has the rounding rule and its one-sided guarantee.
 
 use super::flv_input::FlvInput;
+use super::frame::{frame_graph, FrameInput, FramePlan};
 use super::graph::{build_filter_graph, build_video_graph, input_layout, GraphInput};
 use super::graph_file::GraphFile;
 use super::inputs::InputAssignment;
@@ -465,6 +466,54 @@ fn audio_pipe_arguments(
 /// `-progress pipe:1` and without `-y`. See [`build_audio_arguments`].
 const AUDIO_PROCESS_FLAGS: [&str; 5] =
     ["-nostdin", "-hide_banner", "-loglevel", "error", "-nostats"];
+
+/// The flags the command of the Export Frame action opens with (ADR 069): [`PROCESS_FLAGS`]
+/// without `-progress pipe:1`, because no part of the command reads progress. `-y` stays: the
+/// temporary file exists before FFmpeg starts, as for an export ([`super::output`]).
+const FRAME_PROCESS_FLAGS: [&str; 6] = [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-nostats",
+    "-y",
+];
+
+/// Build the argument list of the one FFmpeg process of the Export Frame action (ADR 069), which
+/// decodes the frame of `plan` and writes it to `output` as one PNG picture.
+///
+/// The input is the input of an export: `-copyts`, then the file with the input seek of ADR 014,
+/// or with no seek when there is none, or the FLV input of ADR 046 with no seek ([`push_input`],
+/// [`push_flv_input`]). The graph is [`frame_graph`], and the output part is
+/// `-map [v] -frames:v 1 -c:v png -f image2 -update 1 <output>`. `-f image2` is necessary: the
+/// temporary name does not end in `.png`, so FFmpeg cannot infer a muxer from it, as for an
+/// export. `-update 1` writes the one picture to that name, with no number in it.
+///
+/// The graph is short, so it stays on the command line, and the command needs no graph file.
+#[must_use]
+pub fn build_frame_arguments(plan: &FramePlan, output: &Path) -> Vec<String> {
+    let mut arguments: Vec<String> = FRAME_PROCESS_FLAGS
+        .iter()
+        .map(|flag| (*flag).to_owned())
+        .collect();
+    arguments.push("-copyts".to_owned());
+    match &plan.input {
+        FrameInput::File { seek_seconds } => {
+            push_input(&mut arguments, *seek_seconds, &plan.source)
+        }
+        FrameInput::Flv { input, offset } => {
+            push_flv_input(&mut arguments, input, *offset, &plan.source);
+        }
+    }
+    push_pair(&mut arguments, "-filter_complex", &frame_graph(plan));
+    push_pair(&mut arguments, "-map", "[v]");
+    push_pair(&mut arguments, "-frames:v", "1");
+    push_pair(&mut arguments, "-c:v", "png");
+    push_pair(&mut arguments, "-f", "image2");
+    push_pair(&mut arguments, "-update", "1");
+    arguments.push(path_argument(output));
+    arguments
+}
 
 /// The codec of the audio in the pipe from the audio process to the encoder.
 const AUDIO_PIPE_CODEC: &str = "pcm_f32le";
@@ -4492,6 +4541,108 @@ mod tests {
         assert_eq!(
             input_arguments(&plan, Inputs::PerSource)[4..6],
             ["-i", slice]
+        );
+    }
+
+    /// The plan of a frame of stream 1 at PTS 123456, at 1280x720, read through `input`.
+    fn frame_plan(source: &str, input: FrameInput) -> FramePlan {
+        FramePlan {
+            source: PathBuf::from(source),
+            video_stream_index: 1,
+            pts: crate::time::Pts::new(123_456),
+            width: 1280,
+            height: 720,
+            input,
+        }
+    }
+
+    /// The output part of every frame command, after its input (ADR 069).
+    fn frame_output(output: &str) -> Vec<String> {
+        [
+            "-filter_complex",
+            "[0:1]trim=start_pts=123456,setpts=PTS-STARTPTS,scale=1280:720,setsar=1,format=rgb24[v]",
+            "-map",
+            "[v]",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-f",
+            "image2",
+            "-update",
+            "1",
+            output,
+        ]
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect()
+    }
+
+    const FRAME_FLAGS: [&str; 7] = [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-y",
+        "-copyts",
+    ];
+
+    #[test]
+    fn a_frame_of_a_file_seeks_before_the_frame_and_writes_one_png_picture() {
+        let plan = frame_plan(
+            "/media/clip.mp4",
+            FrameInput::File {
+                seek_seconds: Some(Rational::new(29, 2).unwrap()),
+            },
+        );
+        let mut expected: Vec<String> = FRAME_FLAGS.iter().map(|flag| (*flag).to_owned()).collect();
+        expected.extend(["-ss", "14.5", "-i", "/media/clip.mp4"].map(str::to_owned));
+        expected.extend(frame_output("/out/.cover.png.tmp-1-0"));
+        assert_eq!(
+            build_frame_arguments(&plan, Path::new("/out/.cover.png.tmp-1-0")),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_frame_of_a_file_with_no_seek_writes_no_ss() {
+        let plan = frame_plan("/media/clip.mp4", FrameInput::File { seek_seconds: None });
+        let mut expected: Vec<String> = FRAME_FLAGS.iter().map(|flag| (*flag).to_owned()).collect();
+        expected.extend(["-i", "/media/clip.mp4"].map(str::to_owned));
+        expected.extend(frame_output("/out/.cover.png.tmp-1-0"));
+        let arguments = build_frame_arguments(&plan, Path::new("/out/.cover.png.tmp-1-0"));
+        assert_eq!(arguments, expected);
+        assert!(!arguments.iter().any(|argument| argument == "-ss"));
+    }
+
+    #[test]
+    fn a_frame_of_an_flv_opens_the_head_and_the_slice_with_no_seek() {
+        let input = FlvInput {
+            head_name: head_name(0),
+            source_size: 50_000,
+            segment_offsets: vec![12_288],
+            first_frame_offset: 13,
+        };
+        let plan = frame_plan(
+            "/media/live.flv",
+            FrameInput::Flv {
+                input,
+                offset: 12_288,
+            },
+        );
+        let mut expected: Vec<String> = FRAME_FLAGS.iter().map(|flag| (*flag).to_owned()).collect();
+        expected.extend(
+            [
+                "-i",
+                "concat:h0.flv|subfile,,start,12288,end,50000,,:/media/live.flv",
+            ]
+            .map(str::to_owned),
+        );
+        expected.extend(frame_output("/out/.cover.png.tmp-1-0"));
+        assert_eq!(
+            build_frame_arguments(&plan, Path::new("/out/.cover.png.tmp-1-0")),
+            expected
         );
     }
 }
