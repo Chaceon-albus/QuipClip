@@ -88,6 +88,7 @@ document summarizes them and shows how the parts fit together.
 | [`064-keep-the-frame-step-cue-after-a-failure.md`](../.agents/decisions/064-keep-the-frame-step-cue-after-a-failure.md)                                                 | The PCM cue turns on again 3 s after a failure, except after a changed file        |
 | [`065-give-a-segment-a-name.md`](../.agents/decisions/065-give-a-segment-a-name.md)                                                                                     | A segment can have a name of one line, set in a dialog with `F2`                   |
 | [`066-change-the-export-order-in-a-dialog.md`](../.agents/decisions/066-change-the-export-order-in-a-dialog.md)                                                         | A dialog lists the segments of the export, and the user puts them in a new order   |
+| [`068-write-no-chapter-of-a-source-into-an-export.md`](../.agents/decisions/068-write-no-chapter-of-a-source-into-an-export.md)                                         | Each command that writes the output file has `-map_chapters -1`                    |
 
 ## Shape
 
@@ -360,6 +361,10 @@ than 60 s in total (`audioGapTooLong`, measurement 21). Every audio chain that r
 its audio with silence to the length of the segment. In the audio process below, each chain also
 cuts its audio to that length. A segment that the audio of the source does not reach then gets
 silence (measurement 23). The chains end in `concat`, in project array order.
+
+Each command that writes the output file has `-map_chapters -1` (ADR 068). Without it, FFmpeg
+copies the chapters of a source into the output. From the encoder command they keep their
+source times, and an MP4 or MOV file then has a wrong duration in its movie header.
 
 An export with video and with audio from the stream runs two `ffmpeg` processes (ADR 043). The
 audio process cuts the audio of each segment and writes it as WAV to its stdout. The encoder cuts

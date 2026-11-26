@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 004, ADR 014, ADR 016, ADR 017, ADR 040, ADR 043, ADR 046, ADR 048, ADR 050,
   ADR 053, ADR 054
-- Amended by: ADR 057
+- Amended by: ADR 057, ADR 068
 
 ## Context
 
@@ -199,6 +199,13 @@ each FLV input costs 345 bytes. With 85 inputs the encoder needs 31,448 bytes an
 process 29,531 bytes. With 86 inputs the encoder needs 31,793 bytes, which is above 31,743. The
 audio process opens a subset of the inputs of the encoder, with shorter fixed arguments, so the
 encoder sets the limit.
+
+(Changed on 2026-11-26.) The encoder command now has `-map_chapters -1` (ADR 068), which adds 21
+bytes. In the fixture of the test, whose paths are ASCII, the encoder needs 31,469 bytes with
+85 inputs and 31,814 bytes with 86 inputs, so the limit of 85 stays. The audio process needs
+29,552 bytes since ADR 061 gave it `-map_metadata -1`. The guard at the start of a run counts
+the bytes of the real command in UTF-8, so a command with other paths can be wider than the
+fixture.
 
 (Changed on 2026-10-28.) Preparation runs in two passes, so that the plan knows the inputs before
 the FLV step. The first pass runs the revision check, the re-probe and the correction of the

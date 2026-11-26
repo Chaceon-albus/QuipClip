@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Deciders: capric98
-- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053, ADR 054, ADR 055
+- Amended by: ADR 023, ADR 036, ADR 040, ADR 043, ADR 046, ADR 048, ADR 053, ADR 054, ADR 055,
+  ADR 068
 
 ## Context
 
