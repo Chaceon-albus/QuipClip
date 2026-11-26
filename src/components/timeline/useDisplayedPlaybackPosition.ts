@@ -39,8 +39,8 @@ export interface DisplayedPlaybackPosition {
  * `seekTargetSeconds`, and the layers draw that target in the same frame (ADR 022).
  *
  * The position is the inferred PTS of the presented frame relative to `videoStartPts`, and
- * the approximate browser clock otherwise. A source that never calibrates has no inferred
- * PTS for its whole session, and a frozen 0 would leave the playhead at the left edge while
+ * the approximate browser clock otherwise. A source that does not calibrate has no inferred
+ * PTS for as long as that lasts, and a frozen 0 would leave the playhead at the left edge while
  * the picture plays. Both branches report seconds elapsed from the start of the source, the
  * axis the whole ruler uses: the store subtracts the origin of the browser media timeline
  * from the approximate clock, and `onApproximateSeek` adds it back (ADR 003).

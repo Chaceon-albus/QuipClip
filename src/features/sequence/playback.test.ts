@@ -355,4 +355,286 @@ describe("sequence playback", () => {
     // One tick before the end of a1 lies in its last frame.
     expect(h.playback.getState().seekTargetSeconds).toBeCloseTo(249 / 25, 6);
   });
+
+  describe("the recalibration (ADR 063)", () => {
+    /** An element of `which` with its metadata, before its first frame. */
+    function attachLoaded(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const element = createFakeElement();
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, element);
+      playback.getState().syncReady(key, element);
+      return { element, key };
+    }
+
+    /**
+     * Brings the source of `which` to the recoverable state: a seek waits for the anchor, and two
+     * waits run out, one for each element. Returns the element on screen.
+     */
+    function reachRecoverable(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const first = attachLoaded(playback, which);
+      playback.getState().seekApproximate(3);
+      playback.getState().syncAnchorWaitExpired(first.key, first.element);
+      playback.getState().detach(first.key, first.element);
+      const next = attachLoaded(playback, which);
+      playback.getState().syncAnchorWaitExpired(next.key, next.element);
+      expect(playback.getState().canRecalibrate).toBe(true);
+      return next;
+    }
+
+    it("maps canRecalibrate and isRecalibrating, and passes recalibrate with the attached key", () => {
+      const h = harness([a1, b1]);
+      const shown = reachRecoverable(h.playback, A);
+      expect(h.sequence.store.getState().canRecalibrate).toBe(true);
+      // On a sequence the key of the interface is the key of the sequence.
+      const sequenceKey = h.sequence.store.getState().attachedSourceRevisionKey;
+      expect(sequenceKey).not.toBe(shown.key);
+
+      h.sequence.store.getState().recalibrate(sequenceKey ?? "");
+      expect(h.playback.getState().reloadGeneration).toBe(2);
+      expect(h.sequence.store.getState().isRecalibrating).toBe(true);
+      expect(h.sequence.store.getState().canRecalibrate).toBe(false);
+      // Not a cold switch, and the clip on screen stays.
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+
+      // The detach of the old element is not a change of the source for the interface.
+      h.playback.getState().detach(shown.key, shown.element);
+      expect(h.sequence.store.getState().attachedSourceRevisionKey).toBe(sequenceKey);
+      const next = attachLoaded(h.playback, A);
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      // The position of the store, in seconds of the clip, maps onto the virtual axis.
+      expect(next.element.currentTime).toBe(3);
+      expect(h.sequence.store.getState().seekTargetSeconds).toBe(3);
+    });
+
+    it("passes the key through with one clip", () => {
+      const h = harness([a1]);
+      const shown = reachRecoverable(h.playback, A);
+      h.sequence.store.getState().recalibrate("an old key");
+      expect(h.playback.getState().reloadGeneration).toBe(1);
+      h.sequence.store.getState().recalibrate(shown.key);
+      expect(h.playback.getState().reloadGeneration).toBe(2);
+    });
+
+    it("drops a navigation that waits for an attach, as a navigation of the user does", () => {
+      const h = harness([a1, b1]);
+      reachRecoverable(h.playback, A);
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      expect(h.sequence.store.getState().switching).toBe(true);
+
+      const key = h.sequence.store.getState().attachedSourceRevisionKey;
+      h.sequence.store.getState().recalibrate(key ?? "");
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(h.playback.getState().isRecalibrating).toBe(true);
+    });
+
+    it("keeps a cold switch in progress while a recalibration replaces the new element", () => {
+      const h = harness([a1, b1]);
+      attach(h.playback, A);
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      const first = attachLoaded(h.playback, B);
+      // The seek waits for the anchor of b1.
+      expect(h.playback.getState().hasDeferredNavigation).toBe(true);
+      expect(h.sequence.store.getState().switching).toBe(true);
+
+      h.playback.getState().syncAnchorWaitExpired(first.key, first.element);
+      expect(h.sequence.store.getState().switching).toBe(true);
+      // The detach of the old element reports "unavailable".
+      h.playback.getState().detach(first.key, first.element);
+      expect(h.playback.getState().calibrationStatus).toBe("unavailable");
+      expect(h.sequence.store.getState().switching).toBe(true);
+      const next = attachLoaded(h.playback, B);
+      expect(h.sequence.store.getState().switching).toBe(true);
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      expect(h.sequence.store.getState().switching).toBe(false);
+      expect(next.element.currentTime).toBe(1);
+      expect(h.sequence.store.getState().seekTargetSeconds).toBe(11);
+    });
+
+    it("passes the queries and the end of the wait through", () => {
+      const h = harness([a1]);
+      const first = attachLoaded(h.playback, A);
+      h.playback.getState().seekApproximate(3);
+      h.sequence.store.getState().syncAnchorWaitExpired(first.key, first.element);
+      expect(h.playback.getState().isRecalibrating).toBe(true);
+      expect(
+        h.sequence.store.getState().isRetiredElement(first.key, first.element),
+      ).toBe(true);
+      expect(h.sequence.store.getState().refusesTransportForReload()).toBe(true);
+    });
+
+    /**
+     * Retires the element of a1 with a manual recalibration, and then seeks to b1, a navigation
+     * that waits for the attach of b1. With `detachOld`, the retired element then leaves before
+     * any element of b1 attaches, so no element is attached. Returns the target of the request
+     * of the reload.
+     */
+    function retireThenSeekToB(
+      h: ReturnType<typeof harness>,
+      detachOld = false,
+    ): number | null {
+      const shown = reachRecoverable(h.playback, A);
+      const key = h.sequence.store.getState().attachedSourceRevisionKey;
+      h.sequence.store.getState().recalibrate(key ?? "");
+      expect(h.playback.getState().refusesTransportForReload()).toBe(true);
+      const request = h.playback.getState().seekTargetSeconds;
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      expect(h.sequence.store.getState().switching).toBe(true);
+      if (detachOld) {
+        h.playback.getState().detach(shown.key, shown.element);
+        expect(h.playback.getState().isAttached).toBe(false);
+        expect(h.sequence.store.getState().switching).toBe(true);
+      }
+      return request;
+    }
+
+    const refusedCommands = [
+      [
+        "a second recalibration",
+        (h: ReturnType<typeof harness>) => {
+          const key = h.sequence.store.getState().attachedSourceRevisionKey;
+          h.sequence.store.getState().recalibrate(key ?? "");
+        },
+      ],
+      ["play", (h: ReturnType<typeof harness>) => h.sequence.store.getState().play()],
+      [
+        "toggle playback",
+        (h: ReturnType<typeof harness>) => h.sequence.store.getState().togglePlayback(),
+      ],
+      [
+        "a frame step",
+        (h: ReturnType<typeof harness>) => {
+          expect(h.sequence.store.getState().seekNominal(1)).toBe("none");
+        },
+      ],
+      [
+        "a segment playback that crosses a junction",
+        (h: ReturnType<typeof harness>) =>
+          h.sequence.store
+            .getState()
+            .playSegment(h.virtual("a1", "50"), h.virtual("b1", "50")),
+      ],
+    ] as const;
+
+    it.each(refusedCommands)(
+      "keeps the navigation of the sequence for %s that the store refuses",
+      (_name, command) => {
+        const h = harness([a1, b1]);
+        const request = retireThenSeekToB(h);
+        command(h);
+        expect(h.timeline.getState().attachedClipId).toBe("b1");
+        expect(h.sequence.store.getState().switching).toBe(true);
+        expect(h.playback.getState().seekTargetSeconds).toBe(request);
+        expect(h.playback.getState().reloadGeneration).toBe(2);
+      },
+    );
+
+    it.each(refusedCommands)(
+      "keeps the navigation of the sequence for %s while no element is attached during the reload",
+      (_name, command) => {
+        const h = harness([a1, b1]);
+        const request = retireThenSeekToB(h, true);
+        command(h);
+        expect(h.timeline.getState().attachedClipId).toBe("b1");
+        expect(h.sequence.store.getState().switching).toBe(true);
+        expect(h.playback.getState().seekTargetSeconds).toBe(request);
+        expect(h.playback.getState().reloadGeneration).toBe(2);
+      },
+    );
+
+    it("keeps a cold switch in progress after a failed request while the replacement loads", () => {
+      const h = harness([a1, b1]);
+      attach(h.playback, A);
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      const first = attachLoaded(h.playback, B);
+      h.playback.getState().syncAnchorWaitExpired(first.key, first.element);
+      expect(h.playback.getState().isRecalibrating).toBe(true);
+
+      h.playback.getState().seekToPts(pts("not a pts"));
+      expect(h.playback.getState().error).toBe("seekFailed");
+      expect(h.sequence.store.getState().switching).toBe(true);
+    });
+
+    /** Attaches a new element of `which` whose metadata has not loaded. */
+    function attachUnready(
+      playback: ReturnType<typeof createPlaybackStore>,
+      which: typeof A,
+    ) {
+      const element = createFakeElement();
+      element.readyState = 0;
+      const key = getSourceRevisionKey(which.media);
+      playback.getState().attach(which.playback, element);
+      return { element, key };
+    }
+
+    it("keeps a ruler seek on the last clip when the clip before it leaves during the retry", () => {
+      const h = harness([a1, b1]);
+      attach(h.playback, A);
+      h.sequence.store.getState().seekToPts(h.virtual("b1", "25"));
+      const first = attachLoaded(h.playback, B);
+      h.playback.getState().syncAnchorWaitExpired(first.key, first.element);
+      h.playback.getState().detach(first.key, first.element);
+      const next = attachUnready(h.playback, B);
+      // The clip menu removes a1, so the sequence holds one clip.
+      h.timeline.getState().removeClip(0);
+      expect(h.timeline.getState().clips).toHaveLength(1);
+
+      // A click on the ruler at 6 s of b1.
+      h.sequence.store.getState().seekToPts(pts("150"));
+      expect(h.playback.getState().error).toBeNull();
+
+      next.element.readyState = 1;
+      h.playback.getState().syncReady(next.key, next.element);
+      h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+      expect(next.element.currentTime).toBe(6);
+    });
+
+    it.each([
+      [
+        "an automatic recalibration",
+        (h: ReturnType<typeof harness>) => {
+          const first = attachLoaded(h.playback, A);
+          h.playback.getState().seekApproximate(3);
+          h.playback.getState().syncAnchorWaitExpired(first.key, first.element);
+          return first;
+        },
+      ],
+      [
+        "a manual recalibration",
+        (h: ReturnType<typeof harness>) => {
+          const shown = reachRecoverable(h.playback, A);
+          h.sequence.store.getState().recalibrate(shown.key);
+          return shown;
+        },
+      ],
+    ])(
+      "ends at the sought position after %s and a seek before the new element is ready",
+      (_name, start) => {
+        const h = harness([a1]);
+        const old = start(h);
+        expect(h.playback.getState().isRecalibrating).toBe(true);
+        h.playback.getState().detach(old.key, old.element);
+        const next = attachUnready(h.playback, A);
+
+        h.sequence.store.getState().seekToPts(pts("150"));
+        expect(h.playback.getState().error).toBeNull();
+
+        next.element.readyState = 1;
+        h.playback.getState().syncReady(next.key, next.element);
+        h.playback.getState().syncPresentedFrame(next.key, 0, 1, next.element);
+        expect(next.element.currentTime).toBe(6);
+      },
+    );
+  });
 });

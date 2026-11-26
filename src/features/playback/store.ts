@@ -589,8 +589,20 @@ export function createPlaybackStore(
   // reset, a loss of readiness, a failed seek, play, and an element that starts to play on its
   // own drop it. The public field hasDeferredNavigation reports it. The store has no timer:
   // while that field is true, the preview bounds the wait for the first frame, and at the
-  // bound it reports frame callbacks as unavailable (syncPresentationUnavailable).
+  // bound it reports the end of the wait (syncAnchorWaitExpired). The first time for a source
+  // the request then becomes the request of a recalibration (ADR 063).
   let deferredNavigation: DeferredNavigation | null = null;
+  // The count of the navigations of the user: every navigation action of the store raises it
+  // first (beginNavigation), and so does a play that the element starts on its own. A deferred
+  // request that runDeferredNavigation took out stays replaceable until it reaches the element:
+  // the store publishes before it runs the request, and a listener that navigates on that
+  // publication sends the latest request, so the older one is dropped (ADR 022, ADR 063).
+  let navigationRevision = 0;
+  // The count of the attachments: every attach of an element, every detach and a reset raise
+  // it. runDeferredNavigation runs a request that it took out only on the attachment that it was
+  // taken for, so a listener that replaces the element on its publication does not move the new
+  // element with an old request.
+  let attachmentGeneration = 0;
   // The muted play that shows the first frame of a native source (primeFirstFrame), or null.
   // WKWebView presents no frame of a paused element before a seek or a play, so the first frame
   // callback that takes the anchor (ADR 003) would wait for a play of the user. The record keeps
@@ -603,26 +615,47 @@ export function createPlaybackStore(
     readonly rate: number;
     readonly readMuted: () => boolean;
   } | null = null;
-  // The reload of the preview after a decode stall (decodeStall, reloadGeneration), or null.
-  // A media element does not play or seek again after a decode error, so the preview replaces
-  // it with a new element for the same source. `request` is the latest navigation request of
-  // the stall, in the form of a deferred navigation, or null when the new element loads at the
-  // start. The phase follows the reload:
-  // - "requested": the generation rose for this stall. The stalled element is still attached,
-  //   or the detach of that element kept the reload for the new element.
+  // The reload of the preview after a decode stall (decodeStall, reloadGeneration), or of a
+  // recalibration (ADR 063), or null. A media element does not play or seek again after a
+  // decode error, so the preview replaces it with a new element for the same source. A
+  // recalibration replaces an element that can play, so that a new element calibrates from its
+  // own first frame. `request` is the latest navigation request, in the form of a deferred
+  // navigation, or null when the new element loads at the start. The phase follows the reload:
+  // - "requested": the generation rose for this reload. The old element is still attached, or
+  //   the detach of that element kept the reload for the new element. While the old element is
+  //   attached in this phase, it is either stalled or it waits for its replacement by a
+  //   recalibration (replacesElement).
   // - "loading": the new element of the same source is attached, and the request waits for its
   //   metadata. syncReady then moves the request into deferredNavigation, so it runs at the
   //   calibration anchor (ADR 003, ADR 022), or at once when the calibration is unavailable.
-  // An attach of another source, a detach outside the stall, a reset, a loss of readiness and a
-  // failed seek drop the reload or its request.
+  // An attach of another source, a detach of an element with no reload, a reset, a loss of
+  // readiness and a failed seek drop the reload or its request.
+  // `recalibration` is true for the reload of a recalibration, and the public field
+  // isRecalibrating reports it until the new element is ready. A failed seek drops the request
+  // of a reload, and the reload continues: the new element then loads at the start.
   let reload: {
     readonly sourceRevisionKey: string;
     readonly request: DeferredNavigation | null;
     readonly phase: "requested" | "loading";
+    readonly recalibration: boolean;
   } | null = null;
   // Source revision keys that lost precise editing. ADR 003 denies precision per source, so the
-  // denial must outlive the attachment that detected it.
+  // denial must outlive the attachment that detected it. No recalibration removes a denial: each
+  // one is evidence against the mapping of the source (ADR 063).
   const precisionDeniedSources = new Set<string>();
+  // True while the calibration of the attachment is unavailable because the wait for the first
+  // frame ran out and the source had no automatic recalibration left (syncAnchorWaitExpired,
+  // ADR 063). That is the one recoverable cause: the element showed no frame, and nothing else is
+  // known. Every other loss of the calibration is evidence against the anchor or the mapping, or
+  // a property of the source or the web view, and it makes this false. So do an attach, a detach
+  // and a reset. canRecalibrate reads it, together with the source and its denial
+  // (isRecoverable).
+  let waitExpiredLoss = false;
+  // The source revision key that used its one automatic recalibration (syncAnchorWaitExpired),
+  // or null. A calibration that becomes ready, the attach of a different source and a reset
+  // permit one more. A manual recalibration does not, so no sequence of events reloads the
+  // preview in a loop (ADR 063).
+  let automaticRecalibrationSpent: string | null = null;
   // The real video frames of the attached element of a MediaSource source (syncFrameTable), or
   // null. A relative frame step moves by them (ADR 022, ADR 046).
   let frameTable: FrameTable | null = null;
@@ -658,7 +691,255 @@ export function createPlaybackStore(
   // direction and skips audio on zero-distance moves (ADR 019, ADR 022).
   let lastScrubAudioTarget: number | null = null;
 
-  return createStore<PlaybackStoreState>()((set, get) => {
+  return createStore<PlaybackStoreState>()((setState, get) => {
+    /**
+     * True when the calibration of the attachment is recoverable (ADR 063): it is unavailable
+     * because the element never took an anchor, the source has a valid videoStartPts and time
+     * base, and the store holds no denial of the source.
+     */
+    const isRecoverable = (calibrationStatus: CalibrationStatus): boolean =>
+      calibrationStatus === "unavailable" &&
+      waitExpiredLoss &&
+      attachedSourceCanCalibrate();
+
+    /**
+     * True when the source that is attached now can calibrate at all: it has a valid
+     * videoStartPts and a valid time base, and the store holds no denial of it (ADR 003, ADR
+     * 063). isRecoverable, recalibrate and syncAnchorWaitExpired read this one rule, so a reload
+     * never starts for a source that a new element cannot calibrate.
+     */
+    const attachedSourceCanCalibrate = (): boolean => {
+      const source = attachedSource;
+      return (
+        source !== null &&
+        source.videoStartPts !== null &&
+        isPtsString(source.videoStartPts) &&
+        isPositiveRational(source.videoTimeBase) &&
+        !precisionDeniedSources.has(getSourceRevisionKey(source))
+      );
+    };
+
+    /**
+     * Writes a partial state, together with the two fields that follow from it and from the
+     * closure (ADR 063):
+     *
+     * - `canRecalibrate`: a recoverable calibration, a ready element, no decode stall and no
+     *   reload (isRecoverable).
+     * - `isRecalibrating`: the reload of a recalibration is in progress.
+     *
+     * Each of them goes into the write only when it changes, because syncPresentedFrame writes
+     * once for each frame. A write that changes nothing at all is skipped. A calibration that
+     * becomes ready also permits one more automatic recalibration of the source (see
+     * automaticRecalibrationSpent). Every change of the closure that these fields read is
+     * followed by a write.
+     */
+    const set = (partial: Partial<PlaybackState>): void => {
+      const state = get();
+      const calibrationStatus = partial.calibrationStatus ?? state.calibrationStatus;
+      if (calibrationStatus === "ready") {
+        automaticRecalibrationSpent = null;
+      }
+      const isReady = partial.isReady ?? state.isReady;
+      const decodeStall =
+        partial.decodeStall === undefined ? state.decodeStall : partial.decodeStall;
+      const canRecalibrate =
+        isRecoverable(calibrationStatus) &&
+        isReady &&
+        decodeStall === null &&
+        reload === null;
+      const isRecalibrating = reload?.recalibration === true;
+      if (
+        canRecalibrate === state.canRecalibrate &&
+        isRecalibrating === state.isRecalibrating
+      ) {
+        if (Object.keys(partial).length > 0) {
+          setState(partial);
+        }
+        return;
+      }
+      setState({
+        ...partial,
+        ...(canRecalibrate !== state.canRecalibrate ? { canRecalibrate } : {}),
+        ...(isRecalibrating !== state.isRecalibrating ? { isRecalibrating } : {}),
+      });
+    };
+
+    /**
+     * True while the attached element waits for its replacement by a recalibration: the reload
+     * started, and the pane has not detached the old element yet (ADR 063). The store then treats
+     * that element as a stalled one.
+     */
+    const isRetired = (): boolean =>
+      attachedElement !== null &&
+      reload !== null &&
+      reload.phase === "requested" &&
+      get().decodeStall === null;
+
+    /**
+     * True while the attached element does not play or seek again: it is stalled (decodeStall,
+     * ADR 039), or a recalibration retired it (ADR 063).
+     */
+    const isElementGone = (): boolean => get().decodeStall !== null || isRetired();
+
+    /**
+     * Drops a deferred navigation that still waits, for a navigation that the store runs at once
+     * because the calibration is not "calibrating" (ADR 063, "The latest request wins at each
+     * report"). The store publishes a calibration that leaves "calibrating", or a ready element,
+     * before it runs the deferred navigation. A listener that seeks on that report sends the
+     * latest request, so the older deferred request must not run after it. runDeferredNavigation
+     * takes its entry out before it calls the actions, so its own calls drop nothing.
+     */
+    const dropWaitingNavigation = (): void => {
+      beginNavigation();
+      deferredNavigation = null;
+      if (get().hasDeferredNavigation) {
+        set({ hasDeferredNavigation: false });
+      }
+    };
+
+    /**
+     * Marks a navigation of the user (navigationRevision). It runs only when the store accepts a
+     * request or drops one on purpose, before it publishes anything: in deferNavigation,
+     * requestReload, startRecalibration and dropWaitingNavigation, in a failed seek, and where
+     * play and a play of the element drop the deferred navigation. A command that the store
+     * refuses, such as a frame index that is not a frame, therefore leaves a waiting request
+     * alone.
+     */
+    const beginNavigation = (): void => {
+      navigationRevision++;
+    };
+
+    /**
+     * True when the priming play moved `element` further than the anchor guard permits, and no
+     * frame came (primeFirstFrame). The guard would refuse a first frame from there, so the
+     * calibration cannot take its anchor on this element. syncBrowserTime and
+     * syncAnchorWaitExpired test the same rule.
+     */
+    const primingDrifted = (element: PlaybackMediaElement): boolean =>
+      priming?.element === element &&
+      anchorBaselineTime !== null &&
+      typeof element.currentTime === "number" &&
+      element.currentTime - anchorBaselineTime > ANCHOR_TOLERANCE_SECONDS;
+
+    /**
+     * The handoff of a reload to its new element once that element is ready (ADR 039, ADR 063):
+     * the attach of an element that already has its metadata, or syncReady. The request of the
+     * reload becomes the deferred navigation before the caller publishes `isReady`, and the reload
+     * ends. Returns the fields that the caller writes together with `isReady`, and whether the
+     * request runs at once after that write (runReloadRequest).
+     *
+     * The request runs at the calibration anchor exactly as a request that arrived before the
+     * anchor (ADR 022): the element stays at the start until the first frame callback, and a
+     * target in the anchor frame is dropped there. When the calibration is not open, it runs at
+     * once on the approximate path, or on the known anchor (ADR 046). A listener of the ready
+     * report that seeks sends the latest request: during the calibration it replaces the deferred
+     * navigation, and otherwise it runs at once and drops it (dropWaitingNavigation).
+     *
+     * @param calibrationStatus The status that the caller publishes with `isReady`.
+     */
+    const handOffReload = (
+      calibrationStatus: CalibrationStatus,
+    ): { readonly fields: Partial<PlaybackState>; readonly runsNow: boolean } => {
+      if (reload === null || reload.phase !== "loading") {
+        return { fields: {}, runsNow: false };
+      }
+      const request = reload.request;
+      reload = null;
+      deferredNavigation = request;
+      if (request === null) {
+        return { fields: {}, runsNow: false };
+      }
+      if (calibrationStatus === "calibrating") {
+        // The origin of the browser media timeline is known now, so the target shows on the
+        // axis of the new element.
+        return {
+          fields: {
+            hasDeferredNavigation: true,
+            seekTargetSeconds: deferredDisplaySeconds(request),
+          },
+          runsNow: false,
+        };
+      }
+      return { fields: {}, runsNow: true };
+    };
+
+    /**
+     * The one readiness routine of an attached element (ADR 003, ADR 046, ADR 063). syncReady
+     * runs it at `loadedmetadata`, and attach runs it for an element that already has its
+     * metadata, because no `loadedmetadata` follows for such an element. In order:
+     *
+     * 1. The baseline of the anchor guard and the origin of the browser media timeline. Loaded
+     *    metadata is the first moment the browser reports the true start of that timeline, so
+     *    the position of the element is taken while the anchor is still open and nothing has
+     *    moved the element. No seek can precede this point, because every seek action requires
+     *    isReady, and this routine grants it. An element that stood past the tolerance of the
+     *    anchor guard at its attach already played, so its position is not the start of its
+     *    timeline: it keeps the baseline of the attach, and the guard refuses its first frame.
+     * 2. The known anchor of a MediaSource source (ADR 046): the calibration does not wait for a
+     *    first frame.
+     * 3. The handoff of a reload (handOffReload), before the write.
+     * 4. One write that publishes `isReady` together with `fields`, and then the request of a
+     *    reload when it runs at once.
+     *
+     * @param status The calibration status of the attachment before this routine.
+     * @param fields Other fields of the same write, such as those of an attach.
+     */
+    const becomeReady = (
+      element: PlaybackMediaElement,
+      status: CalibrationStatus,
+      fields: Partial<PlaybackState>,
+    ): void => {
+      const movedBeforeAttach =
+        attachedStartTime !== null && attachedStartTime > ANCHOR_TOLERANCE_SECONDS;
+      if (
+        calibratedMediaTime === null &&
+        !seekedBeforeCalibration &&
+        !movedBeforeAttach &&
+        typeof element.currentTime === "number" &&
+        Number.isFinite(element.currentTime)
+      ) {
+        anchorBaselineTime = element.currentTime;
+        browserTimelineOriginSeconds = Math.max(0, element.currentTime);
+      }
+
+      // ADR 046: the remux windows of a MediaSource source keep the absolute source timestamps,
+      // and the page sets `timestampOffset` so that this media time is videoStartPts. The anchor
+      // is therefore known now, and the calibration does not wait for a first frame. The first
+      // frame of such a source need not be the frame of videoStartPts: FFmpeg and MSE drop the
+      // frames before the first keyframe.
+      const anchor = knownAnchor(attachedSource);
+      const anchorsNow =
+        anchor !== null && calibratedMediaTime === null && status === "calibrating";
+      if (anchorsNow) {
+        takeKnownAnchor(anchor);
+      }
+      const calibrationStatus: CalibrationStatus = anchorsNow ? "ready" : status;
+
+      // The request of a reload moves before the write that reports the element ready. A
+      // listener of that report can send a seek at once, as the sequence playback does for a
+      // navigation that waits for the attach (ADR 052). That seek is the latest request, so it
+      // replaces the request of the reload (ADR 022, ADR 063).
+      const handoff = handOffReload(calibrationStatus);
+      const attachment = attachmentGeneration;
+      const request = deferredNavigation;
+      set({
+        ...fields,
+        isReady: true,
+        calibrationStatus,
+        ...handoff.fields,
+      });
+      // A listener of that write can replace the element, or send a newer request. The request
+      // of the reload then belongs to nobody, and runDeferredNavigation must not take the request
+      // of the listener in its place (attachmentGeneration).
+      if (
+        handoff.runsNow &&
+        attachmentGeneration === attachment &&
+        deferredNavigation === request
+      ) {
+        runDeferredNavigation();
+      }
+    };
+
     /**
      * The position of `element` for the rules of the seeks: the target of a repair while the
      * element sits where the repair left it (repairSeek), and its own position otherwise.
@@ -1227,6 +1508,7 @@ export function createPlaybackStore(
       if (!attachedElement) {
         return;
       }
+      beginNavigation();
       playSessionId++;
       if (priming?.element !== attachedElement) {
         try {
@@ -1255,21 +1537,78 @@ export function createPlaybackStore(
      * The first request of a stall raises reloadGeneration, and the preview then replaces the
      * element. A later request before the detach only replaces the request. The request runs on
      * the new element at its calibration anchor (syncReady).
+     *
+     * A request while a recalibration retired the element (ADR 063) replaces the request of that
+     * reload in the same way. The generation already rose for it.
      */
     const requestReload = (entry: DeferredNavigation): void => {
       if (activeSourceRevisionKey === null) {
         return;
       }
+      beginNavigation();
       const raises = reload === null;
       reload = {
         sourceRevisionKey: activeSourceRevisionKey,
         request: entry,
         phase: "requested",
+        recalibration: reload?.recalibration === true,
       };
       set({
         error: null,
         seekTargetSeconds: deferredDisplaySeconds(entry),
         ...(raises ? { reloadGeneration: get().reloadGeneration + 1 } : {}),
+      });
+    };
+
+    /**
+     * Starts a recalibration (ADR 063) in one step, the handoff: the playback, the cue, the
+     * priming play, the queued seek, a deferred navigation and the stop point of a segment
+     * playback end, as at a decode stall, the request and its display target stay, and
+     * reloadGeneration rises once. It sets no decodeStall. From here the old element is retired
+     * (isRetired) until the pane detaches it, and isRecalibrating holds until the new element is
+     * ready. The new element calibrates from its own first frame, and syncReady moves the request
+     * into the deferred navigation, so no time of the old element enters the PTS inference.
+     *
+     * @param request The navigation for the new element, or null to load it at the start.
+     * @param displaySeconds The display target of the request, in seconds from the start of the
+     *   source.
+     */
+    const startRecalibration = (
+      request: DeferredNavigation | null,
+      displaySeconds: number | null,
+    ): void => {
+      const element = attachedElement;
+      if (activeSourceRevisionKey === null || element === null) {
+        return;
+      }
+      beginNavigation();
+      scrubCue.stop();
+      lastScrubAudioTarget = null;
+      queuedSeek = null;
+      lastAcceptedSeek = null;
+      repairLanding = null;
+      deferredNavigation = null;
+      endPriming(true);
+      playSessionId++;
+      try {
+        element.pause();
+      } catch {
+        // Ignore DOM exception
+      }
+      reload = {
+        sourceRevisionKey: activeSourceRevisionKey,
+        request,
+        phase: "requested",
+        recalibration: true,
+      };
+      set({
+        isPlaying: false,
+        error: null,
+        presentedFrame: null,
+        playbackStop: null,
+        hasDeferredNavigation: false,
+        seekTargetSeconds: request === null ? null : displaySeconds,
+        reloadGeneration: get().reloadGeneration + 1,
       });
     };
 
@@ -1407,9 +1746,17 @@ export function createPlaybackStore(
         return;
       }
       deferredNavigation = null;
-      const state = get();
+      const revision = navigationRevision;
+      const attachment = attachmentGeneration;
       // The deferred request and its display target go. The action that runs sets its own.
       set({ hasDeferredNavigation: false, seekTargetSeconds: null });
+      // A listener of that write that navigated sent a newer request, which replaces this one
+      // (navigationRevision). A listener that replaced the element took the attachment that the
+      // request belongs to (attachmentGeneration).
+      if (navigationRevision !== revision || attachmentGeneration !== attachment) {
+        return;
+      }
+      const state = get();
       if (
         !attachedSource ||
         !attachedElement ||
@@ -1456,9 +1803,17 @@ export function createPlaybackStore(
                 calibratedMediaTime,
                 attachedSource.videoTimeBase,
               );
+      // An action that accepts the request raises the revision once. Any other count after it
+      // means that a listener of its write navigated, or that the action refused the request,
+      // and the rest of the request does not run. Nor does it run on another attachment.
       if (seekMediaTime === null) {
         runSeek(seek);
-        runSteps(entry.frames);
+        if (
+          navigationRevision === revision + 1 &&
+          attachmentGeneration === attachment
+        ) {
+          runSteps(entry.frames);
+        }
         return;
       }
       const placeholder = { mediaTime: seekMediaTime, scrub: seek.scrub };
@@ -1466,7 +1821,12 @@ export function createPlaybackStore(
       runSteps(entry.frames);
       if (queuedSeek === placeholder) {
         queuedSeek = null;
-        runSeek(seek);
+        if (
+          navigationRevision === revision + 1 &&
+          attachmentGeneration === attachment
+        ) {
+          runSeek(seek);
+        }
       }
     };
 
@@ -2588,6 +2948,8 @@ export function createPlaybackStore(
       error: initialState?.error ?? null,
       decodeStall: initialState?.decodeStall ?? null,
       reloadGeneration: initialState?.reloadGeneration ?? 0,
+      canRecalibrate: initialState?.canRecalibrate ?? false,
+      isRecalibrating: initialState?.isRecalibrating ?? false,
 
       attach: (source: PlaybackSource, element: PlaybackMediaElement) => {
         // 1. Validate basic element and source existence
@@ -2626,7 +2988,14 @@ export function createPlaybackStore(
         if (attachedElement === element && activeSourceRevisionKey === newIdentity) {
           attachedSource = source;
           if (isElementReady && !get().isReady) {
-            set({ isReady: true });
+            // The element became ready with no syncReady, so it takes the readiness routine
+            // here: the baseline, the origin, the known anchor and the handoff of a reload.
+            becomeReady(element, get().calibrationStatus, {});
+          } else {
+            // The new source object can change what the flags read, such as its start PTS
+            // (canRecalibrate). The write recomputes them, and it writes nothing when nothing
+            // changes.
+            set({});
           }
           return;
         }
@@ -2642,6 +3011,7 @@ export function createPlaybackStore(
         }
 
         playSessionId++;
+        attachmentGeneration++;
         activeSourceRevisionKey = newIdentity;
         attachedSource = source;
         attachedElement = element;
@@ -2675,10 +3045,18 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
-        // The new element of a reload after a decode stall keeps the request of the reload and
-        // its display target, and the request waits for the metadata of the element
-        // (syncReady). The element calibrates from the start, as for a new source. Any other
-        // attach drops the reload.
+        // A new attachment has no loss of its own yet. An attach that starts unavailable has no
+        // valid start, no valid time base, or a denied source, and none of those is recoverable.
+        waitExpiredLoss = false;
+        // A different source gets its own automatic recalibration (ADR 063). The new element of
+        // a reload of the same source does not.
+        if (automaticRecalibrationSpent !== newIdentity) {
+          automaticRecalibrationSpent = null;
+        }
+        // The new element of a reload after a decode stall or of a recalibration keeps the
+        // request of the reload and its display target, and the request waits for the metadata
+        // of the element (syncReady). The element calibrates from the start, as for a new
+        // source. Any other attach drops the reload.
         let keptTarget: number | null = null;
         if (
           reload !== null &&
@@ -2691,20 +3069,9 @@ export function createPlaybackStore(
           reload = null;
         }
 
-        // An element that already has its metadata gets no syncReady, so a known anchor is taken
-        // here (ADR 046).
-        const anchor = knownAnchor(source);
-        const anchoredAtAttach =
-          anchor !== null &&
-          isElementReady &&
-          initialCalibrationStatus === "calibrating";
-        if (anchoredAtAttach) {
-          takeKnownAnchor(anchor);
-        }
-
-        set({
+        const fields: Partial<PlaybackState> = {
           presentedFrame: null,
-          calibrationStatus: anchoredAtAttach ? "ready" : initialCalibrationStatus,
+          calibrationStatus: initialCalibrationStatus,
           runtimeBrowserDurationSeconds: null,
           approximateBrowserTimeSeconds: null,
           seekTargetSeconds: keptTarget,
@@ -2713,10 +3080,18 @@ export function createPlaybackStore(
           isPlaying: false,
           isAttached: true,
           attachedSourceRevisionKey: newIdentity,
-          isReady: isElementReady,
+          isReady: false,
           error: null,
           decodeStall: null,
-        });
+        };
+        // An element that already has its metadata gets no syncReady, so it takes the readiness
+        // routine here, in the same write as the attach: the baseline, the origin, the known
+        // anchor (ADR 046) and the handoff of a reload.
+        if (isElementReady) {
+          becomeReady(element, initialCalibrationStatus, fields);
+        } else {
+          set(fields);
+        }
       },
 
       detach: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
@@ -2743,6 +3118,7 @@ export function createPlaybackStore(
         } catch {
           // Ignore DOM exception
         }
+        attachmentGeneration++;
         attachedSource = null;
         attachedElement = null;
         frameTable = null;
@@ -2764,19 +3140,19 @@ export function createPlaybackStore(
         deferredNavigation = null;
         queuedSeek = null;
         lastAcceptedSeek = null;
+        waitExpiredLoss = false;
         // Two detaches keep the reload and its display target for the next attach of the same
         // source, and every other detach drops the reload:
-        // - The detach of a stalled element whose reload started. The preview attaches the new
-        //   element next.
+        // - The detach of a stalled element whose reload started, or of an element that a
+        //   recalibration retired (ADR 063). The preview attaches the new element next. While
+        //   an element is attached, a reload in the "requested" phase exists only in these two
+        //   cases.
         // - The detach of the new element of a reload before its metadata loads. React in
         //   StrictMode detaches and attaches again the ref of a node that it has just placed, and
         //   the request would be lost there.
         // An attach of another source, a loss of readiness and a reset still drop the reload.
         const keepsReload =
-          reload !== null &&
-          reload.sourceRevisionKey === currentIdentity &&
-          (reload.phase === "loading" ||
-            (reload.phase === "requested" && get().decodeStall !== null));
+          reload !== null && reload.sourceRevisionKey === currentIdentity;
         reload =
           keepsReload && reload !== null ? { ...reload, phase: "requested" } : null;
 
@@ -2809,64 +3185,10 @@ export function createPlaybackStore(
           return;
         }
 
-        // Loaded metadata is the first moment the browser reports the true start of the media
-        // timeline. Take it as the baseline of the anchor guard while the anchor is still open
-        // and nothing has moved the element, so a source whose timeline starts away from 0 still
-        // calibrates (ADR 003). No seek can precede this point, because every seek action of the
-        // store requires isReady, and this call is what grants it.
-        //
-        // The same reading is the origin of the browser media timeline, which the approximate
-        // clock subtracts to reach the source-elapsed axis.
-        if (
-          calibratedMediaTime === null &&
-          !seekedBeforeCalibration &&
-          typeof element.currentTime === "number" &&
-          Number.isFinite(element.currentTime)
-        ) {
-          anchorBaselineTime = element.currentTime;
-          browserTimelineOriginSeconds = Math.max(0, element.currentTime);
-        }
-
-        // ADR 046: the remux windows of a MediaSource source keep the absolute source timestamps,
-        // and the page sets `timestampOffset` so that this media time is videoStartPts. The anchor
-        // is therefore known now, and the calibration does not wait for a first frame. The first
-        // frame of such a source need not be the frame of videoStartPts: FFmpeg and MSE drop the
-        // frames before the first keyframe.
-        const anchor = knownAnchor(attachedSource);
-        if (
-          anchor !== null &&
-          calibratedMediaTime === null &&
-          get().calibrationStatus === "calibrating"
-        ) {
-          takeKnownAnchor(anchor);
-          set({ isReady: true, calibrationStatus: "ready" });
-        } else {
-          set({ isReady: true });
-        }
-
-        // The new element of a reload after a decode stall has its metadata. The request of the
-        // reload becomes the deferred navigation, so it runs at the calibration anchor exactly
-        // as a request that arrived before the anchor (ADR 022): the element stays at the start
-        // until the first frame callback, and a target in the anchor frame is dropped there.
-        // When the calibration is not open, the request runs at once on the approximate path.
-        if (reload !== null && reload.phase === "loading") {
-          const request = reload.request;
-          reload = null;
-          if (request === null) {
-            return;
-          }
-          deferredNavigation = request;
-          if (get().calibrationStatus === "calibrating") {
-            // The origin of the browser media timeline is known now, so the target shows on the
-            // axis of the new element.
-            set({
-              hasDeferredNavigation: true,
-              seekTargetSeconds: deferredDisplaySeconds(request),
-            });
-          } else {
-            runDeferredNavigation();
-          }
-        }
+        // The readiness routine: the baseline and the origin of the browser media timeline,
+        // the known anchor (ADR 046), and the handoff of a reload before the write that reports
+        // the element ready (becomeReady).
+        becomeReady(element, get().calibrationStatus, {});
       },
 
       primeFirstFrame: (
@@ -2884,7 +3206,7 @@ export function createPlaybackStore(
           priming !== null ||
           !state.isReady ||
           state.isPlaying ||
-          state.decodeStall !== null ||
+          isElementGone() ||
           state.calibrationStatus !== "calibrating" ||
           calibratedMediaTime !== null ||
           seekedBeforeCalibration ||
@@ -2929,7 +3251,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (attachedElement !== element) {
+        // A loss of readiness of an element that a recalibration retired changes nothing: the
+        // reload goes on to the new element (ADR 063).
+        if (attachedElement !== element || isRetired()) {
           return;
         }
 
@@ -2974,7 +3298,9 @@ export function createPlaybackStore(
           return false;
         }
         repairLanding = null;
-        if (get().decodeStall !== null) {
+        // An element that a recalibration retired is already being replaced (ADR 063). Its
+        // error changes nothing, and the pane shows no failure panel for it.
+        if (get().decodeStall !== null || isRetired()) {
           return true;
         }
 
@@ -3025,8 +3351,117 @@ export function createPlaybackStore(
         ) {
           return;
         }
-        reload = { sourceRevisionKey, request: null, phase: "requested" };
+        reload = {
+          sourceRevisionKey,
+          request: null,
+          phase: "requested",
+          recalibration: false,
+        };
         set({ reloadGeneration: get().reloadGeneration + 1 });
+      },
+
+      recalibrate: (sourceRevisionKey: string) => {
+        const state = get();
+        // The rule of canRecalibrate, read again from the source that is attached now, so a
+        // flag that a write has not refreshed yet cannot start a reload (ADR 063).
+        if (
+          !state.canRecalibrate ||
+          !isRecoverable(state.calibrationStatus) ||
+          !state.isReady ||
+          state.decodeStall !== null ||
+          activeSourceRevisionKey === null ||
+          activeSourceRevisionKey !== sourceRevisionKey ||
+          attachedElement === null ||
+          reload !== null
+        ) {
+          return;
+        }
+        // The position to go back to, in seconds from the start of the attached source: the
+        // display target while a seek is pending, otherwise the approximate clock. The
+        // calibration is unavailable, so both count on the axis of that clock. The request is an
+        // exact seek, and it runs at the anchor of the new element (syncReady).
+        const position = state.seekTargetSeconds ?? state.approximateBrowserTimeSeconds;
+        const seconds =
+          position !== null && Number.isFinite(position) ? Math.max(0, position) : null;
+        startRecalibration(
+          seconds === null
+            ? null
+            : {
+                seek: {
+                  kind: "approximate",
+                  seconds,
+                  scrub: false,
+                  keepBrowserTimeline: false,
+                },
+                frames: 0,
+              },
+          seconds,
+        );
+      },
+
+      isRetiredElement: (sourceRevisionKey: string, element: PlaybackMediaElement) =>
+        attachedElement === element &&
+        activeSourceRevisionKey === sourceRevisionKey &&
+        isRetired(),
+
+      refusesTransportForReload: () =>
+        (attachedElement !== null && isElementGone()) || reload?.recalibration === true,
+
+      syncAnchorWaitExpired: (
+        sourceRevisionKey: string,
+        element: PlaybackMediaElement,
+      ) => {
+        const state = get();
+        const entry = deferredNavigation;
+        if (
+          !attachedSource ||
+          attachedElement !== element ||
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          !state.isReady ||
+          isElementGone() ||
+          state.calibrationStatus !== "calibrating" ||
+          entry === null
+        ) {
+          return;
+        }
+        // The priming play can have moved past the tolerance of the anchor guard before the
+        // `timeupdate` that would report it. That is evidence that the first callback can come
+        // late, so the calibration becomes unavailable as syncBrowserTime makes it, with no
+        // recalibration and no use of the allowance (ADR 063). A source that the same element
+        // attached again with metadata that cannot calibrate, such as no valid start PTS, takes
+        // the same path: a new element would give nothing (attachedSourceCanCalibrate).
+        if (primingDrifted(element) || !attachedSourceCanCalibrate()) {
+          get().syncPresentationUnavailable(sourceRevisionKey, element);
+          return;
+        }
+        if (automaticRecalibrationSpent !== sourceRevisionKey) {
+          // The first wait that runs out for the source loads a new element, and the deferred
+          // navigation goes with it, with its seek and its steps (ADR 063). The allowance goes
+          // in the same step. The request is an exact seek: the timeline ends a scrub gesture
+          // when the element goes, so no exact seek at its release would follow a keyframe.
+          automaticRecalibrationSpent = sourceRevisionKey;
+          const request: DeferredNavigation =
+            entry.seek?.scrub === true
+              ? { seek: { ...entry.seek, scrub: false }, frames: entry.frames }
+              : entry;
+          startRecalibration(request, state.seekTargetSeconds);
+          return;
+        }
+        // The source has no automatic recalibration left. The element showed no frame, and
+        // nothing else is known, so the cause is recoverable: the user can start a recalibration
+        // (canRecalibrate). The deferred navigation runs on the approximate path.
+        endPriming(true);
+        calibratedMediaTime = null;
+        lastPresentedMediaTime = null;
+        lastInferredPts = null;
+        waitExpiredLoss = true;
+        set({
+          calibrationStatus: "unavailable",
+          presentedFrame: null,
+          hasDeferredNavigation: false,
+          playbackStop: null,
+        });
+        runDeferredNavigation();
       },
 
       togglePlayback: () => {
@@ -3044,13 +3479,9 @@ export function createPlaybackStore(
         issuedKeepsPlaying = true;
         dropPlaybackStop();
         const state = get();
-        // A stalled element does not play again (decodeStall). A seek reloads the preview.
-        if (
-          !attachedSource ||
-          !attachedElement ||
-          !state.isReady ||
-          state.decodeStall !== null
-        ) {
+        // A stalled element does not play again (decodeStall), and neither does an element that
+        // a recalibration retired (ADR 063). A seek reloads the preview.
+        if (!attachedSource || !attachedElement || !state.isReady || isElementGone()) {
           return;
         }
 
@@ -3098,6 +3529,7 @@ export function createPlaybackStore(
         // the deferred request asked for, however long it waited: no deferred request moved the
         // element, so playback starts from the position it held when the request arrived. The
         // first frames of the playback can then take the anchor.
+        beginNavigation();
         const droppedDeferred = deferredNavigation !== null;
         deferredNavigation = null;
 
@@ -3117,6 +3549,21 @@ export function createPlaybackStore(
         lastAcceptedSeek = null;
         lastScrubAudioTarget = null;
         scrubCue.stop();
+
+        // A listener of the write above can have changed the playback: a pause, another
+        // attachment, a stall, or a recalibration that retired the element (ADR 063). The element
+        // plays only while this play is still current and the element can still play. Play
+        // Segment and resumeAfterSeek play through here, so the test covers them too.
+        if (
+          playSessionId !== currentSession ||
+          attachedElement !== targetElement ||
+          attachedSource === null ||
+          getSourceRevisionKey(attachedSource) !== currentIdentity ||
+          !get().isReady ||
+          isElementGone()
+        ) {
+          return;
+        }
 
         let result: Promise<void> | void;
         try {
@@ -3219,12 +3666,12 @@ export function createPlaybackStore(
       playSegment: (inPts: Pts, outPts: Pts) => {
         const state = get();
         // A stalled element does not play again (decodeStall), and the seek to the In alone
-        // would reload the preview.
+        // would reload the preview. The same holds for an element that a recalibration retired.
         if (
           !attachedSource ||
           !attachedElement ||
           !state.isReady ||
-          state.decodeStall !== null ||
+          isElementGone() ||
           state.calibrationStatus !== "ready" ||
           calibratedMediaTime === null ||
           !canPlaySegment(attachedSource, inPts, outPts)
@@ -3259,10 +3706,12 @@ export function createPlaybackStore(
         // seek, a navigation deferred during calibration (ADR 022), and the request of a reload
         // after a decode stall. A reload that started still loads the new element, at the start.
         const failSeek = (): void => {
+          beginNavigation();
           queuedSeek = null;
           lastAcceptedSeek = null;
           lastScrubAudioTarget = null;
           deferredNavigation = null;
+          // The reload itself continues, also the reload of a recalibration (ADR 063).
           if (reload !== null) {
             reload = { ...reload, request: null };
           }
@@ -3287,12 +3736,18 @@ export function createPlaybackStore(
         // While the anchor is open the mapping is not known yet, but it will be at the first
         // presented frame, so the request is deferred and not refused.
         const deferring = state.calibrationStatus === "calibrating";
+        // An element that a recalibration retired needs no mapping either: the request waits
+        // for the new element, which calibrates on its own (ADR 063). After a manual
+        // recalibration the old calibration is unavailable, and the request must still replace
+        // the request of the reload. Only a PTS that does not parse fails then.
+        const retired = isRetired();
         if (
           !attachedSource ||
           !attachedElement ||
           !state.isReady ||
           attachedSource.videoStartPts === null ||
           (!deferring &&
+            !retired &&
             (state.calibrationStatus !== "ready" || calibratedMediaTime === null))
         ) {
           failSeek();
@@ -3315,12 +3770,13 @@ export function createPlaybackStore(
           return;
         }
 
-        if (state.decodeStall !== null) {
+        if (isElementGone()) {
           // The stalled element does not seek again, so the request reloads the preview. It runs
           // as an exact seek on the new element: the drag that a scrub sample belongs to ends
           // with the reload, so no exact seek at its release would follow a keyframe. The
           // timeline cannot seek from the attach of the new element until its metadata loads, so
           // it cancels the gesture then, and the request is the last sample before that window.
+          // An element that a recalibration retired takes the request in the same way (ADR 063).
           requestReload({
             seek: { kind: "pts", pts: targetPts, scrub: false },
             frames: 0,
@@ -3334,6 +3790,7 @@ export function createPlaybackStore(
           deferNavigation({ seek: { kind: "pts", pts: targetPts, scrub }, frames: 0 });
           return;
         }
+        dropWaitingNavigation();
 
         const targetMediaTime =
           calibratedMediaTime === null
@@ -3422,13 +3879,9 @@ export function createPlaybackStore(
 
         const state = get();
         // A step counts from the frame on screen or from the position of the element, and a
-        // stalled element has neither (decodeStall).
-        if (
-          !attachedSource ||
-          !attachedElement ||
-          !state.isReady ||
-          state.decodeStall !== null
-        ) {
+        // stalled element has neither (decodeStall). An element that a recalibration retired
+        // goes, so a step does nothing there either (ADR 063).
+        if (!attachedSource || !attachedElement || !state.isReady || isElementGone()) {
           return "none";
         }
 
@@ -3464,6 +3917,7 @@ export function createPlaybackStore(
           deferNavigation({ seek: entry.seek, frames });
           return "stepped";
         }
+        dropWaitingNavigation();
 
         // A held backward step requests no cue (FrameStepOptions). A deferred step above requests
         // no cue when the store accepts it, held or not. It runs at the anchor as one step that
@@ -3502,8 +3956,12 @@ export function createPlaybackStore(
         // During a decode stall with a calibration, the request takes the form of a deferred
         // request below, and it becomes the request of the reload (decodeStall). The new element
         // calibrates again, so the request runs at its anchor as a deferred request does.
+        // An element that a recalibration retired takes the request in the same way, also when
+        // its calibration is unavailable after a manual recalibration: the request waits for the
+        // new element, which calibrates on its own (ADR 063).
         const stalled =
-          state.decodeStall !== null && state.calibrationStatus !== "unavailable";
+          isRetired() ||
+          (state.decodeStall !== null && state.calibrationStatus !== "unavailable");
         if (state.calibrationStatus === "calibrating" || stalled) {
           // The anchor is still open, so the request is deferred (ADR 003). Frame `frameIndex` of
           // the grid lies that many frames after the calibrated first frame, so the request is a
@@ -3540,9 +3998,10 @@ export function createPlaybackStore(
 
         // Without a calibration the grid has no frame 0. A stalled element of such a source does
         // not seek again either.
-        if (state.calibrationStatus !== "ready" || state.decodeStall !== null) {
+        if (state.calibrationStatus !== "ready" || isElementGone()) {
           return;
         }
+        dropWaitingNavigation();
         stepToFrame(
           { kind: "absolute", frameIndex, keepPlaying: options?.keepPlaying === true },
           state,
@@ -3581,9 +4040,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (state.decodeStall !== null) {
+        if (isElementGone()) {
           // The stalled element does not seek again, so the request reloads the preview, as an
-          // exact seek (see seekToPts).
+          // exact seek (see seekToPts). So does an element that a recalibration retired.
           requestReload({
             seek: {
               kind: "approximate",
@@ -3612,6 +4071,7 @@ export function createPlaybackStore(
           });
           return;
         }
+        dropWaitingNavigation();
 
         const keepsPlaying = seekKeepsPlaying(
           attachedElement,
@@ -3670,8 +4130,10 @@ export function createPlaybackStore(
         }
 
         // A late callback of a stalled element names a frame from before the error, which the
-        // element may no longer show, so no edit may read it (decodeStall).
-        if (get().decodeStall !== null) {
+        // element may no longer show, so no edit may read it (decodeStall). A callback of an
+        // element that a recalibration retired must not anchor, clear the display target of the
+        // reload, or permit another automatic recalibration (ADR 063).
+        if (isElementGone()) {
           return;
         }
 
@@ -3694,7 +4156,14 @@ export function createPlaybackStore(
         // Write the unavailable state only when it is not already the state, or when
         // clearing a non-null seek target once settled (ADR 022). RVFC fires for every
         // presented frame, and an unchanged partial still allocates a state and notifies everyone.
-        const markUnavailable = () => {
+        //
+        // `evidence` is true when the callback gave evidence against the mapping of the source,
+        // or the source cannot calibrate. The calibration is then not recoverable, so
+        // canRecalibrate goes false, also when the state was already unavailable (ADR 063).
+        const markUnavailable = (evidence: boolean) => {
+          if (evidence) {
+            waitExpiredLoss = false;
+          }
           const state = get();
           const shouldClearTarget = settled && state.seekTargetSeconds !== null;
           // A target that stays pending moves to the axis of the approximate clock. The write
@@ -3703,7 +4172,8 @@ export function createPlaybackStore(
           if (
             state.calibrationStatus !== "unavailable" ||
             state.presentedFrame !== null ||
-            shouldClearTarget
+            shouldClearTarget ||
+            (evidence && state.canRecalibrate)
           ) {
             set({
               calibrationStatus: "unavailable",
@@ -3736,7 +4206,7 @@ export function createPlaybackStore(
           calibratedMediaTime = null;
           lastPresentedMediaTime = null;
           lastInferredPts = null;
-          markUnavailable();
+          markUnavailable(true);
           return;
         }
 
@@ -3746,7 +4216,9 @@ export function createPlaybackStore(
           !isPtsString(attachedSource.videoStartPts) ||
           get().calibrationStatus === "unavailable"
         ) {
-          markUnavailable();
+          // An attach with no valid start already made the calibration final. An unavailable
+          // state keeps the kind of its cause.
+          markUnavailable(false);
           return;
         }
 
@@ -3773,15 +4245,16 @@ export function createPlaybackStore(
             expectedFirstFrame !== null &&
             Math.abs(mediaTime - expectedFirstFrame) > halfFrameSeconds(attachedSource)
           ) {
-            // The calibration becomes unavailable for this attachment only. A reload checks the
-            // first frame of its new element again.
+            // The calibration becomes unavailable for this attachment only. A reload after a
+            // decode stall checks the first frame of its new element again. The mismatch is
+            // evidence against the mapping, so no recalibration follows it (ADR 063).
             console.warn(
               `preview: the first frame shows at media time ${mediaTime}, not at the expected ${expectedFirstFrame}; the calibration is unavailable for this element`,
             );
             calibratedMediaTime = null;
             lastPresentedMediaTime = null;
             lastInferredPts = null;
-            markUnavailable();
+            markUnavailable(true);
             return;
           }
         }
@@ -3806,8 +4279,10 @@ export function createPlaybackStore(
             anchorBaselineTime !== null &&
             Math.abs(mediaTime - anchorBaselineTime) > ANCHOR_TOLERANCE_SECONDS;
 
+          // A refused first callback is evidence that the first callback can come late on this
+          // source, so no recalibration follows it (ADR 063).
           if (hasMovedBeforeAttach || hasMovedAfterAttach || seekedBeforeCalibration) {
-            markUnavailable();
+            markUnavailable(true);
             return;
           }
 
@@ -3838,7 +4313,7 @@ export function createPlaybackStore(
 
         const calibrationAnchor = calibratedMediaTime;
         if (calibrationAnchor === null) {
-          markUnavailable();
+          markUnavailable(true);
           return;
         }
 
@@ -3853,7 +4328,7 @@ export function createPlaybackStore(
           // The mapping of this source cannot be converted safely, which no later attachment
           // of the same file changes (ADR 003).
           precisionDeniedSources.add(sourceRevisionKey);
-          markUnavailable();
+          markUnavailable(true);
           return;
         }
 
@@ -3865,7 +4340,7 @@ export function createPlaybackStore(
           // Distinct RVFC presented frames inferred the same source PTS -> disable precision.
           // ADR 003 disables it for that source, so record it against the source revision key.
           precisionDeniedSources.add(sourceRevisionKey);
-          markUnavailable();
+          markUnavailable(true);
           return;
         }
 
@@ -3892,13 +4367,18 @@ export function createPlaybackStore(
           !attachedSource ||
           !attachedElement ||
           attachedElement !== element ||
-          getSourceRevisionKey(attachedSource) !== sourceRevisionKey
+          getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
+          isRetired()
         ) {
           return;
         }
 
         // No frame callback will take the anchor, so the priming play has nothing to wait for.
         endPriming(true);
+        // The web view has no frame callbacks, the first frame of a MediaSource source did not
+        // match its first window, the priming play moved too far with no frame, or the timestamps
+        // of the source decrease: a new element gives nothing safe (ADR 063).
+        waitExpiredLoss = false;
         // Read before the status changes: a pending target moves to the axis of the approximate
         // clock only when the calibration held until now.
         const retarget = timelineAxisTargetOnCalibrationLoss();
@@ -3982,7 +4462,7 @@ export function createPlaybackStore(
           attachedElement !== element ||
           getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
           !get().isReady ||
-          get().decodeStall !== null ||
+          isElementGone() ||
           !Number.isFinite(mediaTime)
         ) {
           return;
@@ -4082,11 +4562,12 @@ export function createPlaybackStore(
       syncBrowserTime: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
         // The clock of a stalled element keeps the position of the stall, which the notice of
         // the preview names (decodeStall).
+        // The clock of an element that a recalibration retired changes nothing either (ADR 063).
         if (
           !attachedSource ||
           attachedElement !== element ||
           getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
-          get().decodeStall !== null
+          isElementGone()
         ) {
           return;
         }
@@ -4105,13 +4586,10 @@ export function createPlaybackStore(
         }
         // The priming play moved the element further than the anchor guard permits, and no
         // frame came (primeFirstFrame). The guard would refuse a first frame from here, so the
-        // priming stops and the calibration becomes unavailable for this attachment.
-        if (
-          priming?.element === element &&
-          anchorBaselineTime !== null &&
-          typeof element.currentTime === "number" &&
-          element.currentTime - anchorBaselineTime > ANCHOR_TOLERANCE_SECONDS
-        ) {
+        // priming stops and the calibration becomes unavailable for this attachment. That is
+        // evidence that the first callback can come late, so no recalibration follows it (ADR
+        // 063).
+        if (primingDrifted(element)) {
           get().syncPresentationUnavailable(sourceRevisionKey, element);
           return;
         }
@@ -4144,12 +4622,13 @@ export function createPlaybackStore(
 
       syncSeeked: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
         // A late `seeked` of a stalled element must not clear the display target of a reload,
-        // or restore a frame that the element may no longer show (decodeStall).
+        // or restore a frame that the element may no longer show (decodeStall). The same holds
+        // for an element that a recalibration retired (ADR 063).
         if (
           !attachedSource ||
           attachedElement !== element ||
           getSourceRevisionKey(attachedSource) !== sourceRevisionKey ||
-          get().decodeStall !== null
+          isElementGone()
         ) {
           return;
         }
@@ -4236,7 +4715,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (attachedElement !== element) {
+        // The `play` event of an element that a recalibration retired changes nothing (ADR
+        // 063).
+        if (attachedElement !== element || isRetired()) {
           return;
         }
 
@@ -4255,14 +4736,16 @@ export function createPlaybackStore(
         }
 
         // A stalled element does not play again, so a late `play` event changes nothing
-        // (decodeStall).
-        if (!get().isReady || get().decodeStall !== null) {
+        // (decodeStall). Neither does the `play` event of an element that a recalibration
+        // retired (ADR 063).
+        if (!get().isReady || isElementGone()) {
           return;
         }
 
         // The element started to play without the store, for example from a media key. A
         // navigation deferred during calibration is dropped, as play drops it: the element now
         // moves on its own, so the deferred target no longer shows where it goes.
+        beginNavigation();
         const droppedDeferred = deferredNavigation !== null;
         deferredNavigation = null;
         // A segment playback that the store stopped on its last frame is over. A play that
@@ -4288,7 +4771,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (attachedElement !== element) {
+        // The `pause` event of an element that a recalibration retired changes nothing (ADR
+        // 063).
+        if (attachedElement !== element || isRetired()) {
           return;
         }
 
@@ -4328,7 +4813,9 @@ export function createPlaybackStore(
           return;
         }
 
-        if (attachedElement !== element) {
+        // The `ended` event of an element that a recalibration retired changes nothing (ADR
+        // 063).
+        if (attachedElement !== element || isRetired()) {
           return;
         }
 
@@ -4373,6 +4860,7 @@ export function createPlaybackStore(
             // Ignore DOM exception
           }
         }
+        attachmentGeneration++;
         attachedSource = null;
         attachedElement = null;
         frameTable = null;
@@ -4391,6 +4879,9 @@ export function createPlaybackStore(
         queuedSeek = null;
         lastAcceptedSeek = null;
         reload = null;
+        waitExpiredLoss = false;
+        // A reset permits a new automatic recalibration of every source (ADR 063).
+        automaticRecalibrationSpent = null;
         // precisionDeniedSources is kept: ADR 003 denies precise editing for the source, and a
         // source keeps the same revision key until the file on disk changes. reloadGeneration is
         // kept too: it only goes up, so a key of the preview elements is never used twice.

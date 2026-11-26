@@ -19,6 +19,10 @@ import {
 } from "@/lib/timecode";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import type { CalibrationStatus, PresentedFrame } from "@/features/playback";
+import {
+  presentApproximatePosition,
+  type ApproximatePositionView,
+} from "@/components/layout/playbackHintPresenter";
 
 // The elapsed-time formatter of a PTS lives in the timecode library, so the timeline can use
 // it without an import from the preview. The preview keeps its name for its callers.
@@ -138,7 +142,8 @@ export function formatPreviewCurrentTime(
  * Reports whether the preview shows the approximate badge beside the timecode.
  *
  * The badge marks a source that cannot calibrate (`calibrationStatus === "unavailable"`),
- * which stays on the approximate clock for the whole session. It keys on the calibration
+ * which stays on the approximate clock until a recalibration helps it, or for the session
+ * (ADR 063). It keys on the calibration
  * status and deliberately not on `isPlaybackPositionApproximate`, because that predicate is
  * also true for the moment between a seek and the frame callback that answers it, which would
  * make the badge flicker on every frame step.
@@ -159,6 +164,29 @@ export function showsApproximateBadge(
   decodeFailed: boolean,
 ): boolean {
   return !decodeFailed && calibrationStatus === "unavailable";
+}
+
+/**
+ * Returns what the approximate badge beside the timecode says, and whether it is a button that
+ * starts a recalibration, or null when the badge does not show (`showsApproximateBadge`). The
+ * text comes from the same presenter as the approximate-position item of the status bar, so the
+ * two never disagree (ADR 063). While a recalibration replaces the element, the badge does not
+ * show: the status bar says "Preparing the preview…", as while the calibration runs.
+ *
+ * @param calibrationStatus Calibration status of the active source.
+ * @param decodeFailed True while the decode-failure panel replaces the picture.
+ * @param canRecalibrate True while a recalibration can help (`canRecalibrate`).
+ * @param isRecalibrating True while a recalibration is in progress (`isRecalibrating`).
+ */
+export function presentApproximateBadge(
+  calibrationStatus: CalibrationStatus,
+  decodeFailed: boolean,
+  canRecalibrate: boolean,
+  isRecalibrating: boolean,
+): ApproximatePositionView | null {
+  return !isRecalibrating && showsApproximateBadge(calibrationStatus, decodeFailed)
+    ? presentApproximatePosition(canRecalibrate)
+    : null;
 }
 
 /**

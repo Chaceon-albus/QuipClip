@@ -228,6 +228,8 @@ export type FrameStepOutcome = "stepped" | "edge" | "none";
  * - "calibrating": Awaiting first RVFC callback to associate with videoStartPts.
  * - "ready": Calibrated linear mapping active; inferred source PTS available.
  * - "unavailable": Missing RVFC, missing videoStartPts, invalid metadata, duplicate PTS, or unsafe calculation.
+ *   When the element never took an anchor, a new element of the same source can calibrate
+ *   (`canRecalibrate`, ADR 063).
  */
 export type CalibrationStatus = "calibrating" | "ready" | "unavailable";
 
@@ -364,19 +366,53 @@ export interface PlaybackState {
    */
   readonly decodeStall: DecodeStall | null;
   /**
-   * The count of the reloads that a decode stall started. The preview keys its media elements
-   * on the source revision and on this count, so a higher count replaces the stalled element
-   * with a new element for the same source. The count only goes up: a seek during a stall
+   * The count of the reloads that a decode stall or a recalibration started. The preview keys
+   * its media elements on the source revision and on this count, so a higher count replaces the
+   * element with a new element for the same source. The count only goes up: a seek during a stall
    * raises it once for that stall, and so does a new import of the same file during a stall
-   * (`reloadStalledPreview`).
+   * (`reloadStalledPreview`). A recalibration raises it once (`recalibrate`,
+   * `syncAnchorWaitExpired`, ADR 063).
    *
    * The new element calibrates from the start of the source, as a new source does (ADR 003). The
    * request of the reload waits for its metadata, and then for the calibration anchor, as a
    * navigation deferred during calibration does (ADR 022). Only a user request reloads, so a
    * reload that seeks into the part that does not decode stalls again and does not reload by
-   * itself.
+   * itself. The one exception is the one automatic recalibration of a source when the wait for
+   * its first frame runs out (`syncAnchorWaitExpired`).
    */
   readonly reloadGeneration: number;
+  /**
+   * True while a recalibration can help (ADR 063), and `recalibrate` acts. All of these must
+   * hold:
+   *
+   * - The calibration is recoverable: it is "unavailable" because the wait for the first frame
+   *   ran out and the source had no automatic recalibration left (`syncAnchorWaitExpired`), the
+   *   source has a valid `videoStartPts` and time base, and the store holds no denial of the
+   *   source.
+   * - The element is ready (`isReady`).
+   * - No decode stall is active (`decodeStall`).
+   * - No reload is in progress: a reload of a stall or of a recalibration ends when the new
+   *   element has its metadata.
+   *
+   * Every other cause of "unavailable" is evidence against the anchor or the mapping of the
+   * source, or a property of the source or of the web view, so a new element gives nothing safe.
+   * A MediaSource source knows its anchor (ADR 046), so no navigation waits for its first frame. The status bar and
+   * the badge beside the preview timecode become buttons that start a recalibration while this
+   * is true. It is display and transport state only, and no edit reads it.
+   */
+  readonly canRecalibrate: boolean;
+  /**
+   * True from the start of a recalibration until its new element is ready (ADR 063): the old
+   * element is retired, and then the new element loads. The detach of the old element keeps it,
+   * and so do the detach and the attach of the new element before its metadata. An attach of a
+   * different source, a loss of readiness of the new element and a reset end it. A failed seek
+   * drops only the request of the reload, and the reload goes on. The reload of a decode stall
+   * does not set it.
+   *
+   * While it is true, the cue of ADR 019 and the Web Audio cue of ADR 062 do not start, so no
+   * cue loads the file beside the new element before its anchor.
+   */
+  readonly isRecalibrating: boolean;
 }
 
 /**
@@ -420,7 +456,9 @@ export interface PlaybackActions {
    * unavailable each pause the element and end the priming, and an end of the media ends it. A
    * priming that moves the element past `ANCHOR_TOLERANCE_SECONDS` from the anchor baseline with
    * no frame makes the calibration unavailable, because the anchor guard would refuse the first
-   * frame from there.
+   * frame from there. That is evidence that the first callback can come late, so no
+   * recalibration follows it (ADR 063). The new element of a recalibration gets its own priming
+   * play.
    *
    * Does nothing unless the element is attached, ready, paused and has no stall, the calibration
    * is "calibrating" with no anchor and no seek before it, the source has no known anchor (ADR
@@ -467,6 +505,54 @@ export interface PlaybackActions {
    * kept.
    */
   reloadStalledPreview: (sourceRevisionKey: string) => void;
+
+  /**
+   * Starts a manual recalibration of the attached source (ADR 063): a reload of the preview with
+   * no decode stall, so a new element calibrates from its own first frame. It does nothing
+   * unless `canRecalibrate` is true and `sourceRevisionKey` is the attached source. It removes
+   * no denial of the source.
+   *
+   * It keeps the position to go back to: the display target when a seek is pending, otherwise
+   * the position of the approximate clock, both in seconds from the start of the attached
+   * source. That position becomes the request of the reload, as an exact seek, so it runs at the
+   * anchor of the new element, or on the approximate clock when that element cannot calibrate.
+   * The playback does not start again.
+   *
+   * The start is one step (the handoff): it ends the playback, the cue, the priming play, the
+   * queued seek, a deferred navigation and the stop point of a segment playback, keeps the
+   * request and its display target, raises `reloadGeneration` once and sets `isRecalibrating`.
+   * It sets no `decodeStall`. Until the pane detaches it, the old element is retired: the store
+   * treats it as a stalled element (`decodeStall`), so its events change nothing, a seek replaces
+   * the request of the reload, and play, Play Segment and a frame step do nothing.
+   *
+   * It does not permit a new automatic recalibration of the source (`syncAnchorWaitExpired`).
+   */
+  recalibrate: (sourceRevisionKey: string) => void;
+
+  /**
+   * True when `element` is the attached element of the source and a recalibration retired it
+   * (ADR 063): the pane has not detached it yet. The pane drops every media event of such an
+   * element, and its frame callbacks, before it calls the sequence playback or the store, and it
+   * shows no failure panel for an error of it. It reads and changes nothing.
+   */
+  isRetiredElement: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+  ) => boolean;
+
+  /**
+   * True while the store refuses Play, Play Segment and a frame step because the preview element
+   * goes or is being replaced (ADR 039, ADR 063):
+   *
+   * - the attached element is stalled (`decodeStall`), or a recalibration retired it;
+   * - a recalibration is in progress (`isRecalibrating`), also while no element is attached
+   *   between the detach of the old element and the attach of the new one, and while the new
+   *   element has no metadata.
+   *
+   * The sequence playback reads it before it changes its own navigation for such a command. It
+   * reads and changes nothing.
+   */
+  refusesTransportForReload: () => boolean;
 
   /**
    * Toggles playback. Synchronously invokes video.play() to preserve user activation.
@@ -613,6 +699,9 @@ export interface PlaybackActions {
    * On first frame, calibrates mediaTime to videoStartPts.
    * On later frames, infers PTS via checked slope-one mapping.
    * Detects duplicate inferred PTS for distinct presented frames and marks calibration unavailable.
+   * No loss of the calibration here is recoverable (ADR 063): each one is evidence against the
+   * anchor or the mapping, or the source cannot calibrate. While a recalibration waits for its
+   * new element, the callbacks of the old element change nothing.
    */
   syncPresentedFrame: (
     sourceRevisionKey: string,
@@ -622,12 +711,37 @@ export interface PlaybackActions {
   ) => void;
 
   /**
-   * Marks precise presentation mapping unavailable when RVFC is unsupported, or when the
-   * preview stops waiting for the first presented frame of a visible element while a
-   * navigation is deferred (the bounded wait for the anchor). Playback and approximate browser
-   * timing remain available. The deferred navigation then runs on the approximate path.
+   * Marks precise presentation mapping unavailable for the matching element: the web view has no
+   * RVFC, the first frame of a MediaSource source did not match its first window (ADR 046), or
+   * the priming play moved too far with no frame (`primeFirstFrame`).
+   * Playback and approximate browser timing remain available. A deferred navigation then runs on
+   * the approximate path. The cause is not recoverable: a new element of the same source would
+   * give nothing safe, so `canRecalibrate` stays false (ADR 063). A retired element changes
+   * nothing.
    */
   syncPresentationUnavailable: (
+    sourceRevisionKey: string,
+    element: PlaybackMediaElement,
+  ) => void;
+
+  /**
+   * The preview reports that the bounded wait for the first presented frame of a visible element
+   * ran out while a navigation was deferred (ADR 003, ADR 063). It acts only while a navigation
+   * is deferred, the calibration is "calibrating", and the source and the element are the
+   * attached ones, and the element is not retired.
+   *
+   * The first time for a source, it starts a recalibration, in the one step of `recalibrate`:
+   * the deferred navigation becomes the request of the reload, with its seek and its steps, and
+   * a scrub seek becomes an exact seek. The display target stays, the calibration stays "calibrating", and the allowance of
+   * the source is used. The store permits one such automatic recalibration for each source. A
+   * calibration of that source that becomes ready permits one more, and so do the attach of a
+   * different source and a reset. A manual recalibration does not.
+   *
+   * When the source has no automatic recalibration left, the calibration becomes "unavailable"
+   * with a recoverable cause (`canRecalibrate`), and the deferred navigation runs on the
+   * approximate path.
+   */
+  syncAnchorWaitExpired: (
     sourceRevisionKey: string,
     element: PlaybackMediaElement,
   ) => void;
@@ -637,7 +751,8 @@ export interface PlaybackActions {
    * presents, which the page reads from its first `moof` (ADR 046). The first frame callback
    * must report that time within half a frame interval, or the calibration becomes unavailable
    * for the attachment. A play or a seek before that callback skips the check, because the
-   * callback then can name another frame. An exact seek into the expected frame keeps it.
+   * callback then can name another frame. An exact seek into the expected frame keeps it. The
+   * mismatch is evidence against the mapping, so no recalibration follows it (ADR 063).
    */
   syncExpectedFirstFrame: (
     sourceRevisionKey: string,
@@ -648,7 +763,7 @@ export interface PlaybackActions {
   /**
    * Turns precise editing off for the source, for as long as the application runs, as ADR 003
    * does for indistinguishable timestamps. The page calls it when the timestamps of a source
-   * decrease (ADR 046).
+   * decrease (ADR 046). No recalibration removes the denial (ADR 063).
    */
   denySourcePrecision: (
     sourceRevisionKey: string,

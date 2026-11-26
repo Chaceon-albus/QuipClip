@@ -492,6 +492,9 @@ export function PreviewPane() {
   // replaces the media elements with new ones for the same source (see `elementKey`).
   const decodeStall = usePlaybackStore((s) => s.decodeStall);
   const reloadGeneration = usePlaybackStore((s) => s.reloadGeneration);
+  // True from the start of a recalibration until its new element is ready (ADR 063). The cues
+  // wait for it, so they do not load the file beside the new element before its anchor.
+  const isRecalibrating = usePlaybackStore((s) => s.isRecalibrating);
 
   // The mute toggle of the transport bar. Both media elements take it as the `muted`
   // property, which React sets when it creates the node, so a stored value applies before the
@@ -506,8 +509,9 @@ export function PreviewPane() {
 
   const sourceRevisionKey = getSourceRevisionKey(media);
   // The key of the media elements and of the components that follow the video element. A new
-  // source, and a reload after a decode stall, give a new key, so React builds new elements. A
-  // media element does not play or seek again after a decode error, and a new one does.
+  // source, a reload after a decode stall and a recalibration give a new key, so React builds new
+  // elements. A media element does not play or seek again after a decode error, and a new one
+  // does. A new element also calibrates from its own first frame (ADR 063).
   const elementKey = `${sourceRevisionKey}:${reloadGeneration}`;
   const [previousMedia, setPreviousMedia] = useState(media);
   // What made the web view fail to play the source, or null while it plays: the element
@@ -568,9 +572,10 @@ export function PreviewPane() {
 
   // The bounded wait for the calibration anchor while a navigation waits for it (see
   // `anchorWait.ts`). It runs only while the store reports a deferred navigation. When a visible
-  // element presents no frame for the whole wait, the pane reports that frame callbacks are not
-  // available, so the calibration leaves `calibrating` and the navigation runs on the
-  // approximate path. With nothing deferred, the calibration stays open until a frame comes.
+  // element presents no frame for the whole wait, the pane reports it. The first time for a
+  // source the store loads a new element (ADR 063), and the wait arms again for it. The next
+  // time the calibration leaves `calibrating` and the navigation runs on the approximate path.
+  // With nothing deferred, the calibration stays open until a frame comes.
   const [anchorWait] = useState(() =>
     createAnchorWaitController<HTMLVideoElement>(
       {
@@ -843,12 +848,14 @@ export function PreviewPane() {
   // starts when the calibration is ready. The hidden audio element below stays out of the tree
   // while this flag holds, and it is the cue in every other case, such as a calibration that is
   // unavailable. A new element (`elementKey`), a new source or a lost calibration stops the cue.
+  // A recalibration stops it too, and it starts again when the new element calibrates (ADR 063).
   const usesNativePcmCue =
     NATIVE_SOURCE_PCM_CUE &&
     media !== null &&
     media.probe.audio !== null &&
     !isMediaSource &&
     !decodeFailed &&
+    !isRecalibrating &&
     attachedSourceRevisionKey === sourceRevisionKey &&
     calibrationStatus === "ready" &&
     videoStartSeconds(media.probe.videoStartPts, media.probe.videoTimeBase) !== null;
@@ -933,9 +940,9 @@ export function PreviewPane() {
   }, []);
 
   // Register requestVideoFrameCallback lifecycle loop (ADR 003). The loop starts again for each
-  // new video element: a new source, and a reload after a decode stall, which replaces the
-  // element with no change of the source. Without `reloadGeneration` the new element of a
-  // reload would get no frame callback and never calibrate.
+  // new video element: a new source, and a reload after a decode stall or of a recalibration,
+  // which replaces the element with no change of the source. Without `reloadGeneration` the new
+  // element of a reload would get no frame callback and never calibrate.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !media || decodeFailed) {
@@ -967,6 +974,11 @@ export function PreviewPane() {
       ) => {
         // Guard against late callbacks from unmounted or replaced sources
         if (cancelled || !sourceGuard.isActive(expectedRevisionKey)) {
+          return;
+        }
+        // A recalibration retired the element (ADR 063): its frames belong to nobody, and the
+        // loop stops. The new element runs its own loop.
+        if (playbackStore.getState().isRetiredElement(expectedRevisionKey, video)) {
           return;
         }
 
@@ -1032,8 +1044,17 @@ export function PreviewPane() {
     recordDecodeEvidence,
   ]);
 
+  // True when an event of `element` may reach the sequence playback and the store: its source
+  // is the active one, and no recalibration retired the element (ADR 063). A retired element
+  // stays in the tree until React replaces it, and its late events, frames and errors belong to
+  // nobody. The store refuses them too, but the sequence playback acts on `pause` and `ended`
+  // before the store sees them.
+  const acceptsEventsOf = (element: HTMLVideoElement, key = sourceRevisionKey) =>
+    sourceGuard.isActive(key) &&
+    !playbackStore.getState().isRetiredElement(key, element);
+
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
-    if (!sourceGuard.isActive(sourceRevisionKey) || !media) {
+    if (!acceptsEventsOf(e.currentTarget) || !media) {
       return;
     }
     syncBrowserTime(sourceRevisionKey, e.currentTarget);
@@ -1043,7 +1064,7 @@ export function PreviewPane() {
   // `resize`. A zero size, such as that of a web view that decodes no picture, gives the
   // default ratio. React renders again only when the ratio changes.
   const syncPictureRatio = (element: HTMLVideoElement) => {
-    if (!sourceGuard.isActive(sourceRevisionKey)) {
+    if (!acceptsEventsOf(element)) {
       return;
     }
     // The size is read now, because React can run the updater later.
@@ -1059,7 +1080,10 @@ export function PreviewPane() {
     element: HTMLVideoElement,
     trigger: DecodeFailureTrigger,
   ) => {
-    if (!sourceGuard.isActive(sourceRevisionKey)) {
+    // An element that a recalibration retired is already being replaced (ADR 063). Its error is
+    // not a failure of the source, so it shows no panel and leaves the store ready for the new
+    // element.
+    if (!acceptsEventsOf(element)) {
       return;
     }
     const check = pictureCheckRef.current;
@@ -1076,7 +1100,7 @@ export function PreviewPane() {
   // the next seek replaces the element (`decodeStall`). Every other error, and a stall that the
   // store refuses, takes the path of a failure.
   const handleMediaError = (element: HTMLVideoElement) => {
-    if (!sourceGuard.isActive(sourceRevisionKey)) {
+    if (!acceptsEventsOf(element)) {
       return;
     }
     const code = element.error?.code ?? null;
@@ -1112,7 +1136,7 @@ export function PreviewPane() {
     element: HTMLVideoElement,
     failure: MseFailure,
   ) => {
-    if (key !== sourceRevisionKey || !sourceGuard.isActive(key)) {
+    if (key !== sourceRevisionKey || !acceptsEventsOf(element, key)) {
       return;
     }
     if (failure.kind === "windowFailed") {
@@ -1143,7 +1167,7 @@ export function PreviewPane() {
   // The ready path of a loaded element. `loadedmetadata` takes it at once when the element
   // reports a picture size. Otherwise the picture check takes it when a size arrives.
   const takeReadyPath = (element: HTMLVideoElement) => {
-    if (!sourceGuard.isActive(sourceRevisionKey)) {
+    if (!acceptsEventsOf(element)) {
       return;
     }
     syncReady(sourceRevisionKey, element);
@@ -1164,7 +1188,7 @@ export function PreviewPane() {
   // Feeds an element event, or the end of a wait, to the picture check, and performs the
   // action that `resolvePictureCheck` returns.
   const runPictureCheck = (element: HTMLVideoElement, event: PictureCheckEvent) => {
-    if (!sourceGuard.isActive(sourceRevisionKey)) {
+    if (!acceptsEventsOf(element)) {
       return;
     }
     let check = pictureCheckRef.current;
@@ -1298,6 +1322,9 @@ export function PreviewPane() {
   return (
     <section
       ref={sectionRef}
+      // The focus target of a control that a recalibration removes, also from the status bar
+      // (`previewRegion.ts`, ADR 063).
+      data-preview-region=""
       tabIndex={-1}
       aria-label={t("preview.regionLabel")}
       className="dark flex min-h-[200px] flex-1 flex-col overflow-hidden bg-preview-background p-3 text-preview-foreground scheme-dark outline-none select-none"
@@ -1392,12 +1419,12 @@ export function PreviewPane() {
                     })}
                     className="h-full w-full object-contain"
                     onPlay={(e) => {
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         syncPlay(sourceRevisionKey, e.currentTarget);
                       }
                     }}
                     onPause={(e) => {
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         // The element pauses before it ends, and the sequence needs to know that
                         // it was playing then (ADR 052).
                         sequencePlayback.notePause(e.currentTarget.ended);
@@ -1405,7 +1432,7 @@ export function PreviewPane() {
                       }
                     }}
                     onEnded={(e) => {
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         // At the end of a clip that another clip follows, playback goes on at
                         // the first frame of that clip (ADR 052), and the end of this element is
                         // no end of the playback.
@@ -1416,7 +1443,7 @@ export function PreviewPane() {
                     }}
                     onTimeUpdate={handleTimeUpdate}
                     onSeeking={(e) => {
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         // A seek after the first frame moves the element away from a part
                         // that decoded.
                         recordDecodeEvidence(
@@ -1429,12 +1456,12 @@ export function PreviewPane() {
                     }}
                     onSeeked={(e) => {
                       handleTimeUpdate(e);
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         syncSeeked(sourceRevisionKey, e.currentTarget);
                       }
                     }}
                     onDurationChange={(e) => {
-                      if (sourceGuard.isActive(sourceRevisionKey)) {
+                      if (acceptsEventsOf(e.currentTarget)) {
                         syncBrowserDuration(sourceRevisionKey, e.currentTarget);
                         recordBrowserDuration(e.currentTarget);
                       }
@@ -1480,6 +1507,10 @@ export function PreviewPane() {
                        ADR 062 in place of this element, so the element does not load the file a
                        second time. The element stays the cue in each case that the Web Audio cue does
                        not cover, such as a calibration that is unavailable.
+                    6. !isRecalibrating: a recalibration replaces the video element (ADR 063). The
+                       first render of the new element still reads the calibration status of the
+                       old one, so test 4 alone would mount this element beside the new video
+                       element, and its load could delay the anchor.
                     The element is never drawn (`hidden`), so it has no control, no context menu and no
                     picture, and it needs none of the native feature attributes of the video. */}
                 {media.probe.audio &&
@@ -1487,7 +1518,8 @@ export function PreviewPane() {
                   !isMediaSource &&
                   attachedSourceRevisionKey === sourceRevisionKey &&
                   calibrationStatus !== "calibrating" &&
-                  !usesNativePcmCue && (
+                  !usesNativePcmCue &&
+                  !isRecalibrating && (
                     <audio
                       ref={scrubAudioRefCallback}
                       key={`scrub-${elementKey}`}

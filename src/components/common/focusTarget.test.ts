@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canTakeFocus,
+  focusTargetAfterRemoval,
   isElementRendered,
   isInOpenDialog,
   OPEN_DIALOG_SELECTOR,
@@ -47,6 +48,35 @@ describe("canTakeFocus", () => {
     expect(canTakeFocus(fakeTarget({ isConnected: false }))).toBe(false);
     expect(canTakeFocus(fakeTarget({ isRendered: false }))).toBe(false);
     expect(canTakeFocus(fakeTarget({ isDisabled: true }))).toBe(false);
+  });
+});
+
+describe("focusTargetAfterRemoval (ADR 063)", () => {
+  it("gives the first target that can take the focus when the removed control held it", () => {
+    const disabled = fakeTarget({ isDisabled: true });
+    const gone = fakeTarget({ isConnected: false });
+    const next = fakeTarget();
+    expect(focusTargetAfterRemoval(true, [null, gone, disabled, next])).toBe(next);
+  });
+
+  it("moves no focus when the removed control did not hold it", () => {
+    expect(focusTargetAfterRemoval(false, [fakeTarget()])).toBeNull();
+  });
+
+  it("gives null when no target can take the focus", () => {
+    expect(focusTargetAfterRemoval(true, [])).toBeNull();
+    expect(
+      focusTargetAfterRemoval(true, [fakeTarget({ isRendered: false })]),
+    ).toBeNull();
+  });
+
+  it("gives the preview section, which stays enabled through the whole retry", () => {
+    // The focus goes to the preview section from the status bar item and from the badge. The
+    // section takes the focus with no Tab stop, and the store never disables it. A disabled
+    // value button or an item that unmounts would drop the focus to the document.
+    const section = fakeTarget();
+    expect(focusTargetAfterRemoval(true, [section])).toBe(section);
+    expect(focusTargetAfterRemoval(true, [toPromptFocusTarget(null)])).toBeNull();
   });
 });
 

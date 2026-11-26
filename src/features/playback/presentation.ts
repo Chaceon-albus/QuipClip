@@ -3,8 +3,8 @@
  * playhead.
  *
  * Whether the interface marks a position as approximate is a separate question answered
- * by the calibration status, because the calibration status holds for a whole session while
- * this predicate flips on every seek. See ADR 003.
+ * by the calibration status, because the calibration status changes only with the element or
+ * the source while this predicate flips on every seek. See ADR 003 and ADR 063.
  */
 
 import { ptsElapsedSeconds } from "@/lib/time";
@@ -15,7 +15,8 @@ import type { CalibrationStatus, PlaybackState, PresentedFrame } from "./types";
  * Returns true when the reported playback position comes from the browser media clock
  * instead of an inferred source PTS.
  *
- * A source that never calibrates is approximate for its whole session. A calibrated source
+ * A source that does not calibrate is approximate until a new element of it calibrates, if one
+ * ever does (ADR 063). A calibrated source
  * is also approximate between a seek and the RVFC callback that answers it, because the
  * store clears `presentedFrame` and never updates it optimistically (ADR 003).
  */

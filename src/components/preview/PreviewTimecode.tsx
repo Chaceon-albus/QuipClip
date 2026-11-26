@@ -7,43 +7,83 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import {
+  focusTargetAfterRemoval,
+  toPromptFocusTarget,
+} from "@/components/common/focusTarget";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { MediaProbe } from "@/features/media";
 import type { TimecodeDisplay } from "@/lib/timecode";
-import { formatPreviewCurrentTime, showsApproximateBadge } from "./previewFrame";
+import type { ApproximatePositionView } from "@/components/layout/playbackHintPresenter";
+import { cn } from "@/lib/utils";
+import { formatPreviewCurrentTime, presentApproximateBadge } from "./previewFrame";
+import { findPreviewRegion } from "./previewRegion";
 import { closesFieldOnPress } from "./timecodeFieldPress";
 import {
   resolveTimecodeEntry,
   runTimecodeEntryCommand,
   type TimecodeEntryErrorCode,
 } from "./timecodeEntrySeek";
-import { sequencePlayback, useSequencePlaybackStore } from "@/features/sequence";
+import {
+  recalibratePreview,
+  sequencePlayback,
+  useSequencePlaybackStore,
+} from "@/features/sequence";
 
 /**
  * Marks the current timecode as approximate. It is a small `≈` badge before the value, and
- * its tooltip gives the same explanation as the status bar's approximate-position chip. The
- * badge can take the focus, so a keyboard user can open the tooltip, and its accessible
- * name is the chip's label, because a screen reader would read the symbol alone as a
- * relation.
+ * its tooltip gives the same explanation as the status bar's approximate-position chip: both
+ * take their text from `presentApproximatePosition`. The badge can take the focus, so a
+ * keyboard user can open the tooltip, and its accessible name is the chip's label, because a
+ * screen reader would read the symbol alone as a relation.
+ *
+ * While a new load of the preview can help (`canRecalibrate`, ADR 063), the badge is a button.
+ * A click, or Enter while it has the focus, starts the recalibration. Space stays the play key
+ * of the window, which takes it before the button (ADR 026). The badge goes when the
+ * recalibration starts, so `onRecalibrate` learns whether the badge held the focus, and the
+ * caller moves the focus to the preview section, which stays for the whole retry.
  *
  * The preview section is always dark, so the `-text` token resolves to its dark value here.
  */
-function ApproximateBadge() {
+function ApproximateBadge({
+  view,
+  onRecalibrate,
+}: {
+  view: ApproximatePositionView;
+  onRecalibrate: (heldFocus: boolean) => void;
+}) {
   const { t } = useTranslation();
+  const className =
+    "mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-ring outline-none";
+  const content = (
+    <>
+      <span aria-hidden="true">≈</span>
+      <span className="sr-only">{t(view.lineKey)}</span>
+    </>
+  );
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span
-          tabIndex={0}
-          className="mr-1.5 rounded-sm bg-warning/15 px-1 text-2xs text-warning-text focus-ring outline-none"
-        >
-          <span aria-hidden="true">≈</span>
-          <span className="sr-only">{t("statusBar.approximatePosition")}</span>
-        </span>
+        {view.recalibrates ? (
+          <button
+            type="button"
+            className={cn(className, "transition-colors hover:bg-warning/25")}
+            onClick={(event) => {
+              onRecalibrate(document.activeElement === event.currentTarget);
+            }}
+          >
+            {content}
+          </button>
+        ) : (
+          <span tabIndex={0} className={className}>
+            {content}
+          </span>
+        )}
       </TooltipTrigger>
       <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
-        <p>{t("statusBar.approximatePositionDetail")}</p>
-        <p>{t("statusBar.approximatePositionMarks")}</p>
+        {view.detail.map((key) => (
+          <p key={key}>{t(key)}</p>
+        ))}
       </TooltipContent>
     </Tooltip>
   );
@@ -122,6 +162,14 @@ export function PreviewTimecode({
   const attachedSourceRevisionKey = useSequencePlaybackStore(
     (s) => s.attachedSourceRevisionKey,
   );
+  const canRecalibrate = useSequencePlaybackStore((s) => s.canRecalibrate);
+  const isRecalibrating = useSequencePlaybackStore((s) => s.isRecalibrating);
+  const approximateBadge = presentApproximateBadge(
+    calibrationStatus,
+    decodeFailed,
+    canRecalibrate,
+    isRecalibrating,
+  );
 
   // The seek target first, then the source-relative time of a ready inferred PTS, then the
   // approximate browser time (ADR 022), in the format of the source (ADR 028).
@@ -158,6 +206,16 @@ export function PreviewTimecode({
       buttonRef.current?.focus({ preventScroll: true });
     }
   }, [isEditing]);
+
+  // The badge starts a recalibration and goes (ADR 063). When it held the focus, the preview
+  // section takes it. The value button beside the badge is no stable target: it is disabled
+  // while the new element has no metadata (focusTargetAfterRemoval, previewRegion.ts).
+  const recalibrateFromBadge = (heldFocus: boolean) => {
+    recalibratePreview();
+    focusTargetAfterRemoval(heldFocus, [
+      toPromptFocusTarget(findPreviewRegion()),
+    ])?.focus();
+  };
 
   // The field takes the focus and selects its text once, when it mounts. A stable callback runs
   // only on mount and unmount, so a render while the user types does not select the text again.
@@ -261,7 +319,12 @@ export function PreviewTimecode({
 
   return (
     <>
-      {showsApproximateBadge(calibrationStatus, decodeFailed) && <ApproximateBadge />}
+      {approximateBadge !== null && (
+        <ApproximateBadge
+          view={approximateBadge}
+          onRecalibrate={recalibrateFromBadge}
+        />
+      )}
       {draft === null ? (
         <>
           {/* The same left padding as the field, so the value does not move when the field

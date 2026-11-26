@@ -7,9 +7,11 @@ import {
   formatPreviewCurrentTime,
   formatPreviewTotalDuration,
   formatSourceRelativeTime,
+  presentApproximateBadge,
   showsApproximateBadge,
   SourceLifecycleController,
 } from "./previewFrame";
+import { presentApproximatePosition } from "@/components/layout/playbackHintPresenter";
 
 describe("Preview Frame Helpers & ADR 003 Math", () => {
   const tb25: Rational = { n: 1, d: 25 };
@@ -451,6 +453,31 @@ describe("Preview Frame Helpers & ADR 003 Math", () => {
       expect(showsApproximateBadge("calibrating", true)).toBe(false);
       expect(showsApproximateBadge("unavailable", true)).toBe(false);
       expect(showsApproximateBadge("ready", true)).toBe(false);
+    });
+  });
+
+  describe("presentApproximateBadge (ADR 063)", () => {
+    it("takes the text of the status bar item, with no button when a recalibration cannot help", () => {
+      expect(presentApproximateBadge("unavailable", false, false, false)).toStrictEqual(
+        presentApproximatePosition(false),
+      );
+      expect(
+        presentApproximateBadge("unavailable", false, false, false)?.recalibrates,
+      ).toBe(false);
+    });
+
+    it("is a button with the retry text while a recalibration can help", () => {
+      const view = presentApproximateBadge("unavailable", false, true, false);
+      expect(view).toStrictEqual(presentApproximatePosition(true));
+      expect(view?.recalibrates).toBe(true);
+      expect(view?.lineKey).toBe("statusBar.approximatePositionRetry");
+    });
+
+    it("does not show where the plain badge does not show, or while a recalibration runs", () => {
+      expect(presentApproximateBadge("ready", false, true, false)).toBeNull();
+      expect(presentApproximateBadge("calibrating", false, true, false)).toBeNull();
+      expect(presentApproximateBadge("unavailable", true, true, false)).toBeNull();
+      expect(presentApproximateBadge("unavailable", false, false, true)).toBeNull();
     });
   });
 

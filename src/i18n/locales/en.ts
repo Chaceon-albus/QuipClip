@@ -334,6 +334,10 @@ export const en = {
     },
     disabledReason: {
       preciseMarkingUnavailable: "Precise marking is unavailable for this video.",
+      // On Mark In, Mark Out and Split when a new load of the preview can help (ADR 063). The
+      // quoted name is the start of `statusBar.approximatePositionRetry`.
+      preciseMarkingRetry:
+        "Precise marking is unavailable until the preview reads the exact frame timestamps. Click “Approximate position” in the status bar to try again.",
       markInFirst: "Mark an In point first.",
       selectSegment: "Select a segment first.",
       // Split while several segments are selected (ADR 045): Split cuts one segment only.
@@ -488,15 +492,23 @@ export const en = {
     ffmpeg: {
       settingsHint: "Click to open FFmpeg settings.",
     },
-    // The warning chip for a video that cannot calibrate. It stays for the whole session, so
-    // its tooltip, `approximatePositionDetail` then `approximatePositionMarks`, gives a next
-    // step. `approximatePosition` is also the accessible name of the badge beside the
-    // preview timecode, which shows the same tooltip.
+    // The warning chip for a video that cannot calibrate. A new load of the preview does not
+    // help such a video, so its tooltip, `approximatePositionDetail` then
+    // `approximatePositionMarks`, gives a next step. `approximatePosition` is also the
+    // accessible name of the badge beside the preview timecode, which shows the same tooltip.
     approximatePosition: "Approximate position · marking unavailable",
     approximatePositionDetail:
       "The playhead follows the system player clock, not the exact frame timestamp.",
     approximatePositionMarks:
       "Mark In, Mark Out, and Split are unavailable for this video. They can become available if you convert the video to MP4 and open the converted file.",
+    // The same chip and badge when the preview never read the first frame of the video, so a new
+    // load of the preview can help (ADR 063). They are buttons then, and a click loads the
+    // preview again. The tooltip shows `approximatePositionDetail`, then
+    // `approximatePositionRetryMarks`. `approximatePositionRetry` is also the accessible name of
+    // the badge in that state.
+    approximatePositionRetry: "Approximate position · click to try again",
+    approximatePositionRetryMarks:
+      "Mark In, Mark Out, and Split are unavailable until the preview reads the exact frame timestamps. Click to load the preview of this video again.",
     // The neutral chip while a video that was just opened calibrates. It names the preview, so
     // it cannot be read as `export.preparing`. Its tooltip shows `preparingPositionDetail`,
     // then `preparingPositionMarks`.

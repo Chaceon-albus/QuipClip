@@ -12441,3 +12441,1269 @@ describe("A frame step when WebKit keeps the frame of the seek before (ADR 022)"
     expect(video.currentTime).toBeCloseTo(frameMiddle(98), 9);
   });
 });
+
+describe("Recalibration (ADR 063)", () => {
+  /**
+   * A native source: 20 s at 25 fps on 1/12800, so one frame is 512 ticks and the grid is exact.
+   * Its first frame anchors the calibration (ADR 003).
+   */
+  const slow: PlaybackSource = {
+    path: "/media/slow-first-frame.mp4",
+    size: 7340032,
+    mtime: 1732500000,
+    videoTimeBase: { n: 1, d: 12800 },
+    videoStartPts: "0" as Pts,
+    videoDurationTicks: "256000" as TickCount,
+    approximateDurationSeconds: 20,
+    avgFrameRate: { n: 25, d: 1 },
+    rFrameRate: { n: 25, d: 1 },
+  };
+  const key = getSourceRevisionKey(slow);
+
+  /** Another file, for a source change. */
+  const other: PlaybackSource = { ...slow, path: "/media/other.mp4" };
+  const otherKey = getSourceRevisionKey(other);
+
+  /** The PTS of a position on the grid of `slow`. */
+  const ptsAt = (seconds: number): Pts => String(Math.round(seconds * 12800)) as Pts;
+
+  type FakeVideo = ReturnType<typeof createFakeVideo>;
+
+  /** Loads the metadata of an element, which is before its first frame callback. */
+  function loadMetadata(
+    store: PlaybackStore,
+    video: FakeVideo,
+    source: PlaybackSource = slow,
+  ): void {
+    video.readyState = 1;
+    store.getState().syncReady(getSourceRevisionKey(source), video);
+    store.getState().syncBrowserDuration(getSourceRevisionKey(source), video);
+  }
+
+  /** Attaches an element and loads its metadata, with no first frame yet. */
+  function attachLoaded(
+    store: PlaybackStore,
+    source: PlaybackSource = slow,
+    video: FakeVideo = createFakeVideo({ duration: 20 }),
+  ): FakeVideo {
+    store.getState().attach(source, video);
+    loadMetadata(store, video, source);
+    expect(store.getState().calibrationStatus).toBe("calibrating");
+    return video;
+  }
+
+  /**
+   * Replaces the element with a new one for the same source, in the order of the ref callbacks
+   * when React replaces a keyed node: the detach of the old element first.
+   */
+  function replaceElement(
+    store: PlaybackStore,
+    old: FakeVideo,
+    next: FakeVideo = createFakeVideo({ duration: 20 }),
+  ): FakeVideo {
+    store.getState().detach(key, old);
+    store.getState().attach(slow, next);
+    return next;
+  }
+
+  /**
+   * Brings the source to the recoverable state: a seek waits for the anchor, the first wait runs
+   * out and loads a new element, and the wait of that element runs out too. Returns the element
+   * on screen, which plays on the approximate clock.
+   */
+  function reachRecoverable(store: PlaybackStore): FakeVideo {
+    const first = attachLoaded(store);
+    store.getState().seekApproximate(12);
+    store.getState().syncAnchorWaitExpired(key, first);
+    const next = replaceElement(store, first);
+    loadMetadata(store, next);
+    store.getState().syncAnchorWaitExpired(key, next);
+    expect(store.getState().calibrationStatus).toBe("unavailable");
+    expect(store.getState().canRecalibrate).toBe(true);
+    return next;
+  }
+
+  /** Stalls the element, as an `error` event after a presented frame does. */
+  function stall(store: PlaybackStore, video: FakeVideo, seconds: number): void {
+    video.currentTime = seconds;
+    video.seeking = false;
+    expect(store.getState().syncDecodeStall(key, video)).toBe(true);
+  }
+
+  describe("the automatic recalibration", () => {
+    it("loads a new element the first time the wait runs out, and keeps the request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      const pauses = video.pauseCalls;
+
+      store.getState().syncAnchorWaitExpired(key, video);
+
+      let state = store.getState();
+      expect(state.calibrationStatus).toBe("calibrating");
+      expect(state.isRecalibrating).toBe(true);
+      expect(state.reloadGeneration).toBe(1);
+      expect(state.seekTargetSeconds).toBe(12);
+      expect(state.hasDeferredNavigation).toBe(false);
+      expect(state.decodeStall).toBeNull();
+      expect(state.canRecalibrate).toBe(false);
+      expect(state.isPlaying).toBe(false);
+      expect(video.pauseCalls).toBe(pauses + 1);
+      expect(video.currentTimeSets).toBe(0);
+
+      const next = replaceElement(store, video);
+      expect(store.getState().isRecalibrating).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(12);
+      loadMetadata(store, next);
+      state = store.getState();
+      expect(state.isRecalibrating).toBe(false);
+      expect(state.hasDeferredNavigation).toBe(true);
+      expect(state.seekTargetSeconds).toBe(12);
+      expect(next.currentTimeSets).toBe(0);
+
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(next.currentTime).toBe(12);
+      // The old element got nothing.
+      expect(video.currentTimeSets).toBe(0);
+    });
+
+    it("keeps a scrub request as an exact seek", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12, { scrub: true });
+      store.getState().syncAnchorWaitExpired(key, video);
+
+      const next = replaceElement(
+        store,
+        video,
+        createFakeVideo({ duration: 20, fastSeek: true }),
+      );
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.fastSeek).not.toHaveBeenCalled();
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBe(12);
+    });
+
+    it("keeps the steps of the request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekToPts(ptsAt(4));
+      store.getState().seekNominal(2);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(4.08, 9);
+      store.getState().syncAnchorWaitExpired(key, video);
+      expect(store.getState().seekTargetSeconds).toBeCloseTo(4.08, 9);
+
+      const next = replaceElement(store, video);
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBeCloseTo(4.1, 9);
+    });
+
+    it("runs the request on the approximate clock when the wait of the new element runs out", () => {
+      const store = createPlaybackStore();
+      const next = reachRecoverable(store);
+      const state = store.getState();
+      expect(state.reloadGeneration).toBe(1);
+      expect(state.isRecalibrating).toBe(false);
+      expect(state.hasDeferredNavigation).toBe(false);
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBe(12);
+      fireSeeked(store, key, next);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+    });
+
+    it("acts only while a navigation waits for the anchor of the attached element", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      // Nothing waits.
+      store.getState().syncAnchorWaitExpired(key, video);
+      store.getState().seekApproximate(12);
+      // Another element, and another source.
+      store.getState().syncAnchorWaitExpired(key, createFakeVideo());
+      store.getState().syncAnchorWaitExpired(otherKey, video);
+      expect(store.getState().reloadGeneration).toBe(0);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+
+      // A calibration that is ready has nothing to wait for.
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().syncAnchorWaitExpired(key, video);
+      expect(store.getState().reloadGeneration).toBe(0);
+      expect(store.getState().calibrationStatus).toBe("ready");
+    });
+
+    it("gives no second automatic recalibration to a new attach of the same source", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      // A new import of the open file attaches a new element with no reload.
+      store.getState().detach(key, shown);
+      const again = attachLoaded(store);
+      store.getState().seekApproximate(5);
+      store.getState().syncAnchorWaitExpired(key, again);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(true);
+    });
+
+    it("permits one more after a calibration of the source becomes ready", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const next = replaceElement(store, video);
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+
+      // A decode stall reloads the element, and its request waits for the anchor again.
+      store.getState().play();
+      stall(store, next, 10.02);
+      store.getState().seekApproximate(3);
+      expect(store.getState().reloadGeneration).toBe(2);
+      const third = replaceElement(store, next);
+      loadMetadata(store, third);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+
+      store.getState().syncAnchorWaitExpired(key, third);
+      expect(store.getState().reloadGeneration).toBe(3);
+      expect(store.getState().isRecalibrating).toBe(true);
+    });
+
+    it("permits one more after the attach of a different source", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      expect(store.getState().reloadGeneration).toBe(1);
+
+      store.getState().attach(other, createFakeVideo({ duration: 20 }));
+      expect(store.getState().isRecalibrating).toBe(false);
+      const back = attachLoaded(store);
+      store.getState().seekApproximate(4);
+      store.getState().syncAnchorWaitExpired(key, back);
+      expect(store.getState().reloadGeneration).toBe(2);
+      expect(store.getState().isRecalibrating).toBe(true);
+    });
+
+    it("permits one more after a reset", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      store.getState().reset();
+      expect(store.getState().isRecalibrating).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().reloadGeneration).toBe(1);
+
+      const again = attachLoaded(store);
+      store.getState().seekApproximate(4);
+      store.getState().syncAnchorWaitExpired(key, again);
+      expect(store.getState().reloadGeneration).toBe(2);
+    });
+  });
+
+  describe("the manual recalibration", () => {
+    it("goes back to the position of the approximate clock at the anchor of the new element", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      shown.currentTime = 7;
+      shown.seeking = false;
+      store.getState().syncBrowserTime(key, shown);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(7);
+
+      store.getState().recalibrate(key);
+      let state = store.getState();
+      expect(state.reloadGeneration).toBe(2);
+      expect(state.isRecalibrating).toBe(true);
+      expect(state.canRecalibrate).toBe(false);
+      expect(state.seekTargetSeconds).toBe(7);
+      expect(state.decodeStall).toBeNull();
+
+      const next = replaceElement(store, shown);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+      loadMetadata(store, next);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      state = store.getState();
+      expect(state.calibrationStatus).toBe("ready");
+      expect(next.currentTime).toBe(7);
+      expect(next.playCalls).toBe(0);
+      expect(state.isPlaying).toBe(false);
+      fireSeeked(store, key, next);
+      store.getState().syncPresentedFrame(key, 7, 2, next);
+      expect(store.getState().presentedFrame?.inferredSourcePts).toBe(ptsAt(7));
+    });
+
+    it("goes back to the display target while a seek is pending", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      // The seek of the deferred request to 12 s has not ended.
+      expect(store.getState().seekTargetSeconds).toBe(12);
+      store.getState().recalibrate(key);
+      expect(store.getState().seekTargetSeconds).toBe(12);
+
+      const next = replaceElement(store, shown);
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTime).toBe(12);
+    });
+
+    it("ends the playback, the cue and the queued seek, and sets no stall", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      store.getState().play();
+      expect(store.getState().isPlaying).toBe(true);
+      const stopSpy = vi.spyOn(scrubAudioController, "stop");
+      try {
+        const pauses = shown.pauseCalls;
+        store.getState().recalibrate(key);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(store.getState().decodeStall).toBeNull();
+        expect(shown.pauseCalls).toBe(pauses + 1);
+        expect(stopSpy).toHaveBeenCalled();
+      } finally {
+        stopSpy.mockRestore();
+      }
+    });
+
+    it("does not permit one more automatic recalibration", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      store.getState().recalibrate(key);
+      const next = replaceElement(store, shown);
+      loadMetadata(store, next);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+
+      store.getState().syncAnchorWaitExpired(key, next);
+      expect(store.getState().reloadGeneration).toBe(2);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(true);
+    });
+
+    it("does nothing for another source, or while a recalibration cannot help", () => {
+      const store = createPlaybackStore();
+      reachRecoverable(store);
+      store.getState().recalibrate(otherKey);
+      expect(store.getState().reloadGeneration).toBe(1);
+
+      const fresh = createPlaybackStore();
+      attachLoaded(fresh);
+      fresh.getState().recalibrate(key);
+      expect(fresh.getState().reloadGeneration).toBe(0);
+    });
+  });
+
+  describe("the causes that a recalibration does not help", () => {
+    it("keeps an anchor guard refusal final", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentedFrame(key, 5, 1, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+      store.getState().recalibrate(key);
+      expect(store.getState().reloadGeneration).toBe(0);
+    });
+
+    it("keeps a web view with no frame callbacks final, and a priming drift too", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentationUnavailable(key, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+
+      const primed = createPlaybackStore();
+      const element = Object.assign(createFakeVideo({ duration: 20 }), {
+        muted: false,
+        playbackRate: 1,
+      });
+      attachLoaded(primed, slow, element);
+      primed.getState().seekApproximate(12);
+      primed.getState().primeFirstFrame(key, element, () => false);
+      expect(element.playCalls).toBe(1);
+      // The priming play moved the element past the tolerance with no frame.
+      element.currentTime = ANCHOR_TOLERANCE_SECONDS + 0.1;
+      primed.getState().syncBrowserTime(key, element);
+      expect(primed.getState().calibrationStatus).toBe("unavailable");
+      expect(primed.getState().canRecalibrate).toBe(false);
+      primed.getState().recalibrate(key);
+      expect(primed.getState().reloadGeneration).toBe(0);
+    });
+
+    it("keeps a denial of the source, also for a new attach of it", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().syncPresentedFrame(key, 0.00001, 2, video);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+
+      store.getState().detach(key, video);
+      const again = createFakeVideo({ duration: 20 });
+      store.getState().attach(slow, again);
+      loadMetadata(store, again);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+    });
+
+    it("drops the recoverable state when a later frame callback denies the source", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      store.getState().syncPresentedFrame(key, Number.NaN, 3, shown);
+      expect(store.getState().canRecalibrate).toBe(false);
+      store.getState().recalibrate(key);
+      expect(store.getState().reloadGeneration).toBe(1);
+    });
+
+    it("never reports a source with no valid start as recoverable", () => {
+      const noStart: PlaybackSource = { ...slow, videoStartPts: null };
+      const store = createPlaybackStore();
+      const video = createFakeVideo({ duration: 20 });
+      store.getState().attach(noStart, video);
+      loadMetadata(store, video, noStart);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+    });
+  });
+
+  describe("the retired element", () => {
+    it("changes nothing with its frame callbacks and its events", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      expect(store.getState().isRetiredElement(key, video)).toBe(true);
+      expect(store.getState().isRetiredElement(key, createFakeVideo())).toBe(false);
+      const clock = store.getState().approximateBrowserTimeSeconds;
+
+      // A late first frame must not anchor and must not clear the display target.
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+      expect(store.getState().presentedFrame).toBeNull();
+      expect(store.getState().seekTargetSeconds).toBe(12);
+      fireSeeked(store, key, video);
+      expect(store.getState().seekTargetSeconds).toBe(12);
+      video.paused = false;
+      store.getState().syncPlay(key, video);
+      expect(store.getState().isPlaying).toBe(false);
+      store.getState().syncPause(key, video);
+      store.getState().syncEnded(key, video);
+      video.currentTime = 3;
+      store.getState().syncBrowserTime(key, video);
+      expect(store.getState().approximateBrowserTimeSeconds).toBe(clock);
+      store.getState().syncPresentationUnavailable(key, video);
+      store.getState().syncAnchorWaitExpired(key, video);
+      store.getState().syncUnready(key, video);
+      // An error of the element changes nothing, and the pane shows no panel for it.
+      expect(store.getState().syncDecodeStall(key, video)).toBe(true);
+
+      const state = store.getState();
+      expect(state.calibrationStatus).toBe("calibrating");
+      expect(state.decodeStall).toBeNull();
+      expect(state.isReady).toBe(true);
+      expect(state.isRecalibrating).toBe(true);
+      expect(state.reloadGeneration).toBe(1);
+      expect(state.seekTargetSeconds).toBe(12);
+    });
+
+    it("does not let a late first frame permit another automatic recalibration", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+
+      const next = replaceElement(store, video);
+      loadMetadata(store, next);
+      store.getState().syncAnchorWaitExpired(key, next);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+    });
+
+    it("takes a seek of the user as the request, latest wins, as an exact seek", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+
+      store.getState().seekToPts(ptsAt(6));
+      expect(store.getState().seekTargetSeconds).toBe(6);
+      store.getState().seekToFrameIndex(200);
+      expect(store.getState().seekTargetSeconds).toBe(8);
+      store.getState().seekApproximate(9, { scrub: true });
+      expect(store.getState().seekTargetSeconds).toBe(9);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().error).toBeNull();
+
+      const next = replaceElement(
+        store,
+        video,
+        createFakeVideo({ duration: 20, fastSeek: true }),
+      );
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.fastSeek).not.toHaveBeenCalled();
+      expect(next.currentTime).toBe(9);
+    });
+
+    it("does nothing for play, Play Segment, a frame step, a recalibration and a reload of a stall", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const playCalls = video.playCalls;
+
+      store.getState().play();
+      store.getState().togglePlayback();
+      store.getState().playSegment(ptsAt(2), ptsAt(4));
+      expect(store.getState().seekNominal(1)).toBe("none");
+      store.getState().recalibrate(key);
+      store.getState().reloadStalledPreview(key);
+
+      expect(video.playCalls).toBe(playCalls);
+      expect(video.currentTimeSets).toBe(0);
+      const state = store.getState();
+      expect(state.isPlaying).toBe(false);
+      expect(state.playbackStop).toBeNull();
+      expect(state.seekTargetSeconds).toBe(12);
+      expect(state.reloadGeneration).toBe(1);
+    });
+  });
+
+  describe("the reload", () => {
+    it("keeps the request when StrictMode detaches and attaches the new element again", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const next = replaceElement(store, video);
+
+      store.getState().detach(key, next);
+      expect(store.getState().isRecalibrating).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(12);
+      store.getState().attach(slow, next);
+      expect(store.getState().isRecalibrating).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(12);
+
+      loadMetadata(store, next);
+      expect(store.getState().isRecalibrating).toBe(false);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTime).toBe(12);
+    });
+
+    it("ends with the attach of another source", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      store.getState().detach(key, video);
+
+      const another = createFakeVideo({ duration: 20 });
+      store.getState().attach(other, another);
+      expect(store.getState().isRecalibrating).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      loadMetadata(store, another, other);
+      expect(store.getState().hasDeferredNavigation).toBe(false);
+    });
+
+    it("ends with a loss of readiness of the new element", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const next = replaceElement(store, video);
+
+      store.getState().syncUnready(key, next);
+      expect(store.getState().isRecalibrating).toBe(false);
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      store.getState().detach(key, next);
+      const later = attachLoaded(store);
+      expect(store.getState().hasDeferredNavigation).toBe(false);
+      store.getState().syncPresentedFrame(key, 0, 1, later);
+      expect(later.currentTimeSets).toBe(0);
+    });
+
+    it("keeps going after a failed seek, which drops only the request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+
+      store.getState().seekToPts("not a pts" as Pts);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().seekTargetSeconds).toBeNull();
+      expect(store.getState().isRecalibrating).toBe(true);
+
+      const next = replaceElement(store, video);
+      expect(store.getState().isRecalibrating).toBe(true);
+      loadMetadata(store, next);
+      expect(store.getState().isRecalibrating).toBe(false);
+      expect(store.getState().hasDeferredNavigation).toBe(false);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTimeSets).toBe(0);
+    });
+
+    it("primes the first frame of the new element on macOS after syncReady", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const next = Object.assign(createFakeVideo({ duration: 20 }), {
+        muted: false,
+        playbackRate: 1,
+      });
+      replaceElement(store, video, next);
+      loadMetadata(store, next);
+      store.getState().primeFirstFrame(key, next, () => false);
+      expect(next.playCalls).toBe(1);
+      expect(next.muted).toBe(true);
+
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(next.muted).toBe(false);
+      expect(next.playbackRate).toBe(1);
+      expect(next.currentTime).toBe(12);
+    });
+
+    it("is not set by the reload of a decode stall, and a stall turns the manual one off", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().play();
+      stall(store, video, 10.02);
+      store.getState().seekApproximate(3);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(store.getState().isRecalibrating).toBe(false);
+
+      const recoverable = createPlaybackStore();
+      const shown = reachRecoverable(recoverable);
+      fireSeeked(recoverable, key, shown);
+      recoverable.getState().play();
+      stall(recoverable, shown, 13);
+      expect(recoverable.getState().canRecalibrate).toBe(false);
+      recoverable.getState().recalibrate(key);
+      expect(recoverable.getState().reloadGeneration).toBe(1);
+      expect(recoverable.getState().decodeStall).toEqual({ atSeconds: 13 });
+    });
+  });
+
+  describe("canRecalibrate", () => {
+    it("follows the readiness, the attach and a reset", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      store.getState().syncUnready(key, shown);
+      expect(store.getState().canRecalibrate).toBe(false);
+
+      const again = createPlaybackStore();
+      const element = reachRecoverable(again);
+      again.getState().detach(key, element);
+      expect(again.getState().canRecalibrate).toBe(false);
+
+      const reset = createPlaybackStore();
+      reachRecoverable(reset);
+      reset.getState().reset();
+      expect(reset.getState().canRecalibrate).toBe(false);
+    });
+
+    it("is false while the reload runs, and true again when the new element waits in vain", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      store.getState().recalibrate(key);
+      expect(store.getState().canRecalibrate).toBe(false);
+      const next = replaceElement(store, shown);
+      expect(store.getState().canRecalibrate).toBe(false);
+      loadMetadata(store, next);
+      expect(store.getState().canRecalibrate).toBe(false);
+      store.getState().syncAnchorWaitExpired(key, next);
+      expect(store.getState().canRecalibrate).toBe(true);
+    });
+
+    it("writes nothing for the later frame callbacks of the recoverable state", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      const listener = vi.fn();
+      const unsubscribe = store.subscribe(listener);
+      store.getState().syncPresentedFrame(key, 12, 3, shown);
+      store.getState().syncPresentedFrame(key, 12.04, 4, shown);
+      expect(listener).not.toHaveBeenCalled();
+      expect(store.getState().canRecalibrate).toBe(true);
+      unsubscribe();
+    });
+  });
+
+  describe("the latest request wins at each report", () => {
+    /** Sends `seek` once, from a store listener, when `when` first holds for a notification. */
+    function seekOnReport(
+      store: PlaybackStore,
+      when: (state: ReturnType<PlaybackStore["getState"]>) => boolean,
+      seek: () => void,
+    ): void {
+      let sent = false;
+      store.subscribe((state) => {
+        if (!sent && when(state)) {
+          sent = true;
+          seek();
+        }
+      });
+    }
+
+    it("lets a seek on the ready report of the new element of a recalibration replace its request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      const next = replaceElement(store, video);
+      seekOnReport(
+        store,
+        (state) => state.isReady,
+        () => store.getState().seekApproximate(3),
+      );
+      loadMetadata(store, next);
+      expect(store.getState().seekTargetSeconds).toBe(3);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBe(3);
+    });
+
+    it("lets a seek on the ready report of the new element of a stall replace its request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().play();
+      stall(store, video, 10.02);
+      store.getState().seekApproximate(15);
+      const next = replaceElement(store, video);
+      seekOnReport(
+        store,
+        (state) => state.isReady,
+        () => store.getState().seekApproximate(3),
+      );
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBe(3);
+    });
+
+    it("lets a seek on the report of the anchor replace the deferred request", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      seekOnReport(
+        store,
+        (state) => state.calibrationStatus === "ready",
+        () => store.getState().seekApproximate(4),
+      );
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(4);
+      expect(store.getState().seekTargetSeconds).toBe(4);
+    });
+
+    it.each([
+      [
+        "a web view with no frame callbacks",
+        (store: PlaybackStore, video: FakeVideo): FakeVideo => {
+          store.getState().syncPresentationUnavailable(key, video);
+          return video;
+        },
+      ],
+      [
+        "a refused first callback",
+        (store: PlaybackStore, video: FakeVideo): FakeVideo => {
+          store.getState().syncPresentedFrame(key, 5, 1, video);
+          return video;
+        },
+      ],
+      [
+        "a second wait that runs out",
+        (store: PlaybackStore, video: FakeVideo): FakeVideo => {
+          store.getState().syncAnchorWaitExpired(key, video);
+          const next = replaceElement(store, video);
+          loadMetadata(store, next);
+          store.getState().syncAnchorWaitExpired(key, next);
+          return next;
+        },
+      ],
+    ])(
+      "lets a seek on the report of an unavailable calibration replace the deferred request: %s",
+      (_name, lose) => {
+        const store = createPlaybackStore();
+        const video = attachLoaded(store);
+        store.getState().seekApproximate(12);
+        seekOnReport(
+          store,
+          (state) => state.calibrationStatus === "unavailable" && state.isReady,
+          () => store.getState().seekApproximate(4),
+        );
+        const shown = lose(store, video);
+        expect(store.getState().calibrationStatus).toBe("unavailable");
+        expect(shown.currentTimeSets).toBe(1);
+        expect(shown.currentTime).toBe(4);
+        expect(store.getState().seekTargetSeconds).toBe(4);
+      },
+    );
+
+    /**
+     * Sends `seek` once, from a store listener, on the first notification after `arm` whose
+     * previous state already had the status `status`: the write of runDeferredNavigation that
+     * follows the report of the status itself.
+     */
+    function seekOnSecondReport(
+      store: PlaybackStore,
+      status: "ready" | "unavailable",
+      seek: () => void,
+    ): void {
+      let sent = false;
+      store.subscribe((state, previous) => {
+        if (
+          !sent &&
+          state.calibrationStatus === status &&
+          previous.calibrationStatus === status
+        ) {
+          sent = true;
+          seek();
+        }
+      });
+    }
+
+    it("lets a seek on the write that drops the deferred request replace that request at the anchor", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      seekOnSecondReport(store, "ready", () => store.getState().seekApproximate(4));
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      fireSeeked(store, key, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(4);
+      expect(store.getState().seekTargetSeconds).toBe(4);
+    });
+
+    it("lets a seek on the write that drops the deferred request replace that request on the approximate clock", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      seekOnSecondReport(store, "unavailable", () =>
+        store.getState().seekApproximate(4),
+      );
+      store.getState().syncPresentationUnavailable(key, video);
+      fireSeeked(store, key, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(4);
+    });
+
+    it("lets a play on the write that drops the deferred request keep the element where it is", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      seekOnSecondReport(store, "ready", () => store.getState().play());
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(video.currentTimeSets).toBe(0);
+      expect(store.getState().isPlaying).toBe(true);
+    });
+  });
+
+  describe("faults found in review", () => {
+    it("keeps a seek on the retired element after a manual recalibration as the request", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      store.getState().recalibrate(key);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+
+      store.getState().seekToPts(ptsAt(6));
+      expect(store.getState().error).toBeNull();
+      expect(store.getState().seekTargetSeconds).toBe(6);
+      expect(store.getState().reloadGeneration).toBe(2);
+
+      const next = replaceElement(store, shown);
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTime).toBe(6);
+    });
+
+    it("keeps a frame index on the retired element after a manual recalibration in its deferred form", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      store.getState().recalibrate(key);
+
+      store.getState().seekToFrameIndex(200);
+      expect(store.getState().seekTargetSeconds).toBe(8);
+      const next = replaceElement(store, shown);
+      loadMetadata(store, next);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      // The middle of frame 200.
+      expect(next.currentTimeSets).toBe(1);
+      expect(next.currentTime).toBeCloseTo(8.02, 9);
+    });
+
+    it("still fails a PTS that does not parse on the retired element", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      store.getState().recalibrate(key);
+      store.getState().seekToPts("not a pts" as Pts);
+      expect(store.getState().error).toBe("seekFailed");
+      expect(store.getState().isRecalibrating).toBe(true);
+    });
+
+    it("tests the priming drift before the first wait spends the allowance", () => {
+      const store = createPlaybackStore();
+      const video = Object.assign(createFakeVideo({ duration: 20 }), {
+        muted: false,
+        playbackRate: 1,
+      });
+      attachLoaded(store, slow, video);
+      store.getState().seekApproximate(12);
+      store.getState().primeFirstFrame(key, video, () => false);
+      expect(video.playCalls).toBe(1);
+      // The element moved past the tolerance, and the wait ends before the `timeupdate`.
+      video.currentTime = ANCHOR_TOLERANCE_SECONDS + 0.1;
+      video.seeking = false;
+
+      store.getState().syncAnchorWaitExpired(key, video);
+      const state = store.getState();
+      expect(state.reloadGeneration).toBe(0);
+      expect(state.isRecalibrating).toBe(false);
+      expect(state.calibrationStatus).toBe("unavailable");
+      expect(state.canRecalibrate).toBe(false);
+      // The deferred navigation ran on the approximate clock.
+      expect(video.currentTime).toBe(12);
+    });
+
+    it("tests the priming drift before the second wait makes the calibration recoverable", () => {
+      const store = createPlaybackStore();
+      const first = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, first);
+      const next = Object.assign(createFakeVideo({ duration: 20 }), {
+        muted: false,
+        playbackRate: 1,
+      });
+      replaceElement(store, first, next);
+      loadMetadata(store, next);
+      store.getState().primeFirstFrame(key, next, () => false);
+      next.currentTime = ANCHOR_TOLERANCE_SECONDS + 0.1;
+      next.seeking = false;
+
+      store.getState().syncAnchorWaitExpired(key, next);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(false);
+      expect(store.getState().reloadGeneration).toBe(1);
+    });
+
+    it("hands the request over to a new element that attaches with its metadata", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+
+      const next = createFakeVideo({ duration: 20, readyState: 1 });
+      replaceElement(store, video, next);
+      const state = store.getState();
+      expect(state.isReady).toBe(true);
+      expect(state.isRecalibrating).toBe(false);
+      expect(state.hasDeferredNavigation).toBe(true);
+      expect(state.seekTargetSeconds).toBe(12);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTime).toBe(12);
+    });
+
+    it("hands the request of a stall over to a new element that attaches with its metadata", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      store.getState().play();
+      stall(store, video, 10.02);
+      store.getState().seekApproximate(15);
+
+      const next = createFakeVideo({ duration: 20, readyState: 1 });
+      replaceElement(store, video, next);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(next.currentTime).toBe(15);
+    });
+
+    it("recomputes canRecalibrate when the same element attaches again with a source that cannot calibrate", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      store.getState().attach({ ...slow, videoStartPts: null }, shown);
+      expect(store.getState().attachedSourceRevisionKey).toBe(key);
+      expect(store.getState().canRecalibrate).toBe(false);
+      store.getState().recalibrate(key);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(store.getState().isRecalibrating).toBe(false);
+    });
+
+    it("validates the attached source in recalibrate, not only the published flag", () => {
+      // A stale flag: nothing recoverable is attached, and a write outside the store set it.
+      const store = createPlaybackStore();
+      attachLoaded(store);
+      store.setState({ canRecalibrate: true });
+      store.getState().recalibrate(key);
+      expect(store.getState().reloadGeneration).toBe(0);
+    });
+  });
+
+  describe("faults found in the second review", () => {
+    /** Runs the first automatic recalibration of a request to 12 s. Returns the old element. */
+    function firstRecalibration(store: PlaybackStore): FakeVideo {
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().syncAnchorWaitExpired(key, video);
+      expect(store.getState().isRecalibrating).toBe(true);
+      return video;
+    }
+
+    /** Calls `act` once, from a store listener, on the write of runDeferredNavigation. */
+    function onDeferredRunWrite(
+      store: PlaybackStore,
+      status: "ready" | "unavailable",
+      act: () => void,
+    ): void {
+      let done = false;
+      store.subscribe((state, previous) => {
+        if (
+          !done &&
+          state.calibrationStatus === status &&
+          previous.calibrationStatus === status &&
+          previous.hasDeferredNavigation === state.hasDeferredNavigation
+        ) {
+          done = true;
+          act();
+        }
+      });
+    }
+
+    it("takes the baseline when the same new element attaches again with its metadata", () => {
+      const store = createPlaybackStore();
+      const old = firstRecalibration(store);
+      const next = replaceElement(store, old);
+      // The element loaded its metadata at 1.5 s, the start of its timeline, before its ref
+      // callback attached it again.
+      next.readyState = 1;
+      next.currentTime = 1.5;
+      next.seeking = false;
+      store.getState().attach(slow, next);
+      expect(store.getState().isReady).toBe(true);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+
+      store.getState().syncPresentedFrame(key, 1.5, 1, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      // 12 s after the anchor at 1.5 s.
+      expect(next.currentTime).toBe(13.5);
+    });
+
+    it("takes the origin of a new element that attaches with its metadata", () => {
+      const store = createPlaybackStore();
+      const old = firstRecalibration(store);
+      const next = createFakeVideo({
+        duration: 20,
+        readyState: 1,
+        initialCurrentTime: 0.75,
+      });
+      replaceElement(store, old, next);
+      // The wait of the new element runs out too: the request runs on the approximate clock,
+      // 12 s after the start of its timeline.
+      store.getState().syncAnchorWaitExpired(key, next);
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(next.currentTime).toBeCloseTo(12.75, 9);
+    });
+
+    it("drops a deferred request when a listener of its write attaches another element", () => {
+      const noStart: PlaybackSource = {
+        ...slow,
+        path: "/media/no-start.mp4",
+        videoStartPts: null,
+      };
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      const replacement = createFakeVideo({ duration: 20, readyState: 1 });
+      onDeferredRunWrite(store, "unavailable", () => {
+        store.getState().detach(key, video);
+        // A source that cannot calibrate is ready and unavailable at once, so a request that
+        // ran would move it.
+        store.getState().attach(noStart, replacement);
+      });
+      store.getState().syncPresentationUnavailable(key, video);
+      expect(store.getState().attachedSourceRevisionKey).toBe(
+        getSourceRevisionKey(noStart),
+      );
+      expect(replacement.currentTimeSets).toBe(0);
+      expect(video.currentTimeSets).toBe(0);
+    });
+
+    it("keeps a deferred request when a listener of its write sends a command that the store refuses", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      onDeferredRunWrite(store, "ready", () => store.getState().seekToFrameIndex(-1));
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(video.currentTimeSets).toBe(1);
+      expect(video.currentTime).toBe(12);
+    });
+
+    it("keeps a deferred request when a command that the store refuses comes before the anchor", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+      store.getState().seekToFrameIndex(-1);
+      store.getState().seekApproximate(Number.NaN);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(video.currentTime).toBe(12);
+    });
+
+    it.each([
+      ["no valid start PTS", { videoStartPts: null }],
+      ["a time base whose numerator is 0", { videoTimeBase: { n: 0, d: 12800 } }],
+    ])(
+      "does not reload when the wait runs out for a source with %s",
+      (_name, change: Partial<PlaybackSource>) => {
+        const store = createPlaybackStore();
+        const video = attachLoaded(store);
+        store.getState().seekApproximate(12);
+        // The same element attaches again with the same key and new metadata.
+        store.getState().attach({ ...slow, ...change }, video);
+        expect(store.getState().calibrationStatus).toBe("calibrating");
+
+        store.getState().syncAnchorWaitExpired(key, video);
+        const state = store.getState();
+        expect(state.reloadGeneration).toBe(0);
+        expect(state.isRecalibrating).toBe(false);
+        expect(state.calibrationStatus).toBe("unavailable");
+        expect(state.canRecalibrate).toBe(false);
+        expect(video.currentTime).toBe(12);
+      },
+    );
+
+    it("does not let play start an element that a listener of its write retired", () => {
+      const store = createPlaybackStore();
+      const shown = reachRecoverable(store);
+      fireSeeked(store, key, shown);
+      let started = false;
+      store.subscribe((state) => {
+        if (!started && state.isPlaying) {
+          started = true;
+          store.getState().recalibrate(key);
+        }
+      });
+      store.getState().play();
+      expect(started).toBe(true);
+      expect(shown.playCalls).toBe(0);
+      expect(store.getState().isPlaying).toBe(false);
+      expect(store.getState().isRecalibrating).toBe(true);
+    });
+  });
+
+  describe("faults found in the third review", () => {
+    /**
+     * The partial states that the store hands to Zustand while `act` runs. Zustand merges each
+     * partial with `Object.assign({}, state, partial)`, so the third argument is the partial.
+     */
+    function capturePartials(act: () => void): Record<string, unknown>[] {
+      const partials: Record<string, unknown>[] = [];
+      const original = Object.assign;
+      const spy = vi
+        .spyOn(Object, "assign")
+        .mockImplementation((target: object, ...sources: object[]) => {
+          const state = sources[0];
+          const partial = sources[1];
+          if (
+            sources.length === 2 &&
+            typeof state === "object" &&
+            state !== null &&
+            "reloadGeneration" in state &&
+            typeof partial === "object" &&
+            partial !== null
+          ) {
+            partials.push({ ...partial });
+          }
+          return original(target, ...sources) as object;
+        });
+      try {
+        act();
+      } finally {
+        spy.mockRestore();
+      }
+      return partials;
+    }
+
+    it("writes each of the two flags only when it changes", () => {
+      const store = createPlaybackStore();
+      const video = attachLoaded(store);
+      store.getState().seekApproximate(12);
+
+      // isRecalibrating changes, and canRecalibrate stays false.
+      const atHandoff = capturePartials(() =>
+        store.getState().syncAnchorWaitExpired(key, video),
+      );
+      const raised = atHandoff.filter((partial) => "isRecalibrating" in partial);
+      expect(raised).toHaveLength(1);
+      expect(raised[0]?.isRecalibrating).toBe(true);
+      expect(atHandoff.some((partial) => "canRecalibrate" in partial)).toBe(false);
+
+      // canRecalibrate changes at the second wait, and isRecalibrating stays false.
+      const next = replaceElement(store, video);
+      loadMetadata(store, next);
+      const atLoss = capturePartials(() =>
+        store.getState().syncAnchorWaitExpired(key, next),
+      );
+      const recoverable = atLoss.filter((partial) => "canRecalibrate" in partial);
+      expect(recoverable).toHaveLength(1);
+      expect(recoverable[0]?.canRecalibrate).toBe(true);
+      expect(atLoss.some((partial) => "isRecalibrating" in partial)).toBe(false);
+    });
+
+    it("leaves the request of a listener alone when it replaces the element on the ready report", () => {
+      const noStart: PlaybackSource = {
+        ...slow,
+        path: "/media/no-start.mp4",
+        videoStartPts: null,
+      };
+      const noStartKey = getSourceRevisionKey(noStart);
+      const store = createPlaybackStore();
+      const stalled = createFakeVideo({ duration: 20 });
+      store.getState().attach(noStart, stalled);
+      loadMetadata(store, stalled, noStart);
+      store.getState().play();
+      stalled.currentTime = 10.02;
+      stalled.seeking = false;
+      expect(store.getState().syncDecodeStall(noStartKey, stalled)).toBe(true);
+      // The source cannot calibrate, so the request of the reload runs at once at the ready
+      // report of the new element.
+      store.getState().seekApproximate(12);
+      store.getState().detach(noStartKey, stalled);
+      const next = createFakeVideo({ duration: 20 });
+      store.getState().attach(noStart, next);
+
+      const other = createFakeVideo({ duration: 20 });
+      let done = false;
+      store.subscribe((state, previous) => {
+        if (!done && state.isReady && !previous.isReady) {
+          done = true;
+          store.getState().detach(noStartKey, next);
+          store.getState().attach(slow, other);
+          loadMetadata(store, other);
+          store.getState().seekApproximate(5);
+        }
+      });
+      loadMetadata(store, next, noStart);
+
+      expect(done).toBe(true);
+      expect(next.currentTimeSets).toBe(0);
+      expect(store.getState().attachedSourceRevisionKey).toBe(key);
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      expect(store.getState().seekTargetSeconds).toBe(5);
+      store.getState().syncPresentedFrame(key, 0, 1, other);
+      expect(other.currentTime).toBe(5);
+    });
+  });
+});

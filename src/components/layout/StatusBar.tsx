@@ -3,6 +3,10 @@ import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { Loader2, Settings, TriangleAlert } from "lucide-react";
 import { SHORT_STATE_INDICATOR_DELAY_MS } from "@/components/common/delayedIndicator";
+import {
+  focusTargetAfterRemoval,
+  toPromptFocusTarget,
+} from "@/components/common/focusTarget";
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import { useDelayedVisibility } from "@/components/common/useDelayedIndicator";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
@@ -11,6 +15,8 @@ import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useFfmpegStore } from "@/features/ffmpeg";
 import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
+import { recalibratePreview } from "@/features/sequence/playback";
+import { findPreviewRegion } from "@/components/preview/previewRegion";
 import { usePlaybackStore, type PlaybackStoreState } from "@/features/playback";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { getResolvedLanguage } from "@/i18n";
@@ -24,7 +30,9 @@ import { ExportStatusIndicator } from "./ExportStatusIndicator";
 import {
   presentPlaybackHint,
   selectCalibrationStatus,
+  selectCanRecalibrate,
   selectHasReadySource,
+  selectIsRecalibrating,
 } from "./playbackHintPresenter";
 import { presentSourceInfo } from "./sourceInfoPresenter";
 import { statusBarItem } from "./statusBarItem";
@@ -84,9 +92,19 @@ export function StatusBar() {
     selectHasReadySource(state, hasMedia),
   );
   const calibrationStatus = usePlaybackStore(selectCalibrationStatus);
+  const canRecalibrate = usePlaybackStore(selectCanRecalibrate);
+  const isRecalibrating = usePlaybackStore((state: PlaybackStoreState) =>
+    selectIsRecalibrating(state, hasMedia),
+  );
   const presentedHint = useMemo(
-    () => presentPlaybackHint({ hasReadySource, calibrationStatus }),
-    [hasReadySource, calibrationStatus],
+    () =>
+      presentPlaybackHint({
+        hasReadySource,
+        calibrationStatus,
+        canRecalibrate,
+        isRecalibrating,
+      }),
+    [hasReadySource, calibrationStatus, canRecalibrate, isRecalibrating],
   );
   // The calibration usually ends at the first presented frame, a few milliseconds after the
   // metadata loads. The neutral Preparing chip therefore shows only after it has lasted
@@ -98,6 +116,16 @@ export function StatusBar() {
     SHORT_STATE_INDICATOR_DELAY_MS,
   );
   const playbackHint = isPreparing && !showPreparing ? null : presentedHint;
+
+  // The chip starts a recalibration and goes (ADR 063). When it held the focus, the preview
+  // section takes it: the section stays for the whole retry, while the items of this bar change
+  // with each state (focusTargetAfterRemoval, previewRegion.ts).
+  const recalibrateFromChip = (heldFocus: boolean) => {
+    recalibratePreview();
+    focusTargetAfterRemoval(heldFocus, [
+      toPromptFocusTarget(findPreviewRegion()),
+    ])?.focus();
+  };
 
   const probe = media ? media.probe : null;
   const sourceInfo = useMemo(
@@ -180,27 +208,52 @@ export function StatusBar() {
         {playbackHint && (
           <Tooltip>
             <TooltipTrigger asChild>
-              {/* Focusable with no role, for the same reason as the source item. */}
-              <span
-                tabIndex={0}
-                className={statusBarItem({ tone: playbackHint.tone })}
-                data-tone={playbackHint.tone}
-              >
-                {playbackHint.tone === "warning" ? (
+              {playbackHint.recalibrates ? (
+                // While a new load of the preview can help, the chip is a button that starts it
+                // (ADR 063). A click or Enter acts. Space stays the play key of the window,
+                // which takes it in the capture phase (ADR 026).
+                <button
+                  type="button"
+                  className={statusBarItem({
+                    tone: playbackHint.tone,
+                    interactive: true,
+                  })}
+                  data-tone={playbackHint.tone}
+                  onClick={(event) => {
+                    recalibrateFromChip(document.activeElement === event.currentTarget);
+                  }}
+                >
                   <TriangleAlert
                     aria-hidden="true"
                     className="size-3.5 shrink-0 text-warning-text"
                   />
-                ) : (
-                  <Loader2
-                    aria-hidden="true"
-                    className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
-                  />
-                )}
-                <span className="min-w-0 truncate @max-3xl:sr-only">
-                  {t(playbackHint.lineKey)}
+                  <span className="min-w-0 truncate @max-3xl:sr-only">
+                    {t(playbackHint.lineKey)}
+                  </span>
+                </button>
+              ) : (
+                /* Focusable with no role, for the same reason as the source item. */
+                <span
+                  tabIndex={0}
+                  className={statusBarItem({ tone: playbackHint.tone })}
+                  data-tone={playbackHint.tone}
+                >
+                  {playbackHint.tone === "warning" ? (
+                    <TriangleAlert
+                      aria-hidden="true"
+                      className="size-3.5 shrink-0 text-warning-text"
+                    />
+                  ) : (
+                    <Loader2
+                      aria-hidden="true"
+                      className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+                    />
+                  )}
+                  <span className="min-w-0 truncate @max-3xl:sr-only">
+                    {t(playbackHint.lineKey)}
+                  </span>
                 </span>
-              </span>
+              )}
             </TooltipTrigger>
             <TooltipContent className="max-w-md flex-col items-start gap-1 text-xs">
               {playbackHint.detail.map((key) => (

@@ -10,8 +10,14 @@
  * It starts at the first deferred request and stops when the request runs or is dropped. With
  * nothing deferred, the calibration stays open for as long as it takes: a first frame that comes
  * late still anchors it, and so do the first frames of a playback. When the wait runs out, the
- * pane reports frame callbacks as unavailable. The store then runs the deferred navigation on
- * the approximate path, and precise editing stays off for that attachment.
+ * pane reports it to the store (`syncAnchorWaitExpired`). The give-up is not final (ADR 063):
+ *
+ * - The first time for a source, the store recalibrates. It replaces the element, and the
+ *   deferred navigation waits for the new element. The store reports the deferred navigation
+ *   again when the new element is ready, and the wait then arms again for that element.
+ * - The next time, the store runs the deferred navigation on the approximate path. Precise
+ *   editing is off, but the element never took an anchor, so the user can start a recalibration
+ *   from the status bar.
  *
  * The wait counts only while the document is visible, because a hidden or minimized window
  * presents no frames. Each return to visible starts the whole wait again.
@@ -27,9 +33,10 @@ import type {
 /**
  * How long a deferred navigation waits for the first presented frame of a visible element.
  *
- * The two ways out cost different things. The give-up turns off precise editing for the rest of
- * the attachment, and a frame that comes later cannot turn it on again. A longer wait costs only
- * time: the playhead already shows the target, the status bar says "Preparing the preview…",
+ * The two ways out cost different things. The give-up loads a new element, and the second
+ * give-up for a source turns off precise editing until the user asks for a recalibration (ADR
+ * 063). A frame that comes later on the same element cannot turn it on again. A longer wait costs
+ * only time: the playhead already shows the target, the status bar says "Preparing the preview…",
  * and play ends the wait at once, because play drops the request and its first frames can take
  * the anchor. The value therefore leans long. A first frame normally follows the metadata within
  * a few hundred milliseconds, and within a few seconds from a slow drive. Eight seconds covers
@@ -44,7 +51,9 @@ export const DEFERRED_NAVIGATION_ANCHOR_WAIT_MS = 8000;
  * - `idle`: no navigation is deferred.
  * - `waiting`: a navigation is deferred, the document is visible, and the timer runs.
  * - `paused`: a navigation is deferred and the document is hidden. No timer runs.
- * - `done`: the wait ran out. Nothing more happens until the wait is disarmed.
+ * - `done`: the wait ran out. Nothing more happens until the wait is disarmed. The store drops
+ *   the deferred navigation at the report, so the wait is disarmed, and a new deferred navigation
+ *   arms a new wait.
  */
 export type AnchorWaitPhase = "idle" | "waiting" | "paused" | "done";
 
@@ -217,9 +226,11 @@ export function followDeferredNavigation<E>(
 }
 
 /**
- * Reports the end of the wait to the store: frame callbacks are not available for the element.
- * It reports nothing when no navigation waits for the anchor any more, or when the source is not
- * the active one. The store also refuses the report for an element that it does not hold.
+ * Reports the end of the wait to the store (`syncAnchorWaitExpired`): the element presented no
+ * frame for the whole wait. The store recalibrates once for each source, and otherwise runs the
+ * deferred navigation on the approximate path (ADR 063). It reports nothing when no navigation
+ * waits for the anchor any more, or when the source is not the active one. The store also
+ * refuses the report for an element that it does not hold.
  */
 export function reportAnchorWaitExpired(
   store: Pick<StoreApi<PlaybackStoreState>, "getState">,
@@ -231,5 +242,5 @@ export function reportAnchorWaitExpired(
   if (key === null || !shouldWaitForAnchor(state) || !isSourceActive(key)) {
     return;
   }
-  state.syncPresentationUnavailable(key, element);
+  state.syncAnchorWaitExpired(key, element);
 }

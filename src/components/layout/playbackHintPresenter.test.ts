@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 import type { Pts } from "@/types/project";
 import { createPlaybackStore } from "@/features/playback";
 import {
+  presentApproximatePosition,
   presentPlaybackHint,
   selectCalibrationStatus,
+  selectCanRecalibrate,
   selectHasReadySource,
+  selectIsRecalibrating,
   type PlaybackHintState,
 } from "./playbackHintPresenter";
 
@@ -51,6 +55,7 @@ describe("playbackHintPresenter", () => {
           "statusBar.approximatePositionMarks",
         ],
         tone: "warning",
+        recalibrates: false,
       });
     });
 
@@ -64,6 +69,7 @@ describe("playbackHintPresenter", () => {
           "statusBar.preparingPositionMarks",
         ],
         tone: "neutral",
+        recalibrates: false,
       });
     });
 
@@ -81,6 +87,92 @@ describe("playbackHintPresenter", () => {
       expect(
         presentPlaybackHint({ hasReadySource: true, calibrationStatus: "ready" }),
       ).toBeNull();
+    });
+
+    it("returns the warning button with the retry text while a recalibration can help (ADR 063)", () => {
+      expect(
+        presentPlaybackHint(createHintState({ canRecalibrate: true })),
+      ).toStrictEqual({
+        lineKey: "statusBar.approximatePositionRetry",
+        detail: [
+          "statusBar.approximatePositionDetail",
+          "statusBar.approximatePositionRetryMarks",
+        ],
+        tone: "warning",
+        recalibrates: true,
+      });
+    });
+
+    it("ignores canRecalibrate outside the unavailable state", () => {
+      expect(
+        presentPlaybackHint(
+          createHintState({ calibrationStatus: "calibrating", canRecalibrate: true }),
+        )?.recalibrates,
+      ).toBe(false);
+      expect(
+        presentPlaybackHint(
+          createHintState({ calibrationStatus: "ready", canRecalibrate: true }),
+        ),
+      ).toBeNull();
+    });
+
+    it("says Preparing while a recalibration replaces the element, also before it is ready", () => {
+      const preparing = {
+        lineKey: "statusBar.preparingPosition",
+        detail: [
+          "statusBar.preparingPositionDetail",
+          "statusBar.preparingPositionMarks",
+        ],
+        tone: "neutral",
+        recalibrates: false,
+      };
+      // The old element still reports its unavailable calibration.
+      expect(
+        presentPlaybackHint(createHintState({ isRecalibrating: true })),
+      ).toStrictEqual(preparing);
+      // The new element has no metadata yet.
+      expect(
+        presentPlaybackHint(
+          createHintState({ hasReadySource: false, isRecalibrating: true }),
+        ),
+      ).toStrictEqual(preparing);
+    });
+  });
+
+  describe("presentApproximatePosition", () => {
+    it("gives the ADR 003 text and no button when a recalibration cannot help", () => {
+      expect(presentApproximatePosition(false)).toStrictEqual({
+        lineKey: "statusBar.approximatePosition",
+        detail: [
+          "statusBar.approximatePositionDetail",
+          "statusBar.approximatePositionMarks",
+        ],
+        recalibrates: false,
+      });
+    });
+
+    it("gives the retry text and a button when a recalibration can help", () => {
+      expect(presentApproximatePosition(true)).toStrictEqual({
+        lineKey: "statusBar.approximatePositionRetry",
+        detail: [
+          "statusBar.approximatePositionDetail",
+          "statusBar.approximatePositionRetryMarks",
+        ],
+        recalibrates: true,
+      });
+    });
+  });
+
+  describe("selectCanRecalibrate and selectIsRecalibrating", () => {
+    it("read the two flags of the store", () => {
+      const store = createPlaybackStore({
+        canRecalibrate: true,
+        isRecalibrating: true,
+      });
+      expect(selectCanRecalibrate(store.getState())).toBe(true);
+      expect(selectIsRecalibrating(store.getState(), true)).toBe(true);
+      expect(selectIsRecalibrating(store.getState(), false)).toBe(false);
+      expect(selectCanRecalibrate(createPlaybackStore().getState())).toBe(false);
     });
   });
 
@@ -123,6 +215,8 @@ describe("playbackHintPresenter", () => {
       "statusBar.approximatePosition",
       "statusBar.approximatePositionDetail",
       "statusBar.approximatePositionMarks",
+      "statusBar.approximatePositionRetry",
+      "statusBar.approximatePositionRetryMarks",
       "statusBar.preparingPosition",
       "statusBar.preparingPositionDetail",
       "statusBar.preparingPositionMarks",
@@ -136,5 +230,28 @@ describe("playbackHintPresenter", () => {
         expect((resolved as string).trim().length).toBeGreaterThan(0);
       },
     );
+
+    it.each(emittedKeys)(
+      "resolves key '%s' to a non-empty string in the Chinese catalog",
+      (key) => {
+        const resolved = resolveCatalogKey(zhCN, key);
+        expect(typeof resolved).toBe("string");
+        expect((resolved as string).trim().length).toBeGreaterThan(0);
+      },
+    );
+
+    // ADR 063 gives the text of the recoverable state.
+    it("holds the text of the recoverable state in both languages", () => {
+      expect(en.statusBar.approximatePositionRetry).toBe(
+        "Approximate position · click to try again",
+      );
+      expect(zhCN.statusBar.approximatePositionRetry).toBe("近似位置 · 点击重试");
+      expect(en.statusBar.approximatePositionRetryMarks).toBe(
+        "Mark In, Mark Out, and Split are unavailable until the preview reads the exact frame timestamps. Click to load the preview of this video again.",
+      );
+      expect(zhCN.statusBar.approximatePositionRetryMarks).toBe(
+        "在预览取得精确的帧时间戳之前，无法使用标记入点、标记出点和分割。点击可重新加载此视频的预览。",
+      );
+    });
   });
 });

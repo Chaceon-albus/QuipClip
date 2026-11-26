@@ -163,6 +163,52 @@ describe("transportDisabledReason", () => {
       }
     });
 
+    it("names the step that loads the preview again while a recalibration can help (ADR 063)", () => {
+      for (const control of CONTROLS) {
+        for (const playback of [
+          playbackAt(null, { calibrationStatus: "unavailable", canRecalibrate: true }),
+          playbackAt(null, {
+            calibrationStatus: "unavailable",
+            canRecalibrate: true,
+            seekTargetSeconds: 1,
+          }),
+        ]) {
+          expect(
+            presentEditDisabledReason(
+              control,
+              playback,
+              context({ currentTarget: segmentTarget }),
+            ),
+          ).toBe("transport.disabledReason.preciseMarkingRetry");
+        }
+        // Without the flag the reason keeps the text of ADR 003.
+        expect(
+          presentEditDisabledReason(
+            control,
+            playbackAt(null, {
+              calibrationStatus: "unavailable",
+              canRecalibrate: false,
+            }),
+            context({ currentTarget: segmentTarget }),
+          ),
+        ).toBe("transport.disabledReason.preciseMarkingUnavailable");
+      }
+    });
+
+    it("gives no reason while a recalibration replaces the element (ADR 063)", () => {
+      for (const control of CONTROLS) {
+        for (const calibrationStatus of ["unavailable", "calibrating"] as const) {
+          expect(
+            presentEditDisabledReason(
+              control,
+              playbackAt(null, { calibrationStatus, isRecalibrating: true }),
+              context({ currentTarget: segmentTarget }),
+            ),
+          ).toBeNull();
+        }
+      }
+    });
+
     it("gives no reason while the calibration is still running", () => {
       for (const control of CONTROLS) {
         expect(
@@ -925,6 +971,7 @@ describe("transportDisabledReason", () => {
   describe("the reason keys", () => {
     const keys: readonly TransportDisabledReasonKey[] = [
       "transport.disabledReason.preciseMarkingUnavailable",
+      "transport.disabledReason.preciseMarkingRetry",
       "transport.disabledReason.markInFirst",
       "transport.disabledReason.selectSegment",
       "transport.disabledReason.selectOneSegment",

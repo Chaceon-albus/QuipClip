@@ -239,12 +239,12 @@ describe("anchorWait", () => {
     };
     const key = getSourceRevisionKey(source);
 
-    function setup({ visible = true, active = true } = {}) {
-      const clock = createFakeClock();
-      const store = createPlaybackStore();
+    type CountingElement = PlaybackMediaElement & { readonly sets: number };
+
+    function createElement(): CountingElement {
       let sets = 0;
       let time = 0;
-      const element: PlaybackMediaElement & { readonly sets: number } = {
+      return {
         readyState: 1,
         seeking: false,
         get currentTime() {
@@ -260,6 +260,14 @@ describe("anchorWait", () => {
         play: () => Promise.resolve(),
         pause: () => {},
       };
+    }
+
+    function setup({ visible = true, active = true } = {}) {
+      const clock = createFakeClock();
+      const store = createPlaybackStore();
+      const element = createElement();
+      // The element that the pane holds now, as `videoRef.current` is.
+      let current: CountingElement | null = element;
       const controller = createAnchorWaitController<PlaybackMediaElement>(
         clock.timers,
         (from) => {
@@ -271,10 +279,24 @@ describe("anchorWait", () => {
       const stopFollowing = followDeferredNavigation(
         store,
         controller,
-        () => element,
+        () => current,
         () => visible,
       );
-      return { clock, store, element, controller, stopFollowing };
+      /**
+       * Replaces the element after a raise of the reload generation, as the pane does: the old
+       * element leaves the tree, the new one attaches, and its metadata loads.
+       */
+      const replace = (old: CountingElement): CountingElement => {
+        const next = createElement();
+        current = null;
+        controller.disarm();
+        store.getState().detach(key, old);
+        current = next;
+        store.getState().attach(source, next);
+        store.getState().syncReady(key, next);
+        return next;
+      };
+      return { clock, store, element, controller, stopFollowing, replace };
     }
 
     it("never gives up while nothing is deferred, so a late first frame still anchors", () => {
@@ -287,7 +309,7 @@ describe("anchorWait", () => {
       expect(store.getState().calibrationStatus).toBe("ready");
     });
 
-    it("arms at the first deferral, and the give-up runs it on the approximate path", () => {
+    it("arms at the first deferral, and the first give-up loads a new element (ADR 063)", () => {
       const { clock, store, element } = setup();
       clock.advance(WAIT * 10);
       store.getState().seekNominal(1);
@@ -297,11 +319,50 @@ describe("anchorWait", () => {
       clock.advance(WAIT - 1);
       expect(store.getState().calibrationStatus).toBe("calibrating");
       clock.advance(1);
-      expect(store.getState().calibrationStatus).toBe("unavailable");
+      // The give-up is not final: the store recalibrates, and the deferral goes with it.
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+      expect(store.getState().isRecalibrating).toBe(true);
+      expect(store.getState().reloadGeneration).toBe(1);
       expect(store.getState().hasDeferredNavigation).toBe(false);
-      expect(element.sets).toBe(1);
-      expect(element.currentTime).toBeCloseTo(0.04, 9);
+      expect(element.sets).toBe(0);
       expect(clock.pendingCount).toBe(0);
+    });
+
+    it("arms again for the new element, and the second give-up runs the deferral on the approximate path", () => {
+      const { clock, store, element, replace } = setup();
+      store.getState().seekNominal(1);
+      clock.advance(WAIT);
+      expect(store.getState().reloadGeneration).toBe(1);
+
+      const next = replace(element);
+      // The new element reports the deferral again, and a whole new wait starts for it.
+      expect(store.getState().hasDeferredNavigation).toBe(true);
+      expect(clock.pendingCount).toBe(1);
+      clock.advance(WAIT - 1);
+      expect(store.getState().calibrationStatus).toBe("calibrating");
+      clock.advance(1);
+
+      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().canRecalibrate).toBe(true);
+      expect(store.getState().reloadGeneration).toBe(1);
+      expect(store.getState().hasDeferredNavigation).toBe(false);
+      expect(next.sets).toBe(1);
+      expect(next.currentTime).toBeCloseTo(0.04, 9);
+      expect(element.sets).toBe(0);
+      expect(clock.pendingCount).toBe(0);
+    });
+
+    it("gives the new element a whole wait when its first frame anchors in time", () => {
+      const { clock, store, element, replace } = setup();
+      store.getState().seekNominal(1);
+      clock.advance(WAIT);
+      const next = replace(element);
+      clock.advance(WAIT - 1);
+
+      store.getState().syncPresentedFrame(key, 0, 1, next);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      expect(clock.pendingCount).toBe(0);
+      expect(next.currentTime).toBeCloseTo(0.06, 9);
     });
 
     it("disarms when play drops the deferral, and the playback can still take the anchor", () => {
@@ -405,9 +466,9 @@ describe("anchorWait", () => {
       // A step during the playback pauses it and defers again
       store.getState().seekNominal(1);
       clock.advance(WAIT - 1);
-      expect(store.getState().calibrationStatus).toBe("calibrating");
+      expect(store.getState().reloadGeneration).toBe(0);
       clock.advance(1);
-      expect(store.getState().calibrationStatus).toBe("unavailable");
+      expect(store.getState().reloadGeneration).toBe(1);
     });
 
     it("holds the wait while the document is hidden", () => {
@@ -415,6 +476,7 @@ describe("anchorWait", () => {
       store.getState().seekNominal(1);
       clock.advance(WAIT * 10);
       expect(store.getState().calibrationStatus).toBe("calibrating");
+      expect(store.getState().reloadGeneration).toBe(0);
     });
 
     it("reports nothing for a source that is no longer the active one", () => {
@@ -422,6 +484,7 @@ describe("anchorWait", () => {
       store.getState().seekNominal(1);
       clock.advance(WAIT);
       expect(store.getState().calibrationStatus).toBe("calibrating");
+      expect(store.getState().reloadGeneration).toBe(0);
     });
 
     it("stops following when the pane unmounts", () => {

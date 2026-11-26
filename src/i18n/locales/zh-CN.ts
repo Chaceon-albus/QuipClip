@@ -216,6 +216,8 @@ export const zhCN: TranslationCatalog = {
     },
     disabledReason: {
       preciseMarkingUnavailable: "此视频无法精确标记。",
+      preciseMarkingRetry:
+        "在预览取得精确的帧时间戳之前，无法精确标记。点击状态栏中的“近似位置”即可重试。",
       markInFirst: "请先标记入点。",
       selectSegment: "请先选择一个片段。",
       selectOneSegment: "请只选择一个片段。",
@@ -338,6 +340,9 @@ export const zhCN: TranslationCatalog = {
     approximatePositionDetail: "播放头跟随系统播放器的时钟，而不是精确的帧时间戳。",
     approximatePositionMarks:
       "此视频无法使用标记入点、标记出点和分割。如果将视频转换为 MP4 并打开转换后的文件，这些操作可能会变为可用。",
+    approximatePositionRetry: "近似位置 · 点击重试",
+    approximatePositionRetryMarks:
+      "在预览取得精确的帧时间戳之前，无法使用标记入点、标记出点和分割。点击可重新加载此视频的预览。",
     preparingPosition: "正在准备预览…",
     preparingPositionDetail: "预览正在等待视频的第一帧，以获取精确的帧时间戳。",
     preparingPositionMarks:

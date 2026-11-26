@@ -44,6 +44,7 @@ export type EditReasonControl = "markIn" | "markOut" | "split";
 
 export type TransportDisabledReasonKey =
   | "transport.disabledReason.preciseMarkingUnavailable"
+  | "transport.disabledReason.preciseMarkingRetry"
   | "transport.disabledReason.markInFirst"
   | "transport.disabledReason.selectSegment"
   | "transport.disabledReason.selectOneSegment"
@@ -96,6 +97,16 @@ export type TransportReasonPlayback = Pick<
    * it. Absent means none.
    */
   readonly decodeStall?: PlaybackState["decodeStall"];
+  /**
+   * True while a new load of the preview can help an unavailable calibration (ADR 063). The
+   * reason of the three edit controls then names that step. Absent means false.
+   */
+  readonly canRecalibrate?: PlaybackState["canRecalibrate"];
+  /**
+   * True while a recalibration replaces the preview element (ADR 063). The edit controls then
+   * show no reason, as while the calibration runs. Absent means false.
+   */
+  readonly isRecalibrating?: PlaybackState["isRecalibrating"];
 };
 
 /** The facts that change only with an edit or with the source, not with each frame. */
@@ -204,6 +215,8 @@ function isEnabled(
  * - The control is enabled.
  * - No source is active. Every control is disabled then, and the empty preview says what to do.
  * - The calibration is still running. It ends at the first presented frame.
+ * - A recalibration replaces the preview element (ADR 063). It ends when the new element is
+ *   ready.
  * - The current segment has a stored PTS that does not parse, or the pending In does not
  *   parse. The user cannot correct either.
  */
@@ -216,10 +229,18 @@ export function presentEditDisabledReason(
     return null;
   }
 
-  // A source that cannot calibrate stays on the approximate clock for the whole session, and
-  // ADR 003 denies it every edit point. That is the reason, whatever the playhead position.
+  // A source that cannot calibrate stays on the approximate clock, and ADR 003 denies it every
+  // edit point. That is the reason, whatever the playhead position. When the element never read
+  // the first frame, a new load of the preview can help, and the reason names that step (ADR
+  // 063). Otherwise the state holds for the session. While a recalibration replaces the element,
+  // the preview prepares, and that state ends by itself, as a calibration that runs does.
+  if (playback.isRecalibrating === true) {
+    return null;
+  }
   if (playback.calibrationStatus === "unavailable") {
-    return "transport.disabledReason.preciseMarkingUnavailable";
+    return playback.canRecalibrate === true
+      ? "transport.disabledReason.preciseMarkingRetry"
+      : "transport.disabledReason.preciseMarkingUnavailable";
   }
   if (playback.calibrationStatus !== "ready") {
     return null;

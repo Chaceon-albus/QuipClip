@@ -151,6 +151,8 @@ function stateOf(real: PlaybackState): PlaybackState {
     error: real.error,
     decodeStall: real.decodeStall,
     reloadGeneration: real.reloadGeneration,
+    canRecalibrate: real.canRecalibrate,
+    isRecalibrating: real.isRecalibrating,
   };
 }
 
@@ -395,9 +397,10 @@ export function createSequencePlayback(
         totalSeconds !== null && Number.isFinite(totalSeconds) ? totalSeconds : null,
       playbackStop: stopMemo.mapped,
       // A trim, a scrub or a stop belongs to the sequence: an attach of another clip is not a new
-      // source for them (ADR 030 note of 2026-10-28).
+      // source for them (ADR 030 note of 2026-10-28). Nor is the new element of a recalibration
+      // of the clip on screen (ADR 063).
       attachedSourceRevisionKey:
-        real.isAttached || pending !== null || settling
+        real.isAttached || pending !== null || settling || real.isRecalibrating
           ? state.sourceRevisionKey
           : null,
       decodeStall: stallMemo.mapped,
@@ -420,6 +423,19 @@ export function createSequencePlayback(
         real.playSegment(navigation.inPts, navigation.outPts);
         return;
     }
+  };
+
+  /**
+   * The one clip of the timeline while a recalibration replaces its element and the new element
+   * has no metadata yet, or null (ADR 063). The store refuses a seek in that time, and a failed
+   * seek would also drop the request of the reload. A seek of the user then waits as a navigation
+   * of that clip until the new element is ready, as a seek on a clip of a sequence does, and it
+   * replaces the request of the reload there as the latest request.
+   */
+  const onlyClipWhileReplacementLoads = (state: TimelineState): string | null => {
+    const real = playback.getState();
+    const only = state.clips.length === 1 ? state.clips[0] : undefined;
+    return only !== undefined && real.isRecalibrating && !real.isReady ? only.id : null;
   };
 
   /** Runs a navigation on the playback store now, or after the attach of its clip. */
@@ -493,13 +509,22 @@ export function createSequencePlayback(
   // Only the gestures of the timeline read it (`isSwitching`), so a scrub or a trim that crosses
   // a junction goes on and waits for the frame of the new clip (ADR 030 note of 2026-10-28). The
   // transport still sees a source that is not ready, so Play and a frame step stay off.
+  //
+  // A recalibration of that clip (ADR 063) replaces its element, and the detach of the old
+  // element reports "unavailable" before the new element calibrates. The switch stays in progress
+  // while the store reports `isRecalibrating`, so the gesture keeps its exact release seek.
   let settling = false;
   const isSwitching = (): boolean => {
     const real = playback.getState();
-    if (real.error !== null) {
+    // A failed request ends a switch, except while a recalibration replaces the element: the
+    // failure drops only the request, and the new element still loads (ADR 063).
+    if (real.error !== null && !real.isRecalibrating) {
       return false;
     }
-    return pending !== null || (settling && real.calibrationStatus === "calibrating");
+    return (
+      pending !== null ||
+      (settling && (real.calibrationStatus === "calibrating" || real.isRecalibrating))
+    );
   };
 
   /**
@@ -550,6 +575,11 @@ export function createSequencePlayback(
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state) || state.virtual === null) {
+        const clipId = onlyClipWhileReplacementLoads(state);
+        if (clipId !== null) {
+          navigate({ kind: "pts", clipId, pts, options });
+          return;
+        }
         playback.getState().seekToPts(pts, options);
         return;
       }
@@ -566,6 +596,11 @@ export function createSequencePlayback(
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state)) {
+        const clipId = onlyClipWhileReplacementLoads(state);
+        if (clipId !== null) {
+          navigate({ kind: "seconds", clipId, seconds, options });
+          return;
+        }
         playback.getState().seekApproximate(seconds, options);
         return;
       }
@@ -588,6 +623,11 @@ export function createSequencePlayback(
 
     seekNominal: asNavigation(
       (deltaFrames: number, options?: FrameStepOptions): FrameStepOutcome => {
+        // The store refuses a step while its element is stalled or being replaced, so the
+        // navigation of the sequence stays as it is (refusesTransportForReload, ADR 063).
+        if (playback.getState().refusesTransportForReload()) {
+          return "none";
+        }
         userNavigates();
         const state = timeline.getState();
         const mapping = mappingOf(state);
@@ -671,6 +711,11 @@ export function createSequencePlayback(
         userNavigates();
         const state = timeline.getState();
         if (!isSequence(state) || state.virtual === null) {
+          const clipId = onlyClipWhileReplacementLoads(state);
+          if (clipId !== null) {
+            navigate({ kind: "frame", clipId, frameIndex, options });
+            return;
+          }
           playback.getState().seekToFrameIndex(frameIndex, options);
           return;
         }
@@ -705,6 +750,12 @@ export function createSequencePlayback(
     ),
 
     playSegment: asNavigation((inPts: Pts, outPts: Pts) => {
+      // The store refuses Play Segment while its element is stalled or being replaced. The seek
+      // to the In of a segment that crosses a junction would otherwise replace the request of
+      // the reload.
+      if (playback.getState().refusesTransportForReload()) {
+        return;
+      }
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state) || state.virtual === null) {
@@ -751,11 +802,41 @@ export function createSequencePlayback(
         playback.getState().reloadStalledPreview(key);
       }
     },
+    // A recalibration is a navigation of the user (ADR 063): it ends a segment playback that
+    // crosses a junction and drops a navigation that waits for an attach, so the clip on screen
+    // stays. It is not a cold switch, and it keeps the mapped clip. The key passes as for
+    // `reloadStalledPreview`. The store reads the position from its own state, in seconds of the
+    // attached source, so no sequence time enters the request.
+    recalibrate: asNavigation((sourceRevisionKey: string) => {
+      // A recalibration that the store refuses changes nothing here either, so a navigation
+      // that waits for an attach stays.
+      if (!playback.getState().canRecalibrate) {
+        return;
+      }
+      userNavigates();
+      const key = isSequence(timeline.getState())
+        ? playback.getState().attachedSourceRevisionKey
+        : sourceRevisionKey;
+      if (key !== null) {
+        playback.getState().recalibrate(key);
+      }
+    }),
+    isRetiredElement: (...args) => playback.getState().isRetiredElement(...args),
+    refusesTransportForReload: () => playback.getState().refusesTransportForReload(),
+    syncAnchorWaitExpired: (...args) =>
+      playback.getState().syncAnchorWaitExpired(...args),
     togglePlayback: asNavigation(() => {
+      // The store plays nothing while its element is stalled or being replaced (ADR 063).
+      if (playback.getState().refusesTransportForReload()) {
+        return;
+      }
       userNavigates();
       playback.getState().togglePlayback();
     }),
     play: asNavigation(() => {
+      if (playback.getState().refusesTransportForReload()) {
+        return;
+      }
       userNavigates();
       playback.getState().play();
     }),
@@ -803,7 +884,12 @@ export function createSequencePlayback(
       pending = null;
     }
     flushPending();
-    if (settling && playback.getState().calibrationStatus !== "calibrating") {
+    const settledState = playback.getState();
+    if (
+      settling &&
+      settledState.calibrationStatus !== "calibrating" &&
+      !settledState.isRecalibrating
+    ) {
       settling = false;
     }
     const next = {
@@ -899,6 +985,20 @@ export const sequencePlayback: SequencePlayback = createSequencePlayback({
   timeline: timelineStore,
   media: () => mediaBySourceOf(mediaStore.getState()),
 });
+
+/**
+ * Starts a manual recalibration of the clip on screen (ADR 063), for the buttons of the status
+ * bar and of the preview timecode. It passes the key of the interface, and the sequence playback
+ * maps it to the attached source. The store does nothing unless `canRecalibrate` is true.
+ */
+export function recalibratePreview(
+  playback: SequencePlayback = sequencePlayback,
+): void {
+  const state = playback.store.getState();
+  if (state.attachedSourceRevisionKey !== null) {
+    state.recalibrate(state.attachedSourceRevisionKey);
+  }
+}
 
 const defaultSelector = (state: SequencePlaybackState): SequencePlaybackState => state;
 

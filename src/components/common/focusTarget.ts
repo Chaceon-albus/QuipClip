@@ -73,6 +73,30 @@ export function canTakeFocus<T extends PromptFocusTarget>(
 }
 
 /**
+ * The target that takes the focus when the activation of a control removes that control, as
+ * the buttons of a recalibration do (ADR 063): the first of `targets` that can take the focus
+ * (`canTakeFocus`), or null. It is also null when the control did not hold the focus, as after a
+ * click on a control that keeps no focus: the focus is then elsewhere, and it stays there.
+ *
+ * @param heldFocus True when the control held the focus at its activation.
+ * @param targets The stable targets near the control, in the order of preference.
+ */
+export function focusTargetAfterRemoval<T extends PromptFocusTarget>(
+  heldFocus: boolean,
+  targets: readonly (T | null)[],
+): T | null {
+  if (!heldFocus) {
+    return null;
+  }
+  for (const target of targets) {
+    if (canTakeFocus(target)) {
+      return target;
+    }
+  }
+  return null;
+}
+
+/**
  * Selector for a dialog or an alert dialog that is open. Radix keeps a closed dialog mounted
  * while its exit animation runs, with `data-state="closed"`, and that dialog does not count.
  */
