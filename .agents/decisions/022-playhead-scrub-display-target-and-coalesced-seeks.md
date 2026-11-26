@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
-- Amended by: ADR 035, ADR 039, ADR 046, ADR 052
+- Amended by: ADR 035, ADR 039, ADR 046, ADR 052, ADR 063
 
 ## Context
 
@@ -360,6 +360,15 @@ outside `calibrating`.
 - (Added on 2026-10-02.) **A second source.** The reload request of a stall (ADR 039) becomes
   a deferred request when the new element is ready. Its detach before the metadata, and the
   attach of a new element of the same source, do not drop it.
+- (Added on 2026-11-25.) **A wait that runs out.** When the store permits an automatic
+  recalibration (ADR 063), the deferred request becomes the request of a reload with no stall,
+  and it runs at the anchor of the new element. Otherwise it runs on the approximate clock.
+- (Added on 2026-11-25.) **The latest request at each report.** The request of a reload
+  becomes the deferred request before the store reports the new element as ready. A navigation
+  that the store runs at once, because calibration is not `calibrating`, drops a deferred
+  request that still waits. So a seek that a listener sends when the store reports the element
+  as ready, or calibration as `ready` or `unavailable`, is the latest request, and no older
+  request runs after it (ADR 063).
 - **The display of a deferred step** assumes the frame grid. If the calibration fails
   instead, the playhead moves by less than one frame when the step runs.
 

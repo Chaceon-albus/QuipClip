@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 039, ADR 046, ADR 052
+- Amended by: ADR 039, ADR 046, ADR 052, ADR 063
 
 ## Context
 
@@ -127,6 +127,14 @@ preview reports frame callbacks as unavailable, calibration becomes `unavailable
 attachment, and the deferred request runs on the approximate clock. With nothing deferred,
 calibration waits for its first frame with no limit, so a slow first frame or the first
 frame of playback can still take the anchor.
+
+(Changed on 2026-11-25.) When that wait runs out, the store first replaces the element one
+time (ADR 063). The new element is a new attachment, and it calibrates by the same rules. When
+the wait runs out and the store permits no such reload, calibration becomes `unavailable`, as
+before. Every other cause makes calibration `unavailable` at once, as before. While
+calibration is `unavailable` because that wait ran out, and the conditions of ADR 063 hold,
+the user can start the same reload from the status bar. A denial of a source still holds for
+the session.
 
 (Changed on 2026-11-19.) WKWebView, the web view of macOS, presents no frame of a paused
 element that loaded only its metadata. It also presents no frame at position 0 when the first

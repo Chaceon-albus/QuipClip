@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 007, ADR 010, ADR 022, ADR 024, ADR 026, ADR 027, ADR 028,
   ADR 030, ADR 037, ADR 045, ADR 048
-- Amended by: ADR 056
+- Amended by: ADR 056, ADR 063
 
 ## Context
 
@@ -245,6 +245,9 @@ chooses the clip.
   back from the first frame goes to the last frame of the previous clip.
 - Each switch is a cold start. It loads and calibrates the next source, so the preview pauses
   briefly at a junction. The user accepted this for the first version.
+- (Added on 2026-11-25.) A switch stays in progress while the store replaces the element of
+  the next clip for a recalibration (ADR 063). The sequence layer passes the manual
+  recalibration to the store as a navigation of the user.
 
 The playhead shows sequence time: the start of the attached clip plus the elapsed time in it.
 An attach does not run the fade of ADR 007 again. The baseline of the fade is the first list

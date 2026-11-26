@@ -84,6 +84,7 @@ document summarizes them and shows how the parts fit together.
 | [`060-search-the-homebrew-ffmpeg-full-keg-on-macos.md`](../.agents/decisions/060-search-the-homebrew-ffmpeg-full-keg-on-macos.md)                                       | macOS discovery also searches the keg of the Homebrew `ffmpeg-full` formula        |
 | [`061-adjust-the-gain-of-an-export-by-its-true-peak.md`](../.agents/decisions/061-adjust-the-gain-of-an-export-by-its-true-peak.md)                                     | The Adjust switch measures an export and fills a gain for a true peak of -1 dBTP   |
 | [`062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md`](../.agents/decisions/062-play-the-step-cue-of-a-native-source-on-macos-through-web-audio.md) | On macOS a native source plays its frame step cue through the PCM cue of ADR 046   |
+| [`063-calibrate-the-preview-again-after-a-calibration-that-failed.md`](../.agents/decisions/063-calibrate-the-preview-again-after-a-calibration-that-failed.md)         | An element that showed no first frame is replaced one time, and again on request   |
 
 ## Shape
 
@@ -233,6 +234,16 @@ explicitly approximate display and seek fallback, for the preview timecode and f
 playhead alike. The status bar and a badge beside the preview timecode name the position as
 approximate. Their tooltips, and the tooltips of the disabled mark buttons, explain why the
 mark actions are unavailable.
+
+An element that showed no first frame can be replaced (ADR 063). When the wait of a deferred
+navigation for the first frame runs out, the store replaces the element one time, through the
+reload of ADR 039, and the new element calibrates as a new attachment. When that wait runs out
+again, the calibration is `unavailable`, and the store reports `canRecalibrate` under the
+conditions of ADR 063. The approximate-position item of the status bar and the badge beside the
+preview timecode are then buttons that start the same reload, and the new element goes back to
+the position of the playhead. From the start of such a reload until the new element is ready,
+the store reports `isRecalibrating` and handles the old element as a stalled one. Every other
+cause of `unavailable` stays for the element, and a denial of a source stays for the session.
 
 Two questions look like one, and one predicate must not answer both. Which clock supplies
 the number is answered by `isPlaybackPositionApproximate`, which is also true for the one

@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 003, ADR 022, ADR 026
-- Amended by: ADR 046
+- Amended by: ADR 046, ADR 063
 
 ## Context
 
@@ -70,6 +70,14 @@ attach of the same source takes them again. An attach of another source, `syncUn
 
 Only a seek of the user reloads. Seeking into the bad part again stalls again, and the next seek
 reloads once more. There is no loop.
+
+(Changed on 2026-11-25.) ADR 063 adds a reload with no stall, the recalibration. The store
+starts it one time when the wait for the first frame runs out. The user can also start it
+while the calibration is `unavailable` because that wait ran out, under the conditions of
+ADR 063. From the start of that reload, the store handles the old element as it handles a
+stalled element. The detach of the old element keeps the request of such a reload, as it keeps
+the request of a stall. For each reload, the request now becomes the deferred navigation before
+the store reports the new element as ready.
 
 (Changed on 2026-10-17.) For a source that plays through a `MediaSource` (ADR 046), the new
 element gets a new MediaSource. It loads the start of the file, as a new source does, and the
