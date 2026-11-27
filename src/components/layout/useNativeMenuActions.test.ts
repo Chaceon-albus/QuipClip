@@ -7,6 +7,7 @@ import { nativeContextMenuState } from "./nativeContextMenuState";
 import { openExportSaveDialog } from "@/features/export/dialog";
 import { openPngSaveDialog } from "@/features/frameExport/store";
 import { openProjectSaveDialog } from "@/features/project/saveAction";
+import { openLocateFileDialog } from "./projectOpenStep";
 import {
   isNativeMenuFileDialogOpen,
   runNativeMenuAction,
@@ -201,6 +202,15 @@ describe("isNativeMenuFileDialogOpen", () => {
             defaultDirectory: "/p",
             filterName: "QuipClip Projects",
             saveDialog: dialog,
+          }),
+      ],
+      [
+        "the file dialog of Locate… of the project dialog",
+        (dialog) =>
+          openLocateFileDialog({
+            defaultDirectory: "/old",
+            filterName: "Video Files",
+            openDialog: dialog as never,
           }),
       ],
       [

@@ -151,6 +151,46 @@ describe("Media Dialog Orchestration", () => {
       ]);
       expect(result).toBeUndefined();
     });
+
+    it("gives all the paths of one dialog to one call of openPaths, with the extensions of the caller (ADR 072)", async () => {
+      const openDialogMock = vi
+        .fn()
+        .mockResolvedValue(["/media/a.mp4", " ", "/media/cut.qcproj"]);
+      const importPathMock = vi.fn();
+      const openPathsMock = vi.fn().mockResolvedValue(undefined);
+
+      await openMediaFileDialog({
+        filterName: "Videos and QuipClip Projects",
+        extensions: ["mp4", "qcproj"],
+        openDialog: openDialogMock,
+        importPath: importPathMock,
+        openPaths: openPathsMock,
+      });
+
+      expect(openDialogMock).toHaveBeenCalledWith({
+        multiple: true,
+        directory: false,
+        filters: [
+          { name: "Videos and QuipClip Projects", extensions: ["mp4", "qcproj"] },
+        ],
+      });
+      expect(openPathsMock.mock.calls).toEqual([
+        [["/media/a.mp4", "/media/cut.qcproj"]],
+      ]);
+      expect(importPathMock).not.toHaveBeenCalled();
+    });
+
+    it("does not call openPaths after a cancel", async () => {
+      const openPathsMock = vi.fn();
+
+      await openMediaFileDialog({
+        filterName: defaultFilterName,
+        openDialog: vi.fn().mockResolvedValue(null),
+        openPaths: openPathsMock,
+      });
+
+      expect(openPathsMock).not.toHaveBeenCalled();
+    });
   });
 
   describe("Cancel & Empty Selection Flow", () => {

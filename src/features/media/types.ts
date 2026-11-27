@@ -44,10 +44,14 @@ export type BackendImportMediaErrorCode =
  *
  * `sourceExtentUnknown`: the file imported, but it has no extent at all, so it cannot join a
  * sequence that has another clip (ADR 052).
+ *
+ * `projectNotAlone`: the Open action got a project file together with a video or with another
+ * project file, so it opened nothing (ADR 072, "One Open action").
  */
 export const FRONTEND_IMPORT_MEDIA_ERROR_CODES = [
   "dialogFailed",
   "sourceExtentUnknown",
+  "projectNotAlone",
 ] as const;
 
 export type FrontendImportMediaErrorCode =

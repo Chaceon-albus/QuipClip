@@ -4,7 +4,7 @@ import { segmentRenameDialogStore } from "@/components/timeline/segmentRenameDia
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { createSegmentListScope, exportPanelStore } from "@/features/export";
 import { frameExportController } from "@/features/frameExport";
-import { mediaStore, openMediaFileDialog } from "@/features/media";
+import { mediaStore } from "@/features/media";
 import { runSaveProjectAction } from "@/features/project/saveAction";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
@@ -12,13 +12,13 @@ import { i18n } from "@/i18n";
 import { openExportFlow } from "./exportFlowController";
 import { readFrameExportSnapshot } from "./frameExportSnapshot";
 import { isPageOverlayOpen } from "./nativeContextMenuState";
+import { runOpenAction } from "./openAction";
 import {
   OPEN_TOOLTIP_SELECTOR,
   resolveShortcut,
   type ShortcutEventTarget,
   type ShortcutKeyEvent,
 } from "./keyboardShortcutController";
-import { quitGuard } from "./quitGuardController";
 import { getShortcutPlatform } from "./shortcutBindings";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
@@ -126,11 +126,8 @@ export function runShortcutCommand(command: ShortcutCommand): void {
       timeline.redo();
       return;
     case "openMedia":
-      // The call of the Open Media item of the title bar menu (`useOpenMediaAction`).
-      void openMediaFileDialog({
-        filterName: i18n.t("dialog.videoFilter"),
-        importPath: quitGuard.requestOpen,
-      });
+      // The Open action, as the Open item of the title bar menu runs it (ADR 072).
+      void runOpenAction();
       return;
     case "saveProject":
       // Save or Save As (ADR 072). The action shows the error of a save that failed.

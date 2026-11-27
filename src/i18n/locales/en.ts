@@ -17,7 +17,9 @@ export const en = {
   titleBar: {
     menu: {
       file: "File",
-      openMedia: "Open Media…",
+      // The Open action takes videos and project files (ADR 072). A video joins the timeline,
+      // and a project replaces it.
+      openMedia: "Open…",
       // Save and Save As save the project (ADR 072). Save As has the ellipsis, because it always
       // opens the save dialog.
       save: "Save",
@@ -57,12 +59,16 @@ export const en = {
     pngFilter: "PNG Images",
     // The file filter of the save dialog of a project file (ADR 072).
     projectFilter: "QuipClip Projects",
+    // The one file filter of the dialog of the Open action, which lists the video files and the
+    // project files (ADR 072).
+    openFilter: "Videos and QuipClip Projects",
   },
   preview: {
     empty: {
       title: "Open a video to start marking segments",
-      openVideo: "Open Video…",
-      dropHint: "or drop a video file here",
+      // The Open action takes videos and project files (ADR 072).
+      openVideo: "Open…",
+      dropHint: "or drop a video or a project file here",
     },
     loading: "Loading media…",
     // Screen reader text only. A polite live region says it once when the buffering spinner
@@ -251,6 +257,13 @@ export const en = {
     release_other: "Release to add {{count}} videos",
     unsupported: "No supported video file",
     othersIgnored: "QuipClip adds the video files and ignores the other files.",
+    // A drop of one project file opens that project in place of the timeline (ADR 072).
+    // `projectOthersIgnored` is the second line when the drag also carries files that are no
+    // video and no project file.
+    openProject: "Release to open the project",
+    projectOthersIgnored: "QuipClip opens the project and ignores the other files.",
+    // A project file with a video or with another project file: the drop opens nothing.
+    projectNotAlone: "A project file opens alone",
   },
   // The confirmations before a quit (ADR 027) and before Clear Timeline (ADR 052). Each message
   // below `project`, `loss`, `clear.segments`, `clear.projectCloses`, `clear.undoKeepsNoFile`
@@ -259,7 +272,9 @@ export const en = {
   //
   // When the project has changes that are not saved, each dialog is the save prompt of ADR 072:
   // it has `saveTitle`, a first line from `project`, and the buttons `save`, `dontSave` and
-  // Cancel. "Don't Save" closes the application or clears the timeline without a save.
+  // Cancel. "Don't Save" closes the application or clears the timeline without a save. The open
+  // of a project file asks with the same prompt, with the title `open.saveTitle` and the one
+  // line from `project`. "Don't Save" then opens the other project without a save.
   quitGuard: {
     quit: {
       title: "Quit QuipClip?",
@@ -286,6 +301,9 @@ export const en = {
     project: {
       file: "“{{name}}” has changes that are not saved.",
       noFile: "The project has no file, so its segments are not saved.",
+    },
+    open: {
+      saveTitle: "Save the project before you open another one?",
     },
     save: "Save",
     dontSave: "Don’t Save",
@@ -600,6 +618,10 @@ export const en = {
     dialogFailed: "QuipClip could not open the file selection dialog.",
     sourceExtentUnknown:
       "QuipClip could not find the length of this video, so it cannot place the video next to another video on the timeline.",
+    // The Open action got a project file together with a video or another project file
+    // (ADR 072).
+    projectNotAlone:
+      "A project file opens alone, so QuipClip opened none of the files.",
     unknown: "An unknown error occurred while importing media.",
   },
   playbackError: {
@@ -1536,6 +1558,109 @@ export const en = {
       commandExecutionFailed:
         "QuipClip could not run the command that saves the project.",
       unknown: "An unknown error occurred while QuipClip saved the project.",
+    },
+  },
+  // The project dialog of the open of a project file (ADR 072). It shows the read of the file,
+  // the check of each video file, the list of the video files to locate, and the error of an
+  // open that failed. {{name}} is the name of a file, such as "interview.qcproj" or "clip.mp4".
+  // {{current}} counts the checked files from 1 to {{total}}. {{path}} is the full path of a
+  // file. `checkingAgain` is the last check before the open, which reads each file again.
+  // `details.show` and `details.hide` label the disclosure of the diagnostic text of the system,
+  // which shows untranslated. They match `export.details`.
+  projectOpen: {
+    title: "Open Project",
+    failedTitle: "QuipClip could not open the project",
+    loading: "Reading “{{name}}”…",
+    loadingNoName: "Reading the project…",
+    checking: "Checking file {{current}} of {{total}}: “{{name}}”",
+    checkingAgain: "Checking file {{current}} of {{total}} again: “{{name}}”",
+    // The line above the list: `locateIntro` while one or more rows are not found, and
+    // `locateIntroAllFound` when each row is found.
+    locateIntro:
+      "QuipClip did not find some video files of the project, or cannot use them. Locate each file, then click Open.",
+    locateIntroAllFound: "Each video file of the project is found. Click Open.",
+    locate: "Locate…",
+    open: "Open",
+    details: {
+      show: "Show Details",
+      hide: "Hide Details",
+    },
+    // One row of the list. `documentPath` is the path that the project file has. `foundAt` shows
+    // when the file is at another path. `locateLabel` is the accessible name of "Locate…".
+    row: {
+      documentPath: "Saved path: {{path}}",
+      found: "Found",
+      foundAt: "Found at {{path}}",
+      locateLabel: "Locate “{{name}}”…",
+    },
+    // Why a row has no file. `unusable` is the first line when the file cannot be used. The
+    // second line is then the message of its import error (`mediaError`) or one line of `fact`:
+    // the fact of the file that does not agree with the project file.
+    reason: {
+      absent: "The file was not found.",
+      changed:
+        "This is not the file that the project saved. The file changed, or it is another file.",
+      unusable: "QuipClip cannot use the file.",
+      fact: {
+        videoStreamIndex:
+          "The video stream of the file has another index than the project file says.",
+        videoTimeBase:
+          "The video stream of the file has another time base than the project file says.",
+        videoStartPts:
+          "The video of the file starts at another time than the project file says.",
+        videoEndPts:
+          "The video of the file ends at another time than the project file says.",
+        audioStream: "The file does not have the audio track that the project uses.",
+      },
+    },
+    // The errors of an open. The keys of `load` are the codes of `ProjectCommandError` of the
+    // command that reads the project file that have no fitting message in
+    // `projectSaveError.write`. `document` holds the problems of the project file before the
+    // check of its video files. `sequence` holds the problems of the timeline that the video
+    // files give as they read now: a new read can give another length than the project file has.
+    error: {
+      load: {
+        pathNotFound: "The project file was not found.",
+        permissionDenied: "QuipClip does not have permission to read the project file.",
+        invalidJson: "The file is not a QuipClip project file, or it is damaged.",
+        invalidProject:
+          "The project file has a value that QuipClip does not accept, so QuipClip did not open it.",
+        futureSchemaVersion:
+          "A newer version of QuipClip saved this project file, so this version cannot open it.",
+        // 32 MiB is PROJECT_FILE_MAX_BYTES of the Rust project module.
+        tooLarge:
+          "The project file is larger than 32 MiB, so QuipClip did not open it.",
+        commandExecutionFailed:
+          "QuipClip could not run the command that opens the project.",
+        unknown: "An unknown error occurred while QuipClip opened the project.",
+      },
+      document: {
+        duplicateSource:
+          "The project file names two video files with the same identifier.",
+        duplicateClip:
+          "The project file has two videos on the timeline with the same identifier.",
+        unknownSource:
+          "A video on the timeline of the project file names a file that the project file does not list.",
+        clipExtentUnknown:
+          "The project file has a video with no length next to another video, so QuipClip cannot place the videos on the timeline.",
+        layoutFailed:
+          "QuipClip cannot place the videos of the project file on one timeline.",
+        duplicateSegment: "The project file has two segments with the same identifier.",
+        invalidSegmentName:
+          "The project file has a segment name that QuipClip does not accept.",
+        invalidSegment:
+          "The project file has a segment that breaks the rules of the timeline.",
+      },
+      sequence: {
+        clipExtentUnknown:
+          "QuipClip cannot read the length of a video file of the project now, so it cannot place the videos on the timeline.",
+        layoutFailed:
+          "QuipClip cannot place the video files of the project on one timeline as they read now.",
+        invalidSegment:
+          "A segment of the project does not fit the video files as they read now.",
+      },
+      entriesDiffer:
+        "The project file lists the same video file two times with different information, so QuipClip did not open it.",
     },
   },
 } as const;

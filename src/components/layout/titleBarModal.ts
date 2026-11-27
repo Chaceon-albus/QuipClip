@@ -37,6 +37,8 @@ export interface TitleBarModalInput {
   readonly quitPromptOpen: boolean;
   /** The dialog of a save that failed is open (`ProjectSaveErrorDialog`, ADR 072). */
   readonly saveErrorOpen: boolean;
+  /** The project dialog of an open is open (`ProjectOpenDialog`, ADR 072). */
+  readonly projectOpenOpen: boolean;
 }
 
 /** What the title bar changes while a modal dialog is open. */
@@ -54,8 +56,9 @@ export function presentTitleBarModal({
   exportDialogOpen,
   quitPromptOpen,
   saveErrorOpen,
+  projectOpenOpen,
 }: TitleBarModalInput): TitleBarModalView {
-  if (exportDialogOpen || quitPromptOpen || saveErrorOpen) {
+  if (exportDialogOpen || quitPromptOpen || saveErrorOpen || projectOpenOpen) {
     return {
       modalOpen: true,
       barClass: "pointer-events-auto",

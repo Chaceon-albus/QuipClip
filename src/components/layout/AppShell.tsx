@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { DropOverlay } from "@/components/layout/DropOverlay";
 import { startExportAttentionSync } from "@/components/layout/exportAttentionSync";
+import { ProjectOpenDialog } from "@/components/layout/ProjectOpenDialog";
 import { ProjectSaveErrorDialog } from "@/components/layout/ProjectSaveErrorDialog";
 import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
@@ -29,8 +30,8 @@ export function AppShell() {
   // The web view opens its context menu only in a text field. A development build keeps it
   // everywhere except on the preview media.
   useContextMenuPolicy();
-  // The Open Media, Save, Save As, Export and Export Frame items of the macOS menu run the
-  // commands of their keys, under the same conditions.
+  // The Open, Save, Save As, Export and Export Frame items of the macOS menu run the commands of
+  // their keys, under the same conditions.
   useNativeMenuActions();
   // Every close request and every held-back exit request runs the quit decision (ADR 027).
   useQuitGuard();
@@ -89,9 +90,13 @@ export function AppShell() {
         {/* The one mount of the Export Order dialog (ADR 066). Its key and the segment summary
             in the gutter of the track row open it through its store. */}
         <ExportOrderDialog />
+        {/* The one mount of the project dialog (ADR 072): the progress of the open of a project,
+            the files to locate, and the error of an open. The open step of the quit guard
+            drives it through its store. */}
+        <ProjectOpenDialog />
         {/*
          * The one mount of the quit guard dialog. Its portal opens after any dialog that is
-         * already open, so it draws above the export dialog.
+         * already open, so it draws above the export dialog and the project dialog.
          */}
         <QuitGuardDialog />
         {/* The one mount of the dialog of a save that failed (ADR 072). The Save action and the

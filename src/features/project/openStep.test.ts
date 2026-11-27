@@ -117,8 +117,10 @@ interface HarnessOptions {
     | MediaSourceRevisionDescriptor
   >;
   readonly answers?: DropContentAnswer[];
-  readonly changes?: boolean;
-  readonly otherDialog?: boolean;
+  /** True, or a function that answers, when the project has changes to save. */
+  readonly changes?: boolean | (() => boolean);
+  /** True, or a function that answers, when another dialog of the window is open. */
+  readonly otherDialog?: boolean | (() => boolean);
   /** The imports of the media store, for `importClips`. */
   readonly mediaImports?: Record<string, ImportMediaResult | Held<ImportMediaResult>>;
   readonly realLine?: boolean;
@@ -253,7 +255,10 @@ function harness(options: HarnessOptions = {}) {
   const step = createProjectOpenStep({
     saveStep,
     ask,
-    isOtherDialogOpen: () => options.otherDialog === true,
+    isOtherDialogOpen: () =>
+      typeof options.otherDialog === "function"
+        ? options.otherDialog()
+        : options.otherDialog === true,
     pickFile,
     staleExportOpenStep,
     loadProject,
@@ -263,7 +268,10 @@ function harness(options: HarnessOptions = {}) {
     media,
     audioOverrides,
     project,
-    hasChangesToSave: () => options.changes === true,
+    hasChangesToSave: () =>
+      typeof options.changes === "function"
+        ? options.changes()
+        : options.changes === true,
     pausePlayback,
     dropNavigation,
     resetPlayback,
@@ -385,6 +393,7 @@ describe("the open step", () => {
     // The commands: the expected revision of each entry, and the second compare of step 7.
     expect(h.importMedia).toHaveBeenCalledWith(A.path, { size: 1000, mtime: A.mtime });
     expect(h.calls).toEqual([
+      "stale",
       "stale",
       "load",
       `import ${A.path}`,
@@ -967,12 +976,93 @@ describe("the open step", () => {
       expect(h.phase()).toEqual({ kind: "idle" });
     });
 
+    it("changes nothing when another dialog opened during the save of the prompt", async () => {
+      // The export dialog, or a trim of a segment edge, can start while the file is written.
+      const saved = () => h.saveStep.save.mock.calls.length > 0;
+      const h = harness({
+        disk: diskOf(A, B),
+        changes: () => !saved(),
+        answers: ["save"],
+        otherDialog: saved,
+      });
+      const before = h.snapshot();
+
+      await expect(h.step.open(PROJECT_PATH)).resolves.toEqual({ status: "blocked" });
+
+      expect(h.saveStep.save).toHaveBeenCalledTimes(1);
+      expect(h.loadProject).not.toHaveBeenCalled();
+      expect(h.snapshot()).toEqual(before);
+      expect(h.phase()).toEqual({ kind: "idle" });
+    });
+
+    it("opens after the save of the prompt when no other dialog opened", async () => {
+      const saved = () => h.saveStep.save.mock.calls.length > 0;
+      const h = harness({
+        disk: diskOf(A, B),
+        changes: () => !saved(),
+        answers: ["save"],
+      });
+
+      await expect(h.step.open(PROJECT_PATH)).resolves.toMatchObject({
+        status: "opened",
+      });
+      expect(h.saveStep.save).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not test again after Don't Save, which ran no save", async () => {
+      // The closed save prompt can still be in the document when the step goes on.
+      const asked = () => h.ask.mock.calls.length > 0;
+      const h = harness({
+        disk: diskOf(A, B),
+        changes: true,
+        answers: ["dontSave"],
+        otherDialog: asked,
+      });
+
+      await expect(h.step.open(PROJECT_PATH)).resolves.toMatchObject({
+        status: "opened",
+      });
+    });
+
     it("makes the open step of the export stale before it asks", async () => {
       const h = harness({ disk: diskOf(A, B), changes: true, answers: ["dontSave"] });
       await expect(h.step.open(PROJECT_PATH)).resolves.toMatchObject({
         status: "opened",
       });
-      expect(h.calls.slice(0, 3)).toEqual(["stale", "ask", "load"]);
+      expect(h.calls.slice(0, 4)).toEqual(["stale", "ask", "stale", "load"]);
+    });
+
+    it("makes the open step of the export stale again after the save, before the project dialog shows", async () => {
+      // An Export request that the user starts during the write can still wait when the write
+      // ends. It must not open its dialog over the project dialog.
+      const saved = () => h.saveStep.save.mock.calls.length > 0;
+      const h = harness({
+        disk: diskOf(A, B),
+        changes: () => !saved(),
+        answers: ["save"],
+      });
+      h.saveStep.save.mockImplementation(() => {
+        h.calls.push("save");
+        return Promise.resolve({ status: "saved", path: "/p.qcproj", bound: true });
+      });
+      h.step.store.subscribe((state, previous) => {
+        if (state.phase.kind !== previous.phase.kind) {
+          h.calls.push(`phase ${state.phase.kind}`);
+        }
+      });
+
+      await expect(h.step.open(PROJECT_PATH)).resolves.toMatchObject({
+        status: "opened",
+      });
+
+      expect(h.calls.slice(0, 6)).toEqual([
+        "stale",
+        "ask",
+        "save",
+        "stale",
+        "phase loading",
+        "load",
+      ]);
     });
 
     it("stops after Cancel of the save prompt, and after a failed save", async () => {

@@ -4,11 +4,10 @@ import { createConfirmFocusReturn } from "@/components/common/confirmDialogModel
 import { DiagnosticDetails } from "@/components/common/DiagnosticDetails";
 import { DialogActions } from "@/components/common/DialogActions";
 import {
-  ENCLOSING_DIALOG_SELECTOR,
   toDeferredFocusCandidate,
   toFocusCandidate,
 } from "@/components/common/focusCandidate";
-import { isInOpenDialog, OPEN_DIALOG_SELECTOR } from "@/components/common/focusTarget";
+import { isInOpenDialog } from "@/components/common/focusTarget";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,35 +23,11 @@ import {
   useProjectSaveErrorStore,
 } from "@/features/project/saveErrorStore";
 import type { ProjectSaveError } from "@/features/project/saveStep";
-import { TITLE_BAR_FILE_MENU_SELECTOR } from "@/lib/titleBar";
+import { fileMenuTrigger, openEnclosingDialog } from "./dialogFocusReturn";
 import {
   PROJECT_SAVE_ERROR_TITLE_KEY,
   presentProjectSaveError,
 } from "./projectSaveErrorPresenter";
-
-/**
- * The File menu trigger of the title bar, a stable element, while no other dialog of the page is
- * open. Save from an item of that menu opens this dialog after the item is gone, so the focus
- * goes there in place of the document body. It never goes behind a dialog that is still open.
- */
-const fileMenuTrigger = (): HTMLElement | null =>
-  document.querySelector(OPEN_DIALOG_SELECTOR) === null
-    ? document.querySelector<HTMLElement>(TITLE_BAR_FILE_MENU_SELECTOR)
-    : null;
-
-/**
- * The dialog that held `opener` at the open, while that dialog is still open, or null. Radix
- * keeps a closing dialog in the document during its exit animation, and that one does not count.
- */
-function openEnclosingDialog(opener: Element | null): () => HTMLElement | null {
-  const enclosing = opener?.closest<HTMLElement>(ENCLOSING_DIALOG_SELECTOR) ?? null;
-  return () =>
-    enclosing !== null &&
-    enclosing.isConnected &&
-    enclosing.matches(OPEN_DIALOG_SELECTOR)
-      ? enclosing
-      : null;
-}
 
 const handleOpenChange = (open: boolean) => {
   if (!open) {

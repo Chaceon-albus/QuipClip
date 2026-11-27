@@ -20,7 +20,7 @@ export const zhCN: TranslationCatalog = {
   titleBar: {
     menu: {
       file: "文件",
-      openMedia: "打开媒体…",
+      openMedia: "打开…",
       save: "保存",
       saveAs: "另存为…",
       export: "导出…",
@@ -47,12 +47,13 @@ export const zhCN: TranslationCatalog = {
     audioFilter: "音频文件",
     pngFilter: "PNG 图像",
     projectFilter: "QuipClip 项目",
+    openFilter: "视频和 QuipClip 项目",
   },
   preview: {
     empty: {
       title: "打开视频，开始标记片段",
-      openVideo: "打开视频…",
-      dropHint: "或将视频文件拖到这里",
+      openVideo: "打开…",
+      dropHint: "或将视频或项目文件拖到这里",
     },
     loading: "正在加载媒体…",
     buffering: "正在缓冲",
@@ -165,6 +166,9 @@ export const zhCN: TranslationCatalog = {
     release_other: "松开以添加 {{count}} 个视频",
     unsupported: "没有可添加的视频文件",
     othersIgnored: "只添加视频文件，其他文件将被忽略。",
+    openProject: "松开以打开项目",
+    projectOthersIgnored: "只打开项目，其他文件将被忽略。",
+    projectNotAlone: "项目文件只能单独打开",
   },
   quitGuard: {
     quit: {
@@ -185,6 +189,9 @@ export const zhCN: TranslationCatalog = {
     project: {
       file: "“{{name}}”有未保存的更改。",
       noFile: "项目没有文件，因此其片段尚未保存。",
+    },
+    open: {
+      saveTitle: "是否在打开其他项目前保存当前项目？",
     },
     save: "保存",
     dontSave: "不保存",
@@ -374,6 +381,7 @@ export const zhCN: TranslationCatalog = {
     dialogFailed: "无法打开文件选择对话框。",
     sourceExtentUnknown:
       "无法确定此视频的时长，因此不能把它放在时间轴上另一个视频的旁边。",
+    projectNotAlone: "项目文件只能单独打开，因此未打开任何文件。",
     unknown: "导入媒体时发生未知错误。",
   },
   playbackError: {
@@ -1103,6 +1111,72 @@ export const zhCN: TranslationCatalog = {
       tooLarge: "项目文件将超过 32 MiB，因此未保存项目。",
       commandExecutionFailed: "无法运行保存项目的命令。",
       unknown: "保存项目时发生未知错误。",
+    },
+  },
+  projectOpen: {
+    title: "打开项目",
+    failedTitle: "无法打开项目",
+    loading: "正在读取“{{name}}”…",
+    loadingNoName: "正在读取项目…",
+    checking: "正在检查第 {{current}} 个文件（共 {{total}} 个）：“{{name}}”",
+    checkingAgain: "正在再次检查第 {{current}} 个文件（共 {{total}} 个）：“{{name}}”",
+    locateIntro:
+      "项目中的部分视频文件未找到或无法使用。请逐个定位这些文件，然后点击“打开”。",
+    locateIntroAllFound: "项目的视频文件均已找到。请点击“打开”。",
+    locate: "定位…",
+    open: "打开",
+    details: {
+      show: "显示详细信息",
+      hide: "隐藏详细信息",
+    },
+    row: {
+      documentPath: "保存的路径：{{path}}",
+      found: "已找到",
+      foundAt: "已在 {{path}} 找到",
+      locateLabel: "定位“{{name}}”…",
+    },
+    reason: {
+      absent: "未找到该文件。",
+      changed: "这不是项目保存时的那个文件：该文件已更改，或者是另一个文件。",
+      unusable: "无法使用该文件。",
+      fact: {
+        videoStreamIndex: "该文件视频流的索引与项目文件记录的索引不同。",
+        videoTimeBase: "该文件视频流的时间基与项目文件记录的时间基不同。",
+        videoStartPts: "该文件视频的开始时间与项目文件记录的开始时间不同。",
+        videoEndPts: "该文件视频的结束时间与项目文件记录的结束时间不同。",
+        audioStream: "该文件中没有项目所用的音轨。",
+      },
+    },
+    error: {
+      load: {
+        pathNotFound: "未找到项目文件。",
+        permissionDenied: "没有读取项目文件的权限。",
+        invalidJson: "该文件不是 QuipClip 项目文件，或者已损坏。",
+        invalidProject: "项目文件包含 QuipClip 不接受的值，因此未打开项目。",
+        futureSchemaVersion:
+          "此项目文件由较新版本的 QuipClip 保存，因此此版本无法打开它。",
+        tooLarge: "项目文件超过 32 MiB，因此未打开项目。",
+        commandExecutionFailed: "无法运行打开项目的命令。",
+        unknown: "打开项目时发生未知错误。",
+      },
+      document: {
+        duplicateSource: "项目文件中有两个视频文件使用相同的标识符。",
+        duplicateClip: "项目文件中，时间轴上有两个视频使用相同的标识符。",
+        unknownSource: "项目文件中，时间轴上的某个视频引用了项目文件未列出的文件。",
+        clipExtentUnknown:
+          "项目文件中有一个没有时长的视频与其他视频相邻，因此无法在时间轴上放置这些视频。",
+        layoutFailed: "无法将项目文件中的视频放置在同一条时间轴上。",
+        duplicateSegment: "项目文件中有两个片段使用相同的标识符。",
+        invalidSegmentName: "项目文件中有 QuipClip 不接受的片段名称。",
+        invalidSegment: "项目文件中有不符合时间轴规则的片段。",
+      },
+      sequence: {
+        clipExtentUnknown:
+          "当前无法读取项目中某个视频文件的时长，因此无法在时间轴上放置这些视频。",
+        layoutFailed: "按当前的读取结果，无法将项目的视频文件放置在同一条时间轴上。",
+        invalidSegment: "按视频文件当前的读取结果，项目中的某个片段不再适用。",
+      },
+      entriesDiffer: "项目文件两次列出同一个视频文件，但两处信息不同，因此未打开项目。",
     },
   },
 };

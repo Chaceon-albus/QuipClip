@@ -1034,7 +1034,7 @@ export function planShortcutCommand(
         : null;
 
     case "openMedia":
-      // The Open Media item of the title bar menu has no condition.
+      // The Open action (ADR 072) has no condition. The quit guard decides what its files do.
       return { kind: "openMedia" };
 
     case "saveProject":

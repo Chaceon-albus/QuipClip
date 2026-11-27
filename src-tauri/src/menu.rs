@@ -10,12 +10,12 @@
 //! `ExitRequested`, so the quit goes through the gate in `commands::quit` and the dialog of
 //! the frontend. The application submenu also gets Show All, which the default menu omits and
 //! the standard macOS application menu has. And the menu holds the commands of the
-//! application: Settings in the application submenu, and Open Media, Save, Save As, Export and
-//! Export Frame in the File submenu.
+//! application: Settings in the application submenu, and Open, Save, Save As, Export and Export
+//! Frame in the File submenu.
 //!
 //! # The command items
 //!
-//! A command item is an ordinary item. Open Media, Save, Save As, Export and Export Frame bring
+//! A command item is an ordinary item. Open, Save, Save As, Export and Export Frame bring
 //! the main window forward and send it [`MENU_ACTION_EVENT`] with the name of their action, and
 //! Rust decides nothing else. The frontend runs that action with the conditions of the window
 //! keyboard layer (ADR 026), and it does nothing while a dialog or a menu of the page is open.
@@ -96,10 +96,11 @@ const SETTINGS_ITEM: CommandItem = CommandItem {
     action: MenuAction::OpenSettingsWindow,
 };
 
-/// Open Media, in the File submenu.
+/// Open, in the File submenu (ADR 072). It takes videos and project files. Its action keeps the
+/// name `openMedia` of the key table.
 const OPEN_MEDIA_ITEM: CommandItem = CommandItem {
     id: "quipclip.open-media",
-    label: "Open Media…",
+    label: "Open…",
     accelerator: Some("CmdOrCtrl+O"),
     action: MenuAction::Frontend("openMedia"),
 };
@@ -162,7 +163,7 @@ fn command_menu_item<R: Runtime>(
 /// macOS, with the Quit item replaced, Show All added, and the command items added.
 ///
 /// The application submenu has the standard macOS order: About, Settings, Services, the Hide
-/// and Show items, and Quit. The File submenu has Open Media, Save, Save As, Export, Export
+/// and Show items, and Quit. The File submenu has Open, Save, Save As, Export, Export
 /// Frame, and Close Window. Close Window is the predefined item of the default File submenu. It
 /// raises the close request of the window, so the quit decision of ADR 027 still runs.
 ///
@@ -428,7 +429,7 @@ mod tests {
         // entry, and its label is the standard one. Each label of an item that always opens a
         // window or a dialog ends in the ellipsis character (U+2026). Save opens the save dialog
         // only for a project with no file, so it has none.
-        assert_eq!(OPEN_MEDIA_ITEM.label, "Open Media…");
+        assert_eq!(OPEN_MEDIA_ITEM.label, "Open…");
         assert_eq!(SAVE_ITEM.label, "Save");
         assert_eq!(SAVE_AS_ITEM.label, "Save As…");
         assert_eq!(EXPORT_ITEM.label, "Export…");

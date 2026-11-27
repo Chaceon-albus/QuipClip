@@ -167,7 +167,10 @@ export type OpenProjectResult =
   | { readonly status: "opened"; readonly path: string }
   /** The user or the quit canceled the step before step 8. */
   | { readonly status: "canceled" }
-  /** Another dialog of the window was open at step 2, so the step changed nothing. */
+  /**
+   * Another dialog of the window was open at step 2, before the save prompt or after a save that
+   * the prompt ran, so the step changed nothing.
+   */
   | { readonly status: "blocked" }
   /**
    * The save prompt of step 2 stopped the step. `saveError` is the error of the save that the
@@ -183,11 +186,17 @@ export interface ProjectOpenDependencies {
   readonly saveStep: Pick<ProjectSaveStep, "save" | "whenIdle">;
   /** Shows the save prompt (ADR 072, "Before the content is dropped"). */
   readonly ask: () => Promise<DropContentAnswer>;
-  /** True while another dialog of the window is open (step 2). */
+  /**
+   * True while another dialog of the window is open (step 2). The step tests it before the save
+   * prompt, and again after a save that the prompt ran.
+   */
   readonly isOtherDialogOpen: () => boolean;
   /** The file dialog of the system for "Locate…": one file, or null when the user cancels. */
   readonly pickFile: (defaultDirectory: string | null) => Promise<string | null>;
-  /** Makes a waiting open step of the export stale (`staleExportOpenStep`, step 2). */
+  /**
+   * Makes a waiting open step of the export stale (`staleExportOpenStep`, step 2). The step calls
+   * it before the save prompt, and again directly before the project dialog shows.
+   */
   readonly staleExportOpenStep: () => void;
   readonly loadProject?: (path: string) => Promise<LoadProjectResult>;
   readonly importMedia?: (
@@ -682,9 +691,17 @@ export function createProjectOpenStep(
       return { status: "blocked" };
     }
     dependencies.staleExportOpenStep();
+    // True when Save of the save prompt started a save step.
+    let saveStarted = false;
     const question = await confirmDropContent({
       ask: dependencies.ask,
-      saveStep: dependencies.saveStep,
+      saveStep: {
+        whenIdle: () => dependencies.saveStep.whenIdle(),
+        save: (mode) => {
+          saveStarted = true;
+          return dependencies.saveStep.save(mode);
+        },
+      },
       hasChangesToSave,
       // A canceled open starts no save, whatever the prompt answers.
       isCanceled: () => !alive(current),
@@ -695,8 +712,21 @@ export function createProjectOpenStep(
     if (question.kind === "stop") {
       return { status: "stopped", saveError: question.saveError };
     }
+    // A save of the prompt waits for the file and can wait for the save dialog of the system.
+    // Another dialog, or a trim of a segment edge, can start in that time, so the step tests
+    // again before it shows the project dialog, and it changes nothing when one is open. With
+    // no save, the time after the first test held only the modal save prompt, which the user
+    // answered, and the closed prompt can still be in the document then, so the step does not
+    // test again.
+    if (saveStarted && dependencies.isOtherDialogOpen()) {
+      return { status: "blocked" };
+    }
 
-    // Steps 3 and 4.
+    // Steps 3 and 4. An Export request that started during the save prompt or its write can
+    // still wait for its turn, and it would open its dialog over the project dialog. So the step
+    // makes a waiting open step of the export stale again, directly before the project dialog
+    // shows, in each path: with no prompt, after Don't Save, and after a save.
+    dependencies.staleExportOpenStep();
     store.setState({ phase: { kind: "loading" }, projectPath: path });
     let loaded: LoadProjectResult;
     try {

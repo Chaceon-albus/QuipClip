@@ -56,15 +56,27 @@ export interface OpenMediaFileDialogOptions {
    */
   filterName: string;
   /**
+   * The extensions of the filter, with no dot. Defaults to `VIDEO_FILE_EXTENSIONS`. The Open
+   * action adds the extension of a project file (ADR 072).
+   */
+  extensions?: readonly string[];
+  /**
    * File dialog opener function. Defaults to Tauri plugin-dialog `open`.
    */
   openDialog?: typeof tauriOpen;
   /**
-   * Import handler, called once for each selected file, in the order of the selection. The
-   * quit guard passes `requestOpen`, which adds each file as a clip of the sequence (ADR 052).
-   * Defaults to `mediaStore.getState().importPath`.
+   * Import handler, called once for each selected file, in the order of the selection. Defaults
+   * to `mediaStore.getState().importPath`. `openPaths` takes its place when it is given.
    */
   importPath?: (path: string) => Promise<unknown>;
+  /**
+   * Request handler, called once with all the selected files, in the order of the selection.
+   * The Open action passes `requestOpen` of the quit guard, so no other request comes between
+   * two files of one dialog (ADR 072, "One Open action"). The dialog that adds a video from the
+   * export dialog passes `requestVideos` (ADR 024). When it is given, `importPath` is not
+   * called.
+   */
+  openPaths?: (paths: readonly string[]) => Promise<unknown>;
   /**
    * Error reporter function. Defaults to `mediaStore.getState().reportError`.
    */
@@ -78,6 +90,7 @@ export interface OpenMediaFileDialogOptions {
  * - Uses @tauri-apps/plugin-dialog open with multiple: true, directory: false, and localized video filter label.
  * - Cancel is a strict no-op (returns without modifying store or throwing).
  * - Each selected path calls importPath once, one after another, in the order of the selection.
+ * - With openPaths, all the selected paths go to one call of openPaths, in the order of the selection.
  * - Handles dialog rejection without unhandled promises: reports ImportMediaError with code dialogFailed and no detail.
  *
  * @param options Configuration options including required localized filterName.
@@ -102,7 +115,7 @@ export async function openMediaFileDialog(
         filters: [
           {
             name: options.filterName,
-            extensions: [...VIDEO_FILE_EXTENSIONS],
+            extensions: [...(options.extensions ?? VIDEO_FILE_EXTENSIONS)],
           },
         ],
       }),
@@ -120,6 +133,12 @@ export async function openMediaFileDialog(
   const paths = (Array.isArray(selected) ? selected : [selected]).filter(
     (path): path is string => typeof path === "string" && path.trim().length > 0,
   );
+  if (options.openPaths !== undefined) {
+    if (paths.length > 0) {
+      await options.openPaths(paths);
+    }
+    return;
+  }
   // One after another, so the files join the sequence in the order of the selection.
   for (const path of paths) {
     await importPathFn(path);

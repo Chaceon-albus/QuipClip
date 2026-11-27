@@ -16,6 +16,7 @@ describe("presentTitleBarModal", () => {
         exportDialogOpen: false,
         quitPromptOpen: false,
         saveErrorOpen: false,
+        projectOpenOpen: false,
       }),
     ).toEqual({ modalOpen: false, barClass: "", appControlClass: "" });
   });
@@ -31,14 +32,26 @@ describe("presentTitleBarModal", () => {
     for (const exportDialogOpen of [false, true]) {
       for (const quitPromptOpen of [false, true]) {
         for (const saveErrorOpen of [false, true]) {
-          if (!exportDialogOpen && !quitPromptOpen && !saveErrorOpen) {
-            continue;
+          for (const projectOpenOpen of [false, true]) {
+            if (
+              !exportDialogOpen &&
+              !quitPromptOpen &&
+              !saveErrorOpen &&
+              !projectOpenOpen
+            ) {
+              continue;
+            }
+            // The quit prompt opens above the export dialog and the project dialog, and the
+            // dialog of a save that failed can open above them (ADR 072).
+            expect(
+              presentTitleBarModal({
+                exportDialogOpen,
+                quitPromptOpen,
+                saveErrorOpen,
+                projectOpenOpen,
+              }),
+            ).toEqual(open);
           }
-          // The quit prompt opens above the export dialog, and the dialog of a save that failed
-          // can open above both (ADR 072).
-          expect(
-            presentTitleBarModal({ exportDialogOpen, quitPromptOpen, saveErrorOpen }),
-          ).toEqual(open);
         }
       }
     }
@@ -50,11 +63,13 @@ describe("keepsFocusOnPress", () => {
     exportDialogOpen: false,
     quitPromptOpen: false,
     saveErrorOpen: false,
+    projectOpenOpen: false,
   });
   const open = presentTitleBarModal({
     exportDialogOpen: true,
     quitPromptOpen: false,
     saveErrorOpen: false,
+    projectOpenOpen: false,
   });
 
   it("keeps the focus in the dialog for a press in the bar while a dialog is open", () => {

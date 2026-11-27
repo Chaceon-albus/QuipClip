@@ -238,7 +238,8 @@ export interface ExportDialogProps {
   /**
    * Opens the media dialog so the user can import the file again.
    *
-   * Defaults to `openMediaFileDialog`, the same action the File menu uses. Injected so an
+   * Defaults to `openMediaFileDialog` with the filter of videos (ADR 024). The Open action of
+   * the File menu also lists project files (ADR 072), and this dialog does not. Injected so an
    * error panel never reaches into the media store.
    */
   onReimport?: () => void;
@@ -876,9 +877,10 @@ export function ExportDialog({
       return;
     }
     // A file that changed on disk is a new source, so Re-import adds it as a clip (ADR 052).
+    // The dialog takes videos only: a project file typed into it opens no project (ADR 072).
     void openMediaFileDialog({
       filterName: t("dialog.videoFilter"),
-      importPath: quitGuard.requestOpen,
+      openPaths: quitGuard.requestVideos,
     });
   };
 

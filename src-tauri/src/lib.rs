@@ -206,7 +206,7 @@ pub fn run() {
 
     // The default macOS menu with a Quit item that raises `ExitRequested` (ADR 027). The
     // default Quit item raises only `Exit`, which cannot be prevented. The menu also holds the
-    // Open Media and Export items, which send their action to the frontend, and the Settings
+    // Open and Export items, which send their action to the frontend, and the Settings
     // item, which opens the Settings window. See `menu`.
     #[cfg(target_os = "macos")]
     let builder = builder

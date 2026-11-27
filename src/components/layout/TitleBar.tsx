@@ -138,12 +138,17 @@ export function TitleBar() {
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   const quitPromptOpen = useStore(quitGuard.store, (state) => state.prompt !== null);
   const saveErrorOpen = useProjectSaveErrorStore((state) => state.error !== null);
+  const projectOpenOpen = useStore(
+    quitGuard.openStep.store,
+    (state) => state.phase.kind !== "idle",
+  );
   // While a dialog of this window is open, the bar takes the pointer for the window drag and
   // the window buttons, and the File menu and Export do not (`titleBarModal.ts`).
   const modal = presentTitleBarModal({
     exportDialogOpen,
     quitPromptOpen,
     saveErrorOpen,
+    projectOpenOpen,
   });
   // The key names come from the binding table (ADR 026). Save As has no key (ADR 072).
   const shortcutOf = useShortcutLabels();
@@ -213,7 +218,8 @@ export function TitleBar() {
     (exportAction.label.key === "titleBar.action.export" ? null : exportLabelText);
   const exportDescriptionId = useId();
 
-  // The empty preview offers the same action through its Open button.
+  // The Open action (ADR 072). The empty preview offers the same action through its Open
+  // button, and the key and the macOS item run it too.
   const handleOpenMedia = useOpenMediaAction();
 
   // macOS draws its own window buttons, so only the other platforms read the maximized state.

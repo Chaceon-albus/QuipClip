@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
-import { FileVideo } from "lucide-react";
+import { FileText, FileVideo } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { presentDropOverlay } from "./fileDropPresenter";
 import { useFileDropOpen } from "./useFileDropOpen";
 
 /**
@@ -23,17 +24,18 @@ import { useFileDropOpen } from "./useFileDropOpen";
  */
 export function DropOverlay() {
   const { t } = useTranslation();
+  const translate = t as (
+    key: string,
+    options?: Readonly<Record<string, number>>,
+  ) => string;
   const state = useFileDropOpen();
 
-  const supported = state?.kind === "open";
+  const view = state === null ? null : presentDropOverlay(state);
+  const supported = view?.accepted ?? false;
   const message =
-    state === null
-      ? null
-      : supported
-        ? t("fileDrop.release", { count: state.paths.length })
-        : t("fileDrop.unsupported");
-  const note =
-    state?.kind === "open" && state.extraIgnored ? t("fileDrop.othersIgnored") : null;
+    view === null ? null : translate(view.message.key, view.message.values);
+  const note = view?.note == null ? null : translate(view.note.key, view.note.values);
+  const Icon = view?.icon === "project" ? FileText : FileVideo;
 
   return (
     <>
@@ -52,7 +54,7 @@ export function DropOverlay() {
           )}
         >
           <div className="flex max-w-sm flex-col items-center gap-2 rounded-lg border border-border bg-popover px-6 py-4 text-center text-popover-foreground shadow-lg">
-            <FileVideo
+            <Icon
               className={cn("size-8", supported ? "text-primary" : "text-destructive")}
             />
             <p

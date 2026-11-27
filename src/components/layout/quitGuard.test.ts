@@ -11,6 +11,7 @@ import {
   decideQuit,
   isLossListed,
   presentClearPrompt,
+  presentOpenPrompt,
   presentQuitPrompt,
   type ProjectWorkInput,
   type QuitGuardInput,
@@ -563,6 +564,24 @@ describe("presentClearPrompt", () => {
   });
 });
 
+describe("presentOpenPrompt (ADR 072)", () => {
+  it("is the save prompt with its own title and the line that names the file", () => {
+    expect(presentOpenPrompt({ fileName: "interview.qcproj" })).toEqual({
+      title: { key: "quitGuard.open.saveTitle" },
+      lines: [{ key: "quitGuard.project.file", values: { name: "interview.qcproj" } }],
+      confirm: { key: "quitGuard.save" },
+      destructive: false,
+      discard: { key: "quitGuard.dontSave" },
+    });
+  });
+
+  it("says that a project with no file has no file", () => {
+    expect(presentOpenPrompt({ fileName: null }).lines).toEqual([
+      { key: "quitGuard.project.noFile" },
+    ]);
+  });
+});
+
 describe("quit guard catalog messages", () => {
   it("renders the English prompt with the CLDR plural forms", async () => {
     const i18n = await createI18nInstance({ initialPreference: "en", storage: null });
@@ -589,6 +608,9 @@ describe("quit guard catalog messages", () => {
     );
     // The save prompt (ADR 072).
     expect(t("quitGuard.quit.saveTitle")).toBe("Save the project before you quit?");
+    expect(t("quitGuard.open.saveTitle")).toBe(
+      "Save the project before you open another one?",
+    );
     expect(t("quitGuard.clear.saveTitle")).toBe(
       "Save the project before you clear the timeline?",
     );
@@ -630,6 +652,7 @@ describe("quit guard catalog messages", () => {
     // The save prompt (ADR 072). "Project" is 项目.
     expect(t("quitGuard.quit.saveTitle")).toBe("是否在退出前保存项目？");
     expect(t("quitGuard.clear.saveTitle")).toBe("是否在清空时间轴前保存项目？");
+    expect(t("quitGuard.open.saveTitle")).toBe("是否在打开其他项目前保存当前项目？");
     expect(t("quitGuard.project.file", { name: "interview.qcproj" })).toBe(
       "“interview.qcproj”有未保存的更改。",
     );

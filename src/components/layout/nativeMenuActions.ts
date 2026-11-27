@@ -2,7 +2,7 @@
  * The command items of the macOS application menu, and the rule that decides what each one
  * does.
  *
- * `src-tauri/src/menu.rs` builds six command items: Settings, Open Media, Save, Save As, Export
+ * `src-tauri/src/menu.rs` builds six command items: Settings, Open, Save, Save As, Export
  * and Export Frame. A click on each item but Settings, or its key equivalent, sends
  * `BACKEND_EVENTS.MENU_ACTION` to the main window with the name of its action. The name is an action of the key table (ADR 026),
  * and this module plans the same command for it as the window keyboard layer plans for the

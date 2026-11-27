@@ -1,6 +1,6 @@
 /**
  * Pure rules that decide whether a quit, or Clear Timeline, loses work (ADR 027, ADR 052,
- * ADR 072).
+ * ADR 072), and the text of the save prompt of the open of a project (ADR 072).
  *
  * A quit loses the changes of the project that are not saved, the pending In point of the
  * sequence, a live export, the exports that wait in the queue, and an unsaved preset draft. When
@@ -294,6 +294,22 @@ export function presentQuitPrompt(loss: QuitLoss): QuitGuardPromptView {
   return {
     title: { key: "quitGuard.quit.saveTitle" },
     lines: [projectLine(loss.project.fileName), ...otherLossLines(loss)],
+    confirm: { key: "quitGuard.save" },
+    destructive: false,
+    discard: { key: "quitGuard.dontSave" },
+  };
+}
+
+/**
+ * Presents the save prompt of the open of a project (ADR 072, "Before the content is dropped").
+ * The open asks only when the project has changes to save, so the prompt has only the save form:
+ * its own title, the line that names the file of the project or says that the project has no
+ * file, Save as the primary button and "Don't Save" as the discard button.
+ */
+export function presentOpenPrompt(project: ProjectLoss): QuitGuardPromptView {
+  return {
+    title: { key: "quitGuard.open.saveTitle" },
+    lines: [projectLine(project.fileName)],
     confirm: { key: "quitGuard.save" },
     destructive: false,
     discard: { key: "quitGuard.dontSave" },

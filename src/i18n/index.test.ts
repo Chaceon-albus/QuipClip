@@ -1010,7 +1010,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
     expect(instanceWithFallback.language).toBe("fr");
 
     // i18next fallbackLng must kick in and return the English source message
-    expect(instanceWithFallback.t("titleBar.menu.openMedia")).toBe("Open Media…");
+    expect(instanceWithFallback.t("titleBar.menu.openMedia")).toBe("Open…");
     expect(instanceWithFallback.t("app.name")).toBe("QuipClip");
 
     // 2. Control instance without fallbackLng to prove fallbackLng is essential
@@ -1025,7 +1025,7 @@ describe("i18next runtime initialization and fallback behavior", () => {
       },
     });
 
-    // Without fallbackLng, i18next returns the raw key instead of "Open Media…"
+    // Without fallbackLng, i18next returns the raw key instead of "Open…"
     expect(instanceWithoutFallback.t("titleBar.menu.openMedia")).toBe(
       "titleBar.menu.openMedia",
     );
@@ -1042,7 +1042,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
 
     expect(instance.isInitialized).toBe(true);
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open…");
 
     // Setup languageChanged event subscriber
     const languageChangeEvents: string[] = [];
@@ -1058,7 +1058,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
     expect(resolvedZh).toBe("zh-CN");
     expect(getResolvedLanguage(instance)).toBe("zh-CN");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("打开…");
     expect(storage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
     expect(subscriber).toHaveBeenCalledWith("zh-CN");
 
@@ -1069,7 +1069,7 @@ describe("immediate language change, event subscription, and persistence across 
     });
     expect(resolvedEn).toBe("en");
     expect(getResolvedLanguage(instance)).toBe("en");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open…");
     expect(storage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
     expect(subscriber).toHaveBeenCalledWith("en");
 
@@ -1090,7 +1090,7 @@ describe("immediate language change, event subscription, and persistence across 
 
     expect(recreatedInstance.isInitialized).toBe(true);
     expect(recreatedInstance.resolvedLanguage).toBe("zh-CN");
-    expect(recreatedInstance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
+    expect(recreatedInstance.t("titleBar.menu.openMedia")).toBe("打开…");
     expect(getLanguagePreference(storage)).toBe("zh-CN");
   });
 
@@ -1351,7 +1351,7 @@ describe("application shell localization and status bar formatting", () => {
     // TitleBar
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("File");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("Open Media…");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("Open…");
     expect(instance.t("titleBar.menu.export")).toBe("Export…");
     expect(instance.t("titleBar.action.export")).toBe("Export");
     expect(instance.t("titleBar.exportTooltip.openVideoFirst")).toBe(
@@ -1383,7 +1383,10 @@ describe("application shell localization and status bar formatting", () => {
     expect(instance.t("preview.empty.title")).toBe(
       "Open a video to start marking segments",
     );
-    expect(instance.t("preview.empty.openVideo")).toBe("Open Video…");
+    expect(instance.t("preview.empty.openVideo")).toBe("Open…");
+    expect(instance.t("preview.empty.dropHint")).toBe(
+      "or drop a video or a project file here",
+    );
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("Undo");
@@ -1414,6 +1417,7 @@ describe("application shell localization and status bar formatting", () => {
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("Video Files");
+    expect(instance.t("dialog.openFilter")).toBe("Videos and QuipClip Projects");
 
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("Source Media");
@@ -1553,7 +1557,7 @@ describe("application shell localization and status bar formatting", () => {
     // TitleBar
     expect(instance.t("app.name")).toBe("QuipClip");
     expect(instance.t("titleBar.menu.file")).toBe("文件");
-    expect(instance.t("titleBar.menu.openMedia")).toBe("打开媒体…");
+    expect(instance.t("titleBar.menu.openMedia")).toBe("打开…");
     expect(instance.t("titleBar.menu.export")).toBe("导出…");
     expect(instance.t("titleBar.action.export")).toBe("导出");
     expect(instance.t("titleBar.exportTooltip.openVideoFirst")).toBe(
@@ -1583,7 +1587,8 @@ describe("application shell localization and status bar formatting", () => {
 
     // PreviewPane
     expect(instance.t("preview.empty.title")).toBe("打开视频，开始标记片段");
-    expect(instance.t("preview.empty.openVideo")).toBe("打开视频…");
+    expect(instance.t("preview.empty.openVideo")).toBe("打开…");
+    expect(instance.t("preview.empty.dropHint")).toBe("或将视频或项目文件拖到这里");
 
     // TransportBar
     expect(instance.t("transport.action.undo")).toBe("撤销");
@@ -1608,6 +1613,7 @@ describe("application shell localization and status bar formatting", () => {
 
     // Dialog
     expect(instance.t("dialog.videoFilter")).toBe("视频文件");
+    expect(instance.t("dialog.openFilter")).toBe("视频和 QuipClip 项目");
 
     // TimelinePanel
     expect(instance.t("timeline.sourceLane")).toBe("源媒体");

@@ -5,10 +5,13 @@
  * Every close request and every exit request that Rust held back reach `requestQuit`. When
  * nothing would be lost, it calls `confirm_quit` at once. Otherwise it opens the quit prompt.
  * When the project has changes to save, that prompt is the save prompt, with Save, Don't Save
- * and Cancel. A File > Open and a drop reach `requestOpen`, which imports the files as clips and
- * asks nothing, because an import replaces nothing (ADR 052). Clear Timeline reaches
- * `requestClear`, which asks first when the project has a file and is modified, or when the
- * sequence has segments.
+ * and Cancel. The Open action and a drop reach `requestOpen` with all the files of one request
+ * (ADR 072, "One Open action"). Videos join the sequence as clips, and an import asks nothing,
+ * because it replaces nothing (ADR 052). One project file goes to the open step of the page,
+ * which asks with the save prompt of the open when the project has changes to save. A project
+ * file with other videos or project files opens nothing, and a message says why. Clear Timeline
+ * reaches `requestClear`, which asks first when the project has a file and is modified, or when
+ * the sequence has segments.
  *
  * The prompt is in a store, so the one dialog in `QuitGuardDialog` shows it, and any caller
  * can raise it. The decisions themselves are the pure rules in `quitGuard.ts`.
@@ -17,13 +20,21 @@
  *
  * A quit and a Clear Timeline each run as one flow. A flow waits for a save step that runs
  * (ADR 072, "Save"), shows its prompt, waits for the answer, and can run a save step of its own.
- * With no save step running, the first decision is made in the same call. One flow runs at a
- * time:
+ * With no save step running, the first decision is made in the same call. The open of a project
+ * is a flow too, from the moment `requestOpen` gives the project file to the open step until the
+ * open ends. Its save prompt is a part of that flow, and the open step runs the save of its Save
+ * button itself (`confirmDropContent`). One flow runs at a time:
  *
  * - A quit request while a quit flow runs does nothing, so a second close request never stacks a
  *   second dialog. A quit request drops a Clear Timeline flow: that flow then never clears, also
  *   when a save that it started ends later.
- * - Clear Timeline and an import do nothing while a flow runs, and after the quit started.
+ * - A quit request first stops an open of a project that is before its step 8, as Cancel of the
+ *   project dialog does, and it drops the save prompt of an open, which then answers Cancel
+ *   (ADR 072, "The open of a project"). Then it tests the project. So the quit dialog and the
+ *   open never hold two different projects.
+ * - Clear Timeline, an import and the open of a project do nothing while a flow runs, and after
+ *   the quit started. The save prompt of an open answers Cancel at once outside its own open.
+ *   The Open action reads `canOpen` before it shows its file dialog.
  *
  * When the user confirms a quit dialog, the quit reads the losses again. It quits when the
  * dialog listed each loss (`isLossListed`), and it shows the dialog again otherwise. A loss can
@@ -48,16 +59,25 @@ import {
   type ExportQueueState,
 } from "@/features/export";
 import { audioOverrideStore } from "@/features/media/audioOverrideStore";
+import { mediaStore } from "@/features/media/store";
+import { ImportMediaError } from "@/features/media/types";
 import { projectContentOf } from "@/features/project/document";
-import { hasChangesToSaveNow } from "@/features/project/dropContent";
+import {
+  hasChangesToSaveNow,
+  type DropContentAnswer,
+} from "@/features/project/dropContent";
+import { classifyOpenPaths } from "@/features/project/openPaths";
+import { hasProjectExtension } from "@/features/project/paths";
+import type { OpenProjectResult, ProjectOpenStep } from "@/features/project/openStep";
 import { projectSaveStep } from "@/features/project/saveAction";
 import { projectSaveErrorStore } from "@/features/project/saveErrorStore";
 import type { ProjectSaveError, ProjectSaveStep } from "@/features/project/saveStep";
 import { isProjectModified, projectStore } from "@/features/project/store";
-import { importClips } from "@/features/sequence/importClips";
+import { importClips, runInImportLine } from "@/features/sequence/importClips";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import { timelineStore } from "@/features/timeline";
 import { BACKEND_COMMANDS, invokeCommand } from "@/lib/ipc";
+import { createPageOpenStep, whenTrimSettled } from "./projectOpenStep";
 import {
   countQueuedExports,
   decideClear,
@@ -65,6 +85,7 @@ import {
   isLossListed,
   timelineWorkOf,
   type ClearPrompt,
+  type ProjectLoss,
   type QuitGuardInput,
   type QuitLoss,
 } from "./quitGuard";
@@ -72,7 +93,9 @@ import {
 /** The confirmation that the dialog shows, or null when it is closed. */
 export type QuitGuardPrompt =
   | { readonly kind: "quit"; readonly loss: QuitLoss }
-  | { readonly kind: "clear"; readonly change: ClearPrompt };
+  | { readonly kind: "clear"; readonly change: ClearPrompt }
+  /** The save prompt of the open of a project (ADR 072). */
+  | { readonly kind: "open"; readonly project: ProjectLoss };
 
 export interface QuitGuardState {
   readonly prompt: QuitGuardPrompt | null;
@@ -103,6 +126,25 @@ export interface QuitGuardDependencies {
    * `importClips` (ADR 052).
    */
   importPaths?: (paths: readonly string[], index: number | null) => Promise<unknown>;
+  /**
+   * Makes the open step of the page (ADR 072). The guard calls it one time, and passes the
+   * function that shows the save prompt of the open. Defaults to `createPageOpenStep`.
+   */
+  createOpenStep?: (ask: () => Promise<DropContentAnswer>) => ProjectOpenStep;
+  /**
+   * Waits until no released trim of a segment edge waits for its commit (ADR 030). The open of a
+   * project waits for it, as a part of its flow, before it starts the open step, so the trim is
+   * not taken for another dialog and the open is not dropped. Null means that no trim waits, and
+   * the open starts in the same call. Defaults to `whenTrimSettled`.
+   */
+  waitForTrimCommit?: () => Promise<void> | null;
+  /**
+   * Shows the error of an Open action that opened nothing: a project file with other files.
+   * Defaults to the error of the media store, the place of the error of an import. The guard
+   * calls it in a turn of its own in the line of the imports, after each import that runs or
+   * waits, because the report of the media store drops an import in progress.
+   */
+  reportOpenError?: (error: ImportMediaError) => void;
   /**
    * Removes every clip and every segment, as one edit. Defaults to the timeline store. The rule
    * of the project store then closes the project (`installProjectSequenceRule`).
@@ -139,14 +181,42 @@ export interface QuitGuard {
    */
   requestQuit: () => void;
   /**
-   * Imports videos as clips of the sequence (ADR 052): from junction `index`, or at the end for
-   * null or no index. An import replaces nothing, so it asks nothing. Does nothing while a
-   * prompt is open, while a flow runs, or after the quit started.
+   * The open step of the page (ADR 072). The project dialog shows its store, and its buttons
+   * call `locate`, `confirm` and `cancel` of the step.
+   */
+  readonly openStep: ProjectOpenStep;
+  /**
+   * True when `requestOpen` would take a request now: no prompt shows, no flow runs, and the
+   * quit did not start. It changes nothing. The Open action reads it before it shows its file
+   * dialog, and `requestOpen` tests the same again after the dialog.
+   */
+  canOpen: () => boolean;
+  /**
+   * The files of one Open action or one drop, as one request (ADR 072, "One Open action"):
+   *
+   * - No project file: it imports the files as clips of the sequence (ADR 052), from junction
+   *   `index`, or at the end for null or no index. An import replaces nothing, so it asks
+   *   nothing.
+   * - One project file and no video: it opens that project with the open step, and the step
+   *   asks first when the project has changes to save. The index has no effect. The error of a
+   *   save that the save prompt ran shows in the save error dialog. The project dialog shows the
+   *   other errors.
+   * - Each other set with a project file: it opens nothing, and it reports `projectNotAlone`.
+   *
+   * Does nothing while a prompt is open, while a flow runs, or after the quit started. The open
+   * of a project is a flow until it ends.
    */
   requestOpen: (
     paths: string | readonly string[],
     index?: number | null,
   ) => Promise<unknown>;
+  /**
+   * The files of the dialog that adds a video from the export dialog (ADR 024): videos only. A
+   * request with a project file opens nothing and imports nothing, and it reports
+   * `projectNotAlone`. Otherwise it imports the files at the end of the sequence, as
+   * `requestOpen` does. It does nothing in the same cases as `requestOpen`.
+   */
+  requestVideos: (paths: readonly string[]) => Promise<unknown>;
   /**
    * Starts the Clear Timeline flow: it clears the timeline, or first asks when the project has a
    * file and is modified, or when the sequence has segments (ADR 052, ADR 072). Does nothing
@@ -229,7 +299,17 @@ interface ClearFlow {
   saved: boolean;
 }
 
-type Flow = QuitFlow | ClearFlow;
+/**
+ * The open of a project, from the request until the open step ends. `answer` settles the
+ * question of the save prompt while it shows (`confirmDropContent` acts on the answer itself),
+ * and it is null otherwise.
+ */
+interface OpenFlow {
+  readonly kind: "open";
+  answer: ((answer: DropContentAnswer) => void) | null;
+}
+
+type Flow = QuitFlow | ClearFlow | OpenFlow;
 
 export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitGuard {
   const queueStore = dependencies.queueStore ?? exportQueueStore;
@@ -238,6 +318,12 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
   const importPaths =
     dependencies.importPaths ??
     ((paths: readonly string[], index: number | null) => importClips(paths, index));
+  const waitForTrimCommit = dependencies.waitForTrimCommit ?? (() => whenTrimSettled());
+  const reportOpenError =
+    dependencies.reportOpenError ??
+    ((error: ImportMediaError) => {
+      mediaStore.getState().reportError(error);
+    });
   const clearTimeline =
     dependencies.clearTimeline ?? (() => timelineStore.getState().clearTimeline());
   const focusWindow = dependencies.focusWindow ?? focusCurrentWindow;
@@ -261,6 +347,96 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
   // The flow that runs, or null. A step that waits goes on only while its flow is still this
   // value, so a flow that ended or that a quit dropped does nothing more.
   let flow: Flow | null = null;
+
+  /** Settles the save prompt of an open flow with `answer`, when it shows. */
+  function answerOpen(current: OpenFlow, answer: DropContentAnswer): void {
+    const settle = current.answer;
+    current.answer = null;
+    settle?.(answer);
+  }
+
+  /**
+   * Ends the flow that runs, with no other change. The save prompt of an open answers Cancel, so
+   * the open step stops.
+   */
+  function dropFlow(): void {
+    const dropped = flow;
+    flow = null;
+    if (dropped?.kind === "open") {
+      answerOpen(dropped, "cancel");
+    }
+  }
+
+  /** True when no prompt shows, no flow runs, and the quit did not start. */
+  function isFree(): boolean {
+    return !quitting && flow === null && store.getState().prompt === null;
+  }
+
+  /**
+   * The save prompt of the open of a project (ADR 072, "Before the content is dropped"). It
+   * shows only inside the open flow that runs, while no prompt shows and the quit did not start.
+   * Otherwise it answers Cancel at once. It answers the button of the user. The prompt names the
+   * file of the project, or says that the project has no file, at the moment it shows.
+   */
+  function askBeforeOpen(): Promise<DropContentAnswer> {
+    const current = flow;
+    if (
+      quitting ||
+      current?.kind !== "open" ||
+      current.answer !== null ||
+      store.getState().prompt !== null
+    ) {
+      return Promise.resolve("cancel");
+    }
+    return new Promise<DropContentAnswer>((resolve) => {
+      current.answer = resolve;
+      store.setState({
+        prompt: { kind: "open", project: { fileName: readInput().project.fileName } },
+      });
+    });
+  }
+
+  const openStep = (dependencies.createOpenStep ?? createPageOpenStep)(askBeforeOpen);
+
+  /**
+   * Opens one project file with the open step, as an open flow until the step ends. The flow
+   * first waits for a released trim that waits for its commit (`waitForTrimCommit`). The save
+   * step of the page reports a save of the save prompt that failed itself
+   * (`createPageOpenStep`), so a `stopped` result shows nothing more here. The project dialog
+   * shows each other error.
+   */
+  async function openProject(path: string): Promise<OpenProjectResult> {
+    const current: OpenFlow = { kind: "open", answer: null };
+    flow = current;
+    try {
+      // A released trim that waits for its frame delays the open, and does not drop it. The
+      // wait is a part of the flow, so a quit during it drops the flow, and the open does not
+      // start.
+      const trim = waitForTrimCommit();
+      if (trim !== null) {
+        await trim;
+        if (flow !== current) {
+          return { status: "canceled" };
+        }
+      }
+      return await openStep.open(path);
+    } finally {
+      if (flow === current) {
+        flow = null;
+      }
+    }
+  }
+
+  /**
+   * Reports `projectNotAlone` in a turn of its own in the line of the imports, so the report
+   * comes after each import that runs or waits and does not drop it.
+   */
+  function reportNotAlone(): Promise<unknown[]> {
+    return runInImportLine(() => {
+      reportOpenError(new ImportMediaError({ code: "projectNotAlone" }));
+      return Promise.resolve([]);
+    });
+  }
 
   function quit(): void {
     flow = null;
@@ -400,15 +576,25 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
 
   return {
     store,
+    openStep,
+    canOpen: isFree,
 
     requestQuit: () => {
-      if (quitting || flow?.kind === "quit") {
+      if (quitting) {
+        return;
+      }
+      // ADR 072: a quit stops an open that is before step 8 first, as Cancel does. The project
+      // dialog closes, and nothing of the session changes.
+      if (openStep.isOpening()) {
+        openStep.cancel();
+      }
+      if (flow?.kind === "quit") {
         return;
       }
       if (flow !== null) {
-        // The user asked to quit, and the quit prompt takes the place of the clear prompt. The
-        // dropped flow never clears.
-        flow = null;
+        // The user asked to quit, and the quit prompt takes the place of the clear prompt or of
+        // the save prompt of an open. The dropped flow never clears, and the open stops.
+        dropFlow();
         store.setState({ prompt: null });
       }
       const current: QuitFlow = { kind: "quit", confirmed: null };
@@ -419,14 +605,34 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
     requestOpen: (paths, index = null) => {
       // The dialog is modal, so no entry point can reach this while it is open. The test is a
       // guard, so that an import never starts under an unanswered prompt or inside a flow.
-      if (quitting || flow !== null || store.getState().prompt !== null) {
+      if (!isFree()) {
         return Promise.resolve([]);
       }
-      return importPaths(typeof paths === "string" ? [paths] : paths, index);
+      const request = classifyOpenPaths(typeof paths === "string" ? [paths] : paths);
+      switch (request.kind) {
+        case "videos":
+          return importPaths(request.paths, index);
+        case "project":
+          // A project replaces the sequence, so the place of a drop has no effect.
+          return openProject(request.path);
+        case "projectNotAlone":
+          return reportNotAlone();
+      }
+    },
+
+    requestVideos: (paths) => {
+      if (!isFree()) {
+        return Promise.resolve([]);
+      }
+      // The dialog lists only videos. A project file typed into it opens nothing.
+      if (paths.some((path) => path.trim().length > 0 && hasProjectExtension(path))) {
+        return reportNotAlone();
+      }
+      return importPaths(paths, null);
     },
 
     requestClear: () => {
-      if (quitting || flow !== null || store.getState().prompt !== null) {
+      if (!isFree()) {
         return;
       }
       const current: ClearFlow = { kind: "clear", saved: false };
@@ -440,6 +646,12 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       const { prompt, current } = answer;
+      if (prompt.kind === "open" && current.kind === "open") {
+        // Save of the save prompt of an open. The open step runs the save itself, and the open
+        // flow goes on during the write.
+        answerOpen(current, "save");
+        return;
+      }
       if (prompt.kind === "quit" && current.kind === "quit") {
         if (prompt.loss.project === null) {
           // Quit of the plain dialog.
@@ -473,9 +685,10 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       // Only the save prompt has a discard button.
       const isSavePrompt =
         prompt !== null &&
-        (prompt.kind === "quit"
-          ? prompt.loss.project !== null
-          : prompt.change.form === "save");
+        (prompt.kind === "open" ||
+          (prompt.kind === "quit"
+            ? prompt.loss.project !== null
+            : prompt.change.form === "save"));
       if (!isSavePrompt) {
         return;
       }
@@ -484,6 +697,10 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       const { prompt: shown, current } = answer;
+      if (shown.kind === "open" && current.kind === "open") {
+        answerOpen(current, "dontSave");
+        return;
+      }
       if (shown.kind === "quit" && current.kind === "quit") {
         current.confirmed = shown.loss;
         runQuitFlow(current);
@@ -501,6 +718,11 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       store.setState({ prompt: null });
+      if (flow?.kind === "open") {
+        // Cancel of the save prompt of an open: the open step stops, and its flow ends with it.
+        answerOpen(flow, "cancel");
+        return;
+      }
       flow = null;
     },
   };

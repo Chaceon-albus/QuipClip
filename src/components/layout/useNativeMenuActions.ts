@@ -91,7 +91,7 @@ export function runNativeMenuAction(payload: unknown): void {
 }
 
 /**
- * Runs the command items of the macOS application menu that send their action: Open Media, Save,
+ * Runs the command items of the macOS application menu that send their action: Open, Save,
  * Save As, Export and Export Frame. The Settings item opens the Settings window in Rust. Mount it once, in the
  * application shell.
  *

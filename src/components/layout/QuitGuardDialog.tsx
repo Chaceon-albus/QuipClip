@@ -2,17 +2,24 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { fileMenuTrigger } from "./dialogFocusReturn";
 import {
-  presentQuitPrompt,
   presentClearPrompt,
+  presentOpenPrompt,
+  presentQuitPrompt,
   type QuitGuardPromptView,
 } from "./quitGuard";
 import { quitGuard, type QuitGuardPrompt } from "./quitGuardController";
 
 function presentPrompt(prompt: QuitGuardPrompt): QuitGuardPromptView {
-  return prompt.kind === "quit"
-    ? presentQuitPrompt(prompt.loss)
-    : presentClearPrompt(prompt.change);
+  switch (prompt.kind) {
+    case "quit":
+      return presentQuitPrompt(prompt.loss);
+    case "clear":
+      return presentClearPrompt(prompt.change);
+    case "open":
+      return presentOpenPrompt(prompt.project);
+  }
 }
 
 const handleConfirm = () => {
@@ -25,8 +32,9 @@ const handleDiscard = () => {
 
 /**
  * The one dialog of the quit guard: "Quit QuipClip?" before a quit that loses work (ADR 027),
- * the dialog before Clear Timeline (ADR 052), and the save prompt of both (ADR 072), with Save,
- * Don't Save and Cancel. Mount it once, in the application shell.
+ * the dialog before Clear Timeline (ADR 052), the save prompt of both, and the save prompt of the
+ * open of a project (ADR 072), with Save, Don't Save and Cancel. Mount it once, in the
+ * application shell.
  *
  * Cancel takes the focus when the dialog opens, so Enter never confirms by accident. The
  * dialog opens above any other dialog, such as the export dialog, and Cancel returns to that
@@ -85,6 +93,10 @@ export function QuitGuardDialog() {
       }
       // A new prompt in the open dialog gives the focus to Cancel again.
       questionKey={shownPrompt}
+      // A quit prompt can take the place of the project dialog, which then held the focus and is
+      // gone at the close. The focus goes to the File menu trigger of the title bar then, as after
+      // the project dialogs, and not to the document body.
+      fallbackFocus={fileMenuTrigger}
     />
   );
 }

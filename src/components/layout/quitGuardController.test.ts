@@ -10,7 +10,19 @@ import {
   type ExportProgressEvent,
   type ExportSubmission,
 } from "@/features/export";
-import { held } from "@/features/project/projectTestSupport";
+import type { DropContentAnswer } from "@/features/project/dropContent";
+import {
+  createOpenProjectStore,
+  createProjectOpenStep,
+  type OpenProjectResult,
+  type ProjectOpenStep,
+} from "@/features/project/openStep";
+import { held, mediaAt, type Held } from "@/features/project/projectTestSupport";
+import { createMediaStore } from "@/features/media/store";
+import { ImportMediaError, type ImportMediaResult } from "@/features/media/types";
+import { importClips } from "@/features/sequence/importClips";
+import { createTimelineStore } from "@/features/timeline/store";
+import type { LoadProjectResult } from "@/features/project/types";
 import type { ProjectSaveError, ProjectSaveResult } from "@/features/project/saveStep";
 import { projectStore } from "@/features/project/store";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
@@ -28,6 +40,8 @@ import {
   type QuitGuardQueueState,
 } from "./quitGuardController";
 import { createPresetDraft } from "@/features/settings/presetDocument";
+import { createOpenAction } from "./openAction";
+import { reportingSaveStep } from "./projectOpenStep";
 
 function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   return {
@@ -1243,5 +1257,755 @@ describe("the quit prompt with the real export stores", () => {
       enqueuing: 0,
       waiting: ["run-2"],
     });
+  });
+});
+
+/**
+ * A fake open step. `open` holds its answer until the test settles it, and the step counts as
+ * opening until then. `ask` calls the save prompt that the guard gave to the factory.
+ */
+function createOpenStepFake() {
+  let ask: () => Promise<DropContentAnswer> = () => Promise.resolve("cancel");
+  let opening = false;
+  const results: Held<OpenProjectResult>[] = [];
+  const step: ProjectOpenStep = {
+    store: createOpenProjectStore(),
+    open: vi.fn((_path: string) => {
+      opening = true;
+      const answer = held<OpenProjectResult>();
+      results.push(answer);
+      return answer.promise.finally(() => {
+        opening = false;
+      });
+    }),
+    locate: vi.fn(() => Promise.resolve(false)),
+    locateFile: vi.fn(() => Promise.resolve(false)),
+    confirm: vi.fn(() => false),
+    cancel: vi.fn(() => {
+      opening = false;
+    }),
+    isOpening: () => opening,
+  };
+  return {
+    step,
+    createOpenStep: (next: () => Promise<DropContentAnswer>) => {
+      ask = next;
+      return step;
+    },
+    ask: () => ask(),
+    results,
+  };
+}
+
+describe("requestOpen with a project file (ADR 072, One Open action)", () => {
+  it("opens one project file with the open step, and imports nothing", async () => {
+    const open = createOpenStepFake();
+    const { guard, importPaths } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+    });
+
+    const request = guard.requestOpen(["/p/cut.qcproj"], 2);
+    expect(open.step.open).toHaveBeenCalledWith("/p/cut.qcproj");
+    expect(importPaths).not.toHaveBeenCalled();
+    open.results[0]?.resolve({ status: "opened", path: "/p/cut.qcproj" });
+
+    await expect(request).resolves.toEqual({ status: "opened", path: "/p/cut.qcproj" });
+  });
+
+  it("gives the guard the open step that it made", () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(createInput(), { createOpenStep: open.createOpenStep });
+
+    expect(guard.openStep).toBe(open.step);
+  });
+
+  it("opens nothing for a project file with a video, and reports projectNotAlone", async () => {
+    const open = createOpenStepFake();
+    const reportOpenError = vi.fn();
+    const { guard, importPaths } = setup(createInput(), {
+      createOpenStep: open.createOpenStep,
+      reportOpenError,
+    });
+
+    await expect(guard.requestOpen(["/p/cut.qcproj", "/v/a.mp4"])).resolves.toEqual([]);
+
+    expect(open.step.open).not.toHaveBeenCalled();
+    expect(importPaths).not.toHaveBeenCalled();
+    expect(reportOpenError).toHaveBeenCalledTimes(1);
+    expect(reportOpenError.mock.calls[0]?.[0]).toMatchObject({
+      code: "projectNotAlone",
+    });
+  });
+
+  it("opens nothing for two project files", async () => {
+    const open = createOpenStepFake();
+    const reportOpenError = vi.fn();
+    const { guard } = setup(createInput(), {
+      createOpenStep: open.createOpenStep,
+      reportOpenError,
+    });
+
+    await guard.requestOpen(["/p/a.qcproj", "/p/b.qcproj"]);
+
+    expect(open.step.open).not.toHaveBeenCalled();
+    expect(reportOpenError).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report the save error of a stopped open: the save step of the page did", async () => {
+    // `createPageOpenStep` gives the open step a save step that reports a failed save itself,
+    // so a second report here would show the error two times.
+    const open = createOpenStepFake();
+    const { guard, reportSaveError } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+    });
+
+    const request = guard.requestOpen("/p/cut.qcproj");
+    open.results[0]?.resolve({ status: "stopped", saveError: SAVE_ERROR });
+    await request;
+
+    expect(reportSaveError).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing more for each other result", async () => {
+    const open = createOpenStepFake();
+    const { guard, reportSaveError } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+    });
+    const results: OpenProjectResult[] = [
+      { status: "stopped", saveError: null },
+      { status: "canceled" },
+      { status: "blocked" },
+      { status: "failed", error: { kind: "entriesDiffer", entryIds: ["a", "b"] } },
+    ];
+    for (const [index, result] of results.entries()) {
+      const request = guard.requestOpen("/p/cut.qcproj");
+      open.results[index]?.resolve(result);
+      await request;
+    }
+
+    expect(reportSaveError).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toBeNull();
+  });
+
+  it("opens nothing while a prompt is open, or while a flow runs", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(WITH_SEGMENTS, { createOpenStep: open.createOpenStep });
+
+    guard.requestClear();
+    await guard.requestOpen("/p/cut.qcproj");
+    guard.cancel();
+    guard.requestQuit();
+    guard.confirm();
+    await guard.requestOpen("/p/cut.qcproj");
+
+    expect(open.step.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("the open of a project is a flow of the guard (ADR 072)", () => {
+  it("takes no Clear Timeline, no import and no second open until the open ends", async () => {
+    const open = createOpenStepFake();
+    const { guard, importPaths, clearTimeline } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+    });
+
+    const request = guard.requestOpen("/p/cut.qcproj");
+    expect(guard.canOpen()).toBe(false);
+    guard.requestClear();
+    await guard.requestOpen("/v/a.mp4");
+    await guard.requestOpen("/p/other.qcproj");
+
+    expect(clearTimeline).not.toHaveBeenCalled();
+    expect(importPaths).not.toHaveBeenCalled();
+    expect(open.step.open).toHaveBeenCalledTimes(1);
+    expect(guard.store.getState().prompt).toBeNull();
+
+    open.results[0]?.resolve({ status: "canceled" });
+    await request;
+    expect(guard.canOpen()).toBe(true);
+    guard.requestClear();
+    expect(guard.store.getState().prompt?.kind).toBe("clear");
+  });
+
+  it("ends when the open fails or opens, as when it is canceled", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(createInput(), { createOpenStep: open.createOpenStep });
+
+    const first = guard.requestOpen("/p/cut.qcproj");
+    open.results[0]?.resolve({ status: "opened", path: "/p/cut.qcproj" });
+    await first;
+    expect(guard.canOpen()).toBe(true);
+
+    const second = guard.requestOpen("/p/cut.qcproj");
+    open.results[1]?.resolve({
+      status: "failed",
+      error: { kind: "entriesDiffer", entryIds: ["a", "b"] },
+    });
+    await second;
+    expect(guard.canOpen()).toBe(true);
+  });
+});
+
+describe("canOpen", () => {
+  it("is true while no prompt shows, no flow runs and the quit did not start", () => {
+    const { guard } = setup(WITH_SEGMENTS);
+    expect(guard.canOpen()).toBe(true);
+  });
+
+  it("is false while a prompt shows, while a flow waits, and after the quit started", () => {
+    const shown = setup(WITH_SEGMENTS);
+    shown.guard.requestClear();
+    expect(shown.guard.canOpen()).toBe(false);
+
+    const waiting = setup(WITH_SEGMENTS);
+    waiting.saveStep.run();
+    waiting.guard.requestQuit();
+    expect(waiting.guard.store.getState().prompt).toBeNull();
+    expect(waiting.guard.canOpen()).toBe(false);
+
+    const quitting = setup(createInput());
+    quitting.guard.requestQuit();
+    expect(quitting.guard.canOpen()).toBe(false);
+  });
+
+  it("keeps the Open action from showing its file dialog while a quit waits for a save", async () => {
+    const { guard, saveStep, importPaths } = setup(WITH_SEGMENTS);
+    saveStep.run();
+    guard.requestQuit();
+    const openDialog = vi.fn().mockResolvedValue(["/v/a.mp4"]);
+
+    await createOpenAction({
+      canOpen: () => guard.canOpen(),
+      requestOpen: (paths) => guard.requestOpen(paths),
+      openDialog,
+      filterName: () => "Open",
+    })();
+
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(importPaths).not.toHaveBeenCalled();
+  });
+});
+
+describe("requestVideos (ADR 024, ADR 072)", () => {
+  it("imports the videos at the end of the sequence", async () => {
+    const { guard, importPaths } = setup(WITH_SEGMENTS);
+
+    await expect(guard.requestVideos(["/v/a.mp4", "/v/b.mp4"])).resolves.toBe(
+      IMPORT_RESULT,
+    );
+
+    expect(importPaths).toHaveBeenCalledWith(["/v/a.mp4", "/v/b.mp4"], null);
+  });
+
+  it("opens no project and imports nothing for a request with a project file", async () => {
+    const open = createOpenStepFake();
+    const reportOpenError = vi.fn();
+    const { guard, importPaths } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      reportOpenError,
+    });
+
+    await guard.requestVideos(["/p/cut.qcproj"]);
+    await guard.requestVideos(["/v/a.mp4", "/p/CUT.QCPROJ"]);
+
+    expect(open.step.open).not.toHaveBeenCalled();
+    expect(importPaths).not.toHaveBeenCalled();
+    expect(reportOpenError).toHaveBeenCalledTimes(2);
+    expect(reportOpenError.mock.calls[0]?.[0]).toMatchObject({
+      code: "projectNotAlone",
+    });
+  });
+
+  it("imports nothing while a prompt is open", async () => {
+    const { guard, importPaths } = setup(WITH_SEGMENTS);
+
+    guard.requestClear();
+    await guard.requestVideos(["/v/a.mp4"]);
+
+    expect(importPaths).not.toHaveBeenCalled();
+  });
+});
+
+describe("the message of a mixed request in the line of the imports (ADR 072)", () => {
+  it("does not stop an import that runs: the clip joins, and the error shows after it", async () => {
+    const slow = held<ImportMediaResult>();
+    const media = createMediaStore({
+      importMedia: (path) =>
+        path === "/v/slow.mp4"
+          ? slow.promise
+          : Promise.reject(new ImportMediaError({ code: "pathNotFound" })),
+    });
+    const timeline = createTimelineStore();
+    const { guard } = setup(createInput(), {
+      importPaths: (paths, index) => importClips(paths, index, { media, timeline }),
+      reportOpenError: (error) => {
+        media.getState().reportError(error);
+      },
+    });
+
+    const importing = guard.requestOpen(["/v/slow.mp4"]);
+    const mixed = guard.requestOpen(["/p/cut.qcproj", "/v/a.mp4"]);
+    await flush();
+    expect(media.getState().error).toBeNull();
+
+    slow.resolve(mediaAt("/v/slow.mp4"));
+    await importing;
+    expect(timeline.getState().clips).toHaveLength(1);
+    expect(media.getState().error).toBeNull();
+
+    await mixed;
+    expect(timeline.getState().clips).toHaveLength(1);
+    expect(media.getState().error?.code).toBe("projectNotAlone");
+  });
+});
+
+describe("the save prompt of the open of a project (ADR 072)", () => {
+  /** A guard whose open flow runs, over a fake open step. */
+  function openRunning(input: QuitGuardInput) {
+    const open = createOpenStepFake();
+    const context = setup(input, { createOpenStep: open.createOpenStep });
+    void context.guard.requestOpen("/p/other.qcproj");
+    return { ...context, open };
+  }
+
+  it("shows the save form with the name of the file of the project", () => {
+    const { guard, open } = openRunning(MODIFIED_FILE);
+
+    void open.ask();
+
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "open",
+      project: { fileName: "cut.qcproj" },
+    });
+  });
+
+  it("says that a project with no file has no file", () => {
+    const { guard, open } = openRunning(WITH_SEGMENTS);
+
+    void open.ask();
+
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "open",
+      project: { fileName: null },
+    });
+  });
+
+  it("answers Cancel at once outside an open flow", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(MODIFIED_FILE, { createOpenStep: open.createOpenStep });
+
+    await expect(open.ask()).resolves.toBe("cancel");
+    expect(guard.store.getState().prompt).toBeNull();
+  });
+
+  it("answers Save, and runs no save itself: the open step runs it", async () => {
+    const { guard, saveStep, open } = openRunning(MODIFIED_FILE);
+
+    const answer = open.ask();
+    const shown = guard.store.getState().prompt ?? undefined;
+    guard.confirm();
+    // Radix sends a dismissal after the button. It changes nothing.
+    guard.cancel(shown);
+
+    await expect(answer).resolves.toBe("save");
+    expect(saveStep.save).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toBeNull();
+    // The open flow goes on during the write.
+    expect(guard.canOpen()).toBe(false);
+  });
+
+  it("answers Don't Save and Cancel", async () => {
+    const { guard, open } = openRunning(MODIFIED_FILE);
+
+    const first = open.ask();
+    guard.discard();
+    await expect(first).resolves.toBe("dontSave");
+
+    const second = open.ask();
+    guard.cancel();
+    await expect(second).resolves.toBe("cancel");
+    expect(guard.store.getState().prompt).toBeNull();
+  });
+
+  it("shows again after an answer, as when changes are left after the save", async () => {
+    const { guard, open } = openRunning(MODIFIED_FILE);
+
+    const first = open.ask();
+    guard.confirm();
+    await first;
+    void open.ask();
+
+    expect(guard.store.getState().prompt?.kind).toBe("open");
+  });
+
+  it("answers Cancel at once while another prompt shows", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(MODIFIED_FILE, { createOpenStep: open.createOpenStep });
+
+    guard.requestClear();
+    const shown = guard.store.getState().prompt;
+
+    await expect(open.ask()).resolves.toBe("cancel");
+    expect(guard.store.getState().prompt).toBe(shown);
+  });
+
+  it("answers Cancel at once after the quit started", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(createInput(), { createOpenStep: open.createOpenStep });
+
+    guard.requestQuit();
+
+    await expect(open.ask()).resolves.toBe("cancel");
+    expect(guard.store.getState().prompt).toBeNull();
+  });
+
+  it("starts no import and no Clear Timeline while it shows", async () => {
+    const { guard, importPaths, clearTimeline, open } = openRunning(MODIFIED_FILE);
+
+    void open.ask();
+    await guard.requestOpen("/v/a.mp4");
+    guard.requestClear();
+
+    expect(importPaths).not.toHaveBeenCalled();
+    expect(clearTimeline).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("open");
+  });
+});
+
+describe("a quit stops an open (ADR 072, The open of a project)", () => {
+  it("cancels an open that is before step 8, and then tests the project", () => {
+    const open = createOpenStepFake();
+    const { guard, confirmQuit } = setup(createInput(), {
+      createOpenStep: open.createOpenStep,
+    });
+
+    void guard.requestOpen("/p/cut.qcproj");
+    guard.requestQuit();
+
+    expect(open.step.cancel).toHaveBeenCalledTimes(1);
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cancel when no open runs", () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(WITH_SEGMENTS, { createOpenStep: open.createOpenStep });
+
+    guard.requestQuit();
+
+    expect(open.step.cancel).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+
+  it("drops the save prompt of an open, which answers Cancel, and shows the quit prompt", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(MODIFIED_FILE, { createOpenStep: open.createOpenStep });
+
+    void guard.requestOpen("/p/other.qcproj");
+    const answer = open.ask();
+    guard.requestQuit();
+
+    await expect(answer).resolves.toBe("cancel");
+    expect(open.step.cancel).toHaveBeenCalledTimes(1);
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "quit",
+      loss: decideQuit(MODIFIED_FILE).loss,
+    });
+  });
+});
+
+describe("the open of a project with the real open step", () => {
+  /** A guard over a real open step whose commands the test holds. */
+  function realOpen(input: QuitGuardInput, changes: boolean) {
+    const loading = held<LoadProjectResult>();
+    const loadProject = vi.fn((_path: string) => loading.promise);
+    const openSave = vi.fn(() => Promise.resolve(SAVED));
+    let hasChanges = changes;
+    const context = setup(input, {
+      createOpenStep: (ask) =>
+        createProjectOpenStep({
+          saveStep: { save: openSave, whenIdle: () => Promise.resolve() },
+          ask,
+          isOtherDialogOpen: () => false,
+          pickFile: () => Promise.resolve(null),
+          staleExportOpenStep: () => undefined,
+          hasChangesToSave: () => hasChanges,
+          loadProject,
+          runInImportLine: (task) => task(),
+        }),
+    });
+    return {
+      ...context,
+      loadProject,
+      openSave,
+      setChanges: (next: boolean) => {
+        hasChanges = next;
+      },
+    };
+  }
+
+  it("stops the open while it reads the file, closes the project dialog, and then asks", async () => {
+    const { guard, loadProject } = realOpen(WITH_SEGMENTS, false);
+
+    const request = guard.requestOpen("/p/cut.qcproj");
+    await flush();
+    expect(loadProject).toHaveBeenCalledWith("/p/cut.qcproj");
+    expect(guard.openStep.store.getState().phase.kind).toBe("loading");
+
+    guard.requestQuit();
+
+    expect(guard.openStep.isOpening()).toBe(false);
+    expect(guard.openStep.store.getState().phase.kind).toBe("idle");
+    await expect(request).resolves.toEqual({ status: "canceled" });
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "quit",
+      loss: decideQuit(WITH_SEGMENTS).loss,
+    });
+  });
+
+  it("drops its save prompt on a quit, and the open reads no file", async () => {
+    const { guard, loadProject, openSave } = realOpen(MODIFIED_FILE, true);
+
+    const request = guard.requestOpen("/p/other.qcproj");
+    await flush();
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "open",
+      project: { fileName: "cut.qcproj" },
+    });
+
+    guard.requestQuit();
+    await flush();
+
+    await expect(request).resolves.toEqual({ status: "canceled" });
+    expect(loadProject).not.toHaveBeenCalled();
+    expect(openSave).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+
+  it("saves on Save of its prompt, and then reads the project file", async () => {
+    const context = realOpen(MODIFIED_FILE, true);
+    const { guard, loadProject, openSave } = context;
+
+    void guard.requestOpen("/p/other.qcproj");
+    await flush();
+    context.setChanges(false);
+    guard.confirm();
+    await flush();
+
+    expect(openSave).toHaveBeenCalledWith("save");
+    expect(loadProject).toHaveBeenCalledWith("/p/other.qcproj");
+    expect(guard.store.getState().prompt).toBeNull();
+    guard.openStep.cancel();
+  });
+
+  it("reads the project file after Don't Save, and stops after Cancel", async () => {
+    const first = realOpen(MODIFIED_FILE, true);
+    void first.guard.requestOpen("/p/other.qcproj");
+    await flush();
+    first.guard.discard();
+    await flush();
+    expect(first.loadProject).toHaveBeenCalledTimes(1);
+    first.guard.openStep.cancel();
+
+    const second = realOpen(MODIFIED_FILE, true);
+    const request = second.guard.requestOpen("/p/other.qcproj");
+    await flush();
+    second.guard.cancel();
+    await expect(request).resolves.toEqual({ status: "stopped", saveError: null });
+    expect(second.loadProject).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A save step whose write the test ends, as the real step: `save` starts one step, a second
+ * request while it runs answers `busy`, and `whenIdle` waits for the promise that `save` gave, so
+ * a reaction that the caller of `save` registered runs before the wait goes on.
+ */
+function createDeferredSaveStep() {
+  let pending: Held<ProjectSaveResult> | null = null;
+  let running: Promise<ProjectSaveResult> | null = null;
+  const save = vi.fn((_mode: "save" | "saveAs"): Promise<ProjectSaveResult> => {
+    if (running !== null) {
+      return Promise.resolve({ status: "busy" });
+    }
+    const answer = held<ProjectSaveResult>();
+    pending = answer;
+    running = answer.promise.finally(() => {
+      running = null;
+    });
+    return running;
+  });
+  return {
+    save,
+    isRunning: () => running !== null,
+    whenIdle: async () => {
+      while (running !== null) {
+        await running.catch(() => undefined);
+      }
+    },
+    /** Ends the write that runs with `result`. */
+    finish: (result: ProjectSaveResult) => {
+      pending?.resolve(result);
+      pending = null;
+    },
+  };
+}
+
+describe("the open of a project with one save step for the guard and the open", () => {
+  /**
+   * A guard and a real open step over one deferred save step. The open step gets the save step
+   * as the page gives it, which reports a failed save itself (`reportingSaveStep`).
+   */
+  function sharedSave(input: QuitGuardInput) {
+    const saveStep = createDeferredSaveStep();
+    const loading = held<LoadProjectResult>();
+    const loadProject = vi.fn((_path: string) => loading.promise);
+    let hasChanges = true;
+    let report: (error: ProjectSaveError) => void = () => undefined;
+    const context = setup(input, {
+      saveStep,
+      createOpenStep: (ask) =>
+        createProjectOpenStep({
+          saveStep: reportingSaveStep(saveStep, (error) => {
+            report(error);
+          }),
+          ask,
+          isOtherDialogOpen: () => false,
+          pickFile: () => Promise.resolve(null),
+          staleExportOpenStep: () => undefined,
+          hasChangesToSave: () => hasChanges,
+          loadProject,
+          runInImportLine: (task) => task(),
+        }),
+    });
+    report = context.reportSaveError;
+    return {
+      ...context,
+      saveStep,
+      loadProject,
+      setChanges: (next: boolean) => {
+        hasChanges = next;
+      },
+    };
+  }
+
+  it("takes no Clear Timeline during the write of Save, and the open goes on after it", async () => {
+    const context = sharedSave(MODIFIED_FILE);
+    const { guard, saveStep, loadProject, clearTimeline } = context;
+
+    const request = guard.requestOpen("/p/other.qcproj");
+    await flush();
+    expect(guard.store.getState().prompt?.kind).toBe("open");
+    guard.confirm();
+    await flush();
+    expect(saveStep.save).toHaveBeenCalledTimes(1);
+    expect(saveStep.isRunning()).toBe(true);
+
+    guard.requestClear();
+    await guard.requestOpen("/v/a.mp4");
+    expect(guard.store.getState().prompt).toBeNull();
+    expect(clearTimeline).not.toHaveBeenCalled();
+
+    context.setChanges(false);
+    saveStep.finish(SAVED);
+    await flush();
+
+    expect(loadProject).toHaveBeenCalledWith("/p/other.qcproj");
+    expect(guard.openStep.store.getState().phase.kind).toBe("loading");
+    guard.openStep.cancel();
+    await expect(request).resolves.toEqual({ status: "canceled" });
+    expect(guard.canOpen()).toBe(true);
+  });
+
+  it("reports a failed write one time when a quit stopped the open during it, and does not quit", async () => {
+    const { guard, saveStep, loadProject, confirmQuit, reportSaveError } =
+      sharedSave(MODIFIED_FILE);
+
+    const request = guard.requestOpen("/p/other.qcproj");
+    await flush();
+    guard.confirm();
+    await flush();
+    expect(saveStep.isRunning()).toBe(true);
+
+    guard.requestQuit();
+    await expect(request).resolves.toEqual({ status: "canceled" });
+    expect(guard.store.getState().prompt).toBeNull();
+
+    saveStep.finish({ status: "failed", error: SAVE_ERROR });
+    await flush();
+
+    expect(reportSaveError).toHaveBeenCalledTimes(1);
+    expect(reportSaveError).toHaveBeenCalledWith(SAVE_ERROR);
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toBeNull();
+    expect(loadProject).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed write one time when the open stops on it", async () => {
+    const { guard, saveStep, reportSaveError } = sharedSave(MODIFIED_FILE);
+
+    const request = guard.requestOpen("/p/other.qcproj");
+    await flush();
+    guard.confirm();
+    await flush();
+    saveStep.finish({ status: "failed", error: SAVE_ERROR });
+
+    await expect(request).resolves.toEqual({
+      status: "stopped",
+      saveError: SAVE_ERROR,
+    });
+    expect(reportSaveError).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the open of a project waits for a trim that waits to commit (ADR 030, ADR 072)", () => {
+  it("starts the open step only after the trim settled", async () => {
+    const open = createOpenStepFake();
+    const trim = held<void>();
+    const { guard } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      waitForTrimCommit: () => trim.promise,
+    });
+
+    const request = guard.requestOpen("/p/cut.qcproj");
+    await flush();
+    expect(open.step.open).not.toHaveBeenCalled();
+    // The wait is a part of the open flow.
+    expect(guard.canOpen()).toBe(false);
+
+    trim.resolve();
+    await flush();
+    expect(open.step.open).toHaveBeenCalledWith("/p/cut.qcproj");
+    open.results[0]?.resolve({ status: "opened", path: "/p/cut.qcproj" });
+    await expect(request).resolves.toEqual({ status: "opened", path: "/p/cut.qcproj" });
+  });
+
+  it("starts the open step in the same call while no trim waits", () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      waitForTrimCommit: () => null,
+    });
+
+    void guard.requestOpen("/p/cut.qcproj");
+
+    expect(open.step.open).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the open on a quit during the wait, and the open step never starts", async () => {
+    const open = createOpenStepFake();
+    const trim = held<void>();
+    const { guard } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      waitForTrimCommit: () => trim.promise,
+    });
+
+    const request = guard.requestOpen("/p/cut.qcproj");
+    guard.requestQuit();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+
+    trim.resolve();
+    await expect(request).resolves.toEqual({ status: "canceled" });
+    expect(open.step.open).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
   });
 });

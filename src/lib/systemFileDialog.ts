@@ -7,8 +7,9 @@
  * second dialog behind the first one, or change the sequence under an open save dialog.
  *
  * Each caller that opens such a dialog runs the call of the dialog through
- * `trackSystemFileDialog`: the Open Media dialog, the save dialog of a project, the save dialog of
- * an export and the save dialog of Export Frame.
+ * `trackSystemFileDialog`: the dialog of the Open action, the dialog of "Locate…" of the project
+ * dialog, the save dialog of a project, the save dialog of an export and the save dialog of Export
+ * Frame.
  */
 
 let openCount = 0;
