@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SHORTCUT_ACTIONS,
   SHORTCUT_BINDINGS,
+  UNBOUND_SHORTCUT_ACTIONS,
   bindingAppliesToPlatform,
   findShortcutBinding,
   getShortcutPlatform,
@@ -376,7 +377,10 @@ describe("shortcutBindings", () => {
       ).toBeNull();
     });
 
-    it("gives every action at least one binding on each platform", () => {
+    // ADR 067: an action can have no binding. The table names each such action, and every other
+    // action has a binding on each platform.
+    it("gives every action at least one binding on each platform, but the unbound ones", () => {
+      const unbound = new Set<ShortcutAction>(UNBOUND_SHORTCUT_ACTIONS);
       for (const platform of PLATFORMS) {
         const bound = new Set(
           SHORTCUT_BINDINGS.filter((b) => bindingAppliesToPlatform(b, platform)).map(
@@ -384,8 +388,18 @@ describe("shortcutBindings", () => {
           ),
         );
         for (const action of SHORTCUT_ACTIONS) {
-          expect(bound.has(action)).toBe(true);
+          expect(bound.has(action)).toBe(!unbound.has(action));
         }
+      }
+    });
+
+    it("names Export Selected Segments as the one action with no binding (ADR 067)", () => {
+      expect(UNBOUND_SHORTCUT_ACTIONS).toStrictEqual(["exportSelectedSegments"]);
+      for (const action of UNBOUND_SHORTCUT_ACTIONS) {
+        expect(SHORTCUT_ACTIONS).toContain(action);
+        expect(SHORTCUT_BINDINGS.some((binding) => binding.action === action)).toBe(
+          false,
+        );
       }
     });
 

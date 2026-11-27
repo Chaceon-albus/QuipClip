@@ -13,6 +13,7 @@
 import { useEffect, useMemo } from "react";
 import { useStore } from "zustand";
 import { measurementScope } from "@/components/layout/exportFlowController";
+import { WHOLE_EXPORT_SCOPE, type ExportScope } from "@/features/export/scope";
 import type { ExportStreams } from "@/features/export/types";
 import {
   loudnessRequestId,
@@ -40,12 +41,14 @@ const selectAttachedMedia = (state: MediaStoreState) => state.media;
 
 /**
  * The scope of the measurement of the export that the step would start now, from the stores that
- * the export flow reads (`measurementScope`), or null without a preset or a request.
+ * the export flow reads (`measurementScope`), or null without a preset or a request. It measures
+ * the pieces of the segments of `exportScope`, the scope of the setup step (ADR 067).
  */
 export function useMeasurementScope(
   preset: Preset | null,
   streams: ExportStreams,
   skipSourceRevisionCheck: boolean,
+  exportScope: ExportScope = WHOLE_EXPORT_SCOPE,
 ): LoudnessScope | null {
   const clips = useTimelineStore(selectClips);
   const sequenceSegments = useTimelineStore(selectSequenceSegments);
@@ -71,8 +74,10 @@ export function useMeasurementScope(
             streams,
             skipSourceRevisionCheck,
             audioOverrides,
+            scope: exportScope,
           }),
     [
+      exportScope,
       clips,
       sequenceSegments,
       sequenceSources,

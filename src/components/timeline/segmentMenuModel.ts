@@ -50,6 +50,7 @@ export const SEGMENT_MENU_ACTIONS = [
   "goToSegmentOut",
   "playSegment",
   "renameSegment",
+  "exportSelectedSegments",
   "deleteSegment",
 ] as const satisfies readonly ShortcutAction[];
 
@@ -61,16 +62,24 @@ export const SEGMENT_MENU_LABEL_KEYS = {
   goToSegmentOut: "timeline.segmentMenu.goToOut",
   playSegment: "timeline.segmentMenu.playSegment",
   renameSegment: "timeline.segmentMenu.renameSegment",
+  exportSelectedSegments: "timeline.segmentMenu.exportSegment",
   deleteSegment: "timeline.segmentMenu.deleteSegment",
 } as const satisfies Record<SegmentMenuAction, string>;
 
 /**
- * The items that open a dialog (ADR 065). Such an item runs after the menu closes, when both its
- * choice and the end of the menu arrived (`menuDialogHandoff.ts`), so the dialog never opens over
- * the menu.
+ * The items that open a dialog (ADR 065, ADR 067). Such an item runs after the menu closes, when
+ * both its choice and the end of the menu arrived (`menuDialogHandoff.ts`), so the dialog never
+ * opens over the menu.
  */
 export const SEGMENT_MENU_DIALOG_ACTIONS: ReadonlySet<SegmentMenuAction> =
-  new Set<SegmentMenuAction>(["renameSegment"]);
+  new Set<SegmentMenuAction>(["renameSegment", "exportSelectedSegments"]);
+
+/**
+ * The actions that act on a selection of several segments (ADR 045, ADR 067). Every other item is
+ * disabled in the menu of a selection.
+ */
+export const SEGMENT_MENU_SELECTION_ACTIONS: ReadonlySet<SegmentMenuAction> =
+  new Set<SegmentMenuAction>(["exportSelectedSegments", "deleteSegment"]);
 
 /**
  * The label of Play Segment while a segment plays toward its stop. The key `/` then pauses, as
@@ -86,14 +95,23 @@ export const SEGMENT_MENU_PAUSE_LABEL_KEY = "transport.action.pause";
 export const SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY =
   "timeline.segmentMenu.deleteSelectedSegments";
 
+/**
+ * The label of Export Selected Segments in the menu of a selection of several segments
+ * (ADR 067): "Export N Segments…". It takes the number of the segments as `count`.
+ */
+export const SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY =
+  "timeline.segmentMenu.exportSelectedSegments";
+
 export type SegmentMenuLabelKey =
   | (typeof SEGMENT_MENU_LABEL_KEYS)[keyof typeof SEGMENT_MENU_LABEL_KEYS]
   | typeof SEGMENT_MENU_PAUSE_LABEL_KEY
-  | typeof SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY;
+  | typeof SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY
+  | typeof SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY;
 
 /**
- * The values of a label (`SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY`). A type alias and not an
- * interface, so it fits the options of `i18n.t`, which have an index signature.
+ * The values of a label (`SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY`,
+ * `SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY`). A type alias and not an interface, so it fits the
+ * options of `i18n.t`, which have an index signature.
  */
 export type SegmentMenuLabelValues = { readonly count: number };
 
@@ -103,10 +121,10 @@ export type SegmentMenuLabelValues = { readonly count: number };
  * - `segment`: the segment of the request. The request selected it alone, so it is current, and
  *   every item acts on it.
  * - `selection`: a selection of several segments that holds the segment of the request. The
- *   request kept the selection, and nothing is current. Only Delete Segment acts on it. Go to In,
- *   Go to Out and Rename need one current segment (ADR 065). Play Segment would play the segment
- *   at the playhead, which the menu did not name. So these items are disabled, also while a
- *   segment plays.
+ *   request kept the selection, and nothing is current. Only Delete Segment and Export Selected
+ *   Segments act on it (`SEGMENT_MENU_SELECTION_ACTIONS`, ADR 067). Go to In, Go to Out and Rename
+ *   need one current segment (ADR 065). Play Segment would play the segment at the playhead,
+ *   which the menu did not name. So these items are disabled, also while a segment plays.
  */
 export type SegmentMenuTarget =
   | { readonly kind: "segment"; readonly segmentId: string }
@@ -160,8 +178,8 @@ export type SegmentMenuSlot =
 /**
  * The menu, from top to bottom. The two moves of the playhead come first, then Play Segment.
  * Rename… follows between two separators (ADR 065): it edits the segment but keeps its frames.
- * Delete Segment is last, and a separator keeps it apart, as native menus keep a destructive
- * item apart.
+ * Export Segment… comes directly after Rename… (ADR 067). Delete Segment is last, and a separator
+ * keeps it apart, as native menus keep a destructive item apart.
  *
  * The menu holds only the actions whose operand is the segment itself. Mark In, Mark Out and
  * Split act at the playhead, which a right-click does not move (ADR 007), so they would act at a
@@ -174,6 +192,7 @@ export const SEGMENT_MENU_LAYOUT: readonly SegmentMenuSlot[] = [
   { kind: "item", action: "playSegment" },
   { kind: "separator" },
   { kind: "item", action: "renameSegment" },
+  { kind: "item", action: "exportSelectedSegments" },
   { kind: "separator" },
   { kind: "item", action: "deleteSegment" },
 ];
@@ -215,8 +234,12 @@ export type SegmentMenuEntry = SegmentMenuItem | { readonly kind: "separator" };
  *   opens, and the key names the current segment (ADR 007), so while that holds the item and the
  *   key act on the same segment. If another segment is current when the item runs, the item runs
  *   nothing, because the menu named the segment under the pointer.
- * - For a selection, only Delete Segment acts, and the selection must still hold exactly the
- *   segments of the menu. Delete then removes those segments, as its key does (ADR 045).
+ * - For a selection, only Delete Segment and Export Selected Segments act
+ *   (`SEGMENT_MENU_SELECTION_ACTIONS`), and the selection must still hold exactly the segments of
+ *   the menu. Delete then removes those segments, as its key does (ADR 045), and Export Selected
+ *   Segments exports them (ADR 067).
+ * - Export Selected Segments names the selected segments. For one segment, the selection must
+ *   still be that segment alone, so the command names exactly the segment of the menu (ADR 067).
  *
  * With `shownKind`, the command must also be of the kind that the item showed. The state can
  * change while the menu is open: a segment that plays can reach its stop, and Play Segment then
@@ -231,11 +254,15 @@ export function planSegmentMenuCommand(
   shownKind?: ShortcutCommand["kind"] | null,
 ): ShortcutCommand | null {
   if (target.kind === "segment") {
-    if (snapshot.timeline.currentSegmentId !== target.segmentId) {
+    if (
+      snapshot.timeline.currentSegmentId !== target.segmentId ||
+      (action === "exportSelectedSegments" &&
+        !isSelectionOf(snapshot, [target.segmentId]))
+    ) {
       return null;
     }
   } else if (
-    action !== "deleteSegment" ||
+    !SEGMENT_MENU_SELECTION_ACTIONS.has(action) ||
     !isSelectionOf(snapshot, target.segmentIds)
   ) {
     return null;
@@ -276,9 +303,10 @@ function escapeMnemonic(label: string): string {
  *
  * An item is enabled when its command plans (`planSegmentMenuCommand`), from the same snapshot
  * that the item would run on at that moment. While a segment plays, Play Segment takes the label
- * Pause, because its key then pauses. In the menu of a selection, Delete Segment names the
- * number of the segments, and the other items keep their labels and are disabled, so the menu
- * keeps its shape.
+ * Pause, because its key then pauses. In the menu of a selection, Delete Segment and Export
+ * Selected Segments name the number of the segments, and the other items keep their labels and
+ * are disabled, so the menu keeps its shape. An action with no binding, such as Export Selected
+ * Segments, has no key in its item (ADR 067).
  */
 export function buildSegmentMenuEntries(
   input: SegmentMenuInput,
@@ -292,6 +320,13 @@ export function buildSegmentMenuEntries(
     let label: string;
     if (slot.action === "deleteSegment" && target.kind === "selection") {
       label = translate(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, {
+        count: target.segmentIds.length,
+      });
+    } else if (
+      slot.action === "exportSelectedSegments" &&
+      target.kind === "selection"
+    ) {
+      label = translate(SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY, {
         count: target.segmentIds.length,
       });
     } else {

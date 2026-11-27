@@ -403,6 +403,7 @@ const EXPECTED_RECOVERY: Record<ExportErrorCode, ExportErrorRecovery> = {
   // A share that stopped answering during preparation can answer again.
   preparationTimedOut: BACK,
   noSegments: null,
+  selectedSegmentsChanged: null,
   tooManySegments: null,
   // The segments must come nearer to the order of their source on the timeline.
   piecesOutOfOrder: null,

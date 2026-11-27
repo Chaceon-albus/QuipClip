@@ -22,6 +22,13 @@ import type { AudioProbe, ImportMediaResult, MediaProbe } from "@/features/media
 import { getNominalFrameRate } from "@/features/playback/store";
 import type { SequenceSource } from "@/features/timeline/sequence";
 import type { Clip, Rational, SequenceSegment } from "@/types/project";
+import {
+  narrowToExportScope,
+  resolveExportScope,
+  WHOLE_EXPORT_SCOPE,
+  type ExportScope,
+  type ExportScopeInput,
+} from "./scope";
 import { sequenceExportPieces } from "./sequenceRequest";
 
 /** The fields of a probe that the summary reads. */
@@ -216,4 +223,36 @@ export function exportSourceFacts(input: ExportSourceFactsInput): ExportSourceFa
     copyProbe: only === undefined ? null : probeOf(only.sourceId),
     copySegmentCount: pieces.length,
   };
+}
+
+/** The inputs of `exportScopeSourceFacts`. */
+export interface ExportScopeSourceFactsInput extends Pick<
+  ExportSourceFactsInput,
+  "probe" | "imported" | "audioOverrides"
+> {
+  /** The timeline, with all its segments. */
+  readonly timeline: ExportScopeInput;
+  /** The scope of the setup step (ADR 067). */
+  readonly scope: ExportScope;
+}
+
+/**
+ * The facts of the sources of an export of `scope` (ADR 067): `exportSourceFacts` of the segments
+ * of the scope only (`narrowToExportScope`). So the summary, the streams and the test of the Copy
+ * audio switch read the sources and the pieces of the scope. A scope of one segment with one piece
+ * can copy its audio, also when the timeline has more segments.
+ */
+export function exportScopeSourceFacts(
+  input: ExportScopeSourceFactsInput,
+): ExportSourceFacts {
+  const scoped = narrowToExportScope(input.timeline, input.scope);
+  return exportSourceFacts({
+    probe: input.probe,
+    segmentCount: resolveExportScope(scoped, WHOLE_EXPORT_SCOPE).segments.length,
+    clips: scoped.clips,
+    segments: scoped.sequenceSegments,
+    sources: scoped.sequenceSources,
+    imported: input.imported,
+    audioOverrides: input.audioOverrides,
+  });
 }

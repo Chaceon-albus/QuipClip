@@ -56,6 +56,7 @@ export const SHORTCUT_ACTIONS = [
   "redo",
   "openMedia",
   "export",
+  "exportSelectedSegments",
   "exportFrame",
   "openSettings",
   "zoomIn",
@@ -64,6 +65,18 @@ export const SHORTCUT_ACTIONS = [
 ] as const;
 
 export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
+
+/**
+ * The actions with no binding (ADR 067). No key runs such an action, and it has no accelerator,
+ * no key in a label and no `aria-keyshortcuts` value. Its plan and its run are those of the key
+ * table, as for every other action. Every action that this list does not name has a binding on
+ * each platform.
+ *
+ * - `exportSelectedSegments`: Export Selected Segments, an item of the menu of a segment.
+ */
+export const UNBOUND_SHORTCUT_ACTIONS = [
+  "exportSelectedSegments",
+] as const satisfies readonly ShortcutAction[];
 
 /** A key that `event.key` names with a word, and `" "` for the space bar (ADR 021). */
 export type ShortcutNamedKey =

@@ -496,6 +496,13 @@ export const en = {
       // number of the selected segments, always 2 or more.
       deleteSelectedSegments_one: "Delete {{count}} Segment",
       deleteSelectedSegments_other: "Delete {{count}} Segments",
+      // Opens the export dialog for this segment only (ADR 067). The ellipsis says that the item
+      // opens a dialog.
+      exportSegment: "Export Segment…",
+      // The same item in the menu of a selection of several segments (ADR 067). `count` is the
+      // number of the selected segments, always 2 or more.
+      exportSelectedSegments_one: "Export {{count}} Segment…",
+      exportSelectedSegments_other: "Export {{count}} Segments…",
     },
     // The dialog that gives a segment a name (ADR 065). The user opens it with F2 or with the
     // Rename… item of the segment menu. `field` is the label of the one text field. `hint` is
@@ -1124,6 +1131,15 @@ export const en = {
       summary_one: "Export {{count}} segment from {{fileName}} · {{duration}} in total",
       summary_other:
         "Export {{count}} segments from {{fileName}} · {{duration}} in total",
+      // The first line of the setup step when the export takes selected segments of more than
+      // one file (ADR 067), so the line names no file. {{duration}} is as in `summary`.
+      summaryNoFile_one: "Export {{count}} segment · {{duration}} in total",
+      summaryNoFile_other: "Export {{count}} segments · {{duration}} in total",
+      // The line under the first line when the export takes only the selected segments
+      // (ADR 067). {{count}} is the number of the selected segments, and {{total}} is the number
+      // of all the segments of the export.
+      selectedSegments_one: "Only the selected segment: {{count}} of {{total}}",
+      selectedSegments_other: "Only the selected segments: {{count}} of {{total}}",
       presetLabel: "Preset",
       qualityLabel: "Quality",
       value: "{{value}}",
@@ -1306,6 +1322,9 @@ export const en = {
     preparationTimedOut:
       "QuipClip could not prepare the export in time. A drive or a network share might not be answering.",
     noSegments: "No segments are marked for export.",
+    // An export of selected segments, after one of the segments changed (ADR 067).
+    selectedSegmentsChanged:
+      "The selected segments changed, so nothing was exported. Select the segments again.",
     tooManySegments: "Too many segments are marked for export.",
     // {{limit}} is the largest number of parts that one export joins. A segment that crosses
     // the end of a clip gives one part for each clip.

@@ -153,6 +153,22 @@ export function canExportMedia(hasMedia: boolean): boolean {
 }
 
 /**
+ * Export Selected Segments (ADR 067) needs what Export needs, one or more selected segments
+ * (ADR 045), and no import that runs. An import that ends can insert a clip and split a segment
+ * (ADR 052), which would change what the list of the action names.
+ *
+ * @param selectedSegmentCount The number of the selected segments of the active source.
+ * @param isImporting True while an import loads.
+ */
+export function canExportSelectedSegments(
+  hasMedia: boolean,
+  selectedSegmentCount: number,
+  isImporting: boolean,
+): boolean {
+  return canExportMedia(hasMedia) && selectedSegmentCount >= 1 && !isImporting;
+}
+
+/**
  * Zoom In needs open media and a zoom factor below the ceiling. The zoom is view state over
  * the extent of the probe (ADR 007), so it does not need an attached element. An
  * indeterminate extent has a ceiling of 1, so it cannot zoom.

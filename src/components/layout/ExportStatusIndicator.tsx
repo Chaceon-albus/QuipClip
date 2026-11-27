@@ -25,8 +25,9 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
-  exportComposeStore,
+  exportPanelStore,
   selectExportOutputAction,
+  showExportStoreTarget,
   useExportOutputActionStore,
   useExportPanelStore,
   useExportQueueStore,
@@ -127,9 +128,12 @@ export function ExportStatusIndicator() {
   const panelOpen = useExportPanelStore((state) => state.open);
   const showPanel = useExportPanelStore((state) => state.show);
   // The indicator shows the run of the export store, so the dialog opens on the run view. It
-  // never opens on the setup of an export for the queue that the user left (ADR 049).
+  // never opens on the setup of an export for the queue that the user left (ADR 049). When the
+  // export store is idle, the dialog shows its setup step with no open step, and that setup step
+  // has the whole export (`showExportStoreTarget`, ADR 067). The open state is read at the call,
+  // because Show File calls this after an await.
   const show = () => {
-    exportComposeStore.getState().exit();
+    showExportStoreTarget({ dialogOpen: exportPanelStore.getState().open });
     showPanel();
   };
   const reset = useExportStore((state) => state.reset);

@@ -257,6 +257,7 @@ describe("Export Types & Wire Constants", () => {
         "sourceRevisionChanged",
         "presetNotFound",
         "outputAlreadyQueued",
+        "selectedSegmentsChanged",
       ]);
     });
 

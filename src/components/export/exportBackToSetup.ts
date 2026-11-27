@@ -19,7 +19,15 @@
  * The module has no React and no document, so the tests need neither.
  */
 
-import type { ExportState } from "@/features/export";
+import {
+  ExportError,
+  scopeOfBack,
+  type BackTarget,
+  type ExportScope,
+  type ExportScopeStore,
+  type ExportScopeTarget,
+  type ExportState,
+} from "@/features/export";
 
 /** The fields of the export store that decide whether Back is offered. */
 export type BackToSetupInput = Pick<ExportState, "status" | "tracking">;
@@ -42,10 +50,90 @@ export function canGoBackToSetup({ status, tracking }: BackToSetupInput): boolea
   return status === "failed" && !tracking;
 }
 
-/** The two calls through which the open step changes the dialog and the store. */
+/**
+ * The scope of the open step that Back runs (ADR 067). Back calls it at the press, before it
+ * resets the result or the failure of `target`, which keeps the scope.
+ *
+ * The scope is the scope that the result or the failure kept (`scopeOfBack`), and the setup step
+ * takes it from the moment of the press. After the error of an open step, which keeps no scope,
+ * it is the scope of the setup step, which that open step set and which stays.
+ *
+ * `scopeTarget` is the flow target whose result or failure Back leaves: the store that the dialog
+ * shows. Back reads and writes only the setup scope of that target.
+ */
+export function takeBackScope(
+  target: BackTarget,
+  scopeStore: ExportScopeStore,
+  scopeTarget: ExportScopeTarget,
+): ExportScope {
+  const scopes = scopeStore.getState();
+  const scope = scopeOfBack(target, scopes) ?? scopes.setup[scopeTarget];
+  scopes.publishSetup(scopeTarget, scope);
+  return scope;
+}
+
+/** What Back needs from the dialog (`goBackToSetup`). */
+export interface BackToSetupSteps {
+  /** The result or the failure that Back leaves, read at the press. */
+  readonly target: BackTarget;
+  readonly scopeStore: ExportScopeStore;
+  /** The flow target whose result or failure Back leaves: the store that the dialog shows. */
+  readonly scopeTarget: ExportScopeTarget;
+  /** True when `scope` is valid now, with the timeline as it is (`isExportScopeValidNow`). */
+  readonly isScopeValid: (scope: ExportScope) => boolean;
+  /** Resets the store that the dialog shows: the export store, or the compose store. */
+  readonly reset: () => void;
+  /** Reports to the store that the dialog shows. */
+  readonly reportError: (error: unknown) => void;
+  /** Runs the open step again with the scope (`runOpenStepAgain`). */
+  readonly openStep: (scope: ExportScope) => void;
+}
+
+/**
+ * Back from a result or a failure (ADR 024, ADR 067).
+ *
+ * It takes the scope that the result or the failure kept (`takeBackScope`), and resets the store
+ * that the dialog shows. It then tests the scope itself, apart from the open step and from the
+ * guard that lets one open step run at a time for a file (`runExportFlow`): that guard can return
+ * before an open step tests anything. A list that is no longer valid reports
+ * `selectedSegmentsChanged` to the store that the dialog shows, so the setup step does not show,
+ * and no open step starts. Otherwise the open step runs with the scope, and tests it again when it
+ * shows.
+ *
+ * @returns The scope of the setup step from the press on.
+ */
+export function goBackToSetup(steps: BackToSetupSteps): ExportScope {
+  const scope = takeBackScope(steps.target, steps.scopeStore, steps.scopeTarget);
+  steps.reset();
+  if (!steps.isScopeValid(scope)) {
+    steps.reportError(new ExportError({ code: "selectedSegmentsChanged" }));
+    return scope;
+  }
+  steps.openStep(scope);
+  return scope;
+}
+
+/**
+ * The scope of the open step that "Export anyway" runs (ADR 024, ADR 067): the scope of the setup
+ * step of `scopeTarget`, the target whose confirmation the user answers, which stays. The step
+ * closes the confirmation and opens the setup step again for the same export.
+ */
+export function exportAnywayScope(
+  scopeStore: ExportScopeStore,
+  scopeTarget: ExportScopeTarget,
+): ExportScope {
+  return scopeStore.getState().setup[scopeTarget];
+}
+
+/** The calls through which the open step changes the dialog and the stores. */
 export interface OpenStepEffects {
   setModalOpen: (open: boolean) => void;
   reportError: (error: unknown) => void;
+  /**
+   * Sets the scope of the setup step (ADR 067), when the step shows the setup step or the error
+   * of its checks. Absent means the default of the export flow controller.
+   */
+  publishScope?: (scope: ExportScope) => void;
 }
 
 /**
@@ -81,7 +169,7 @@ export function guardOpenStepEffects(
   isCurrent: () => boolean,
   effects: OpenStepEffects,
 ): OpenStepEffects {
-  return {
+  const guarded: OpenStepEffects = {
     setModalOpen: (open) => {
       if (isCurrent()) {
         effects.setModalOpen(open);
@@ -93,6 +181,15 @@ export function guardOpenStepEffects(
       }
     },
   };
+  const { publishScope } = effects;
+  if (publishScope !== undefined) {
+    guarded.publishScope = (scope) => {
+      if (isCurrent()) {
+        publishScope(scope);
+      }
+    };
+  }
+  return guarded;
 }
 
 /** What `runOpenStepAgain` needs from the dialog. */

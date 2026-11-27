@@ -1874,11 +1874,12 @@ describe("planShortcutCommand", () => {
       expect(
         planShortcutCommand("renameSegment", { ...current, isTrimArmed: true }),
       ).toBeNull();
-      // Export Order opens a modal dialog too (ADR 066), and Export Frame the save dialog of
-      // the system (ADR 069).
+      // Export Order and Export Selected Segments open a modal dialog too (ADR 066, ADR 067),
+      // and Export Frame the save dialog of the system (ADR 069).
       expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual([
         "renameSegment",
         "exportOrder",
+        "exportSelectedSegments",
         "exportFrame",
       ]);
       // An armed press locks no other action: a click on an edge still seeks at its release.
@@ -2052,6 +2053,119 @@ describe("planShortcutCommand", () => {
       ).toBeNull();
       expect(TRIM_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
       expect(EDGE_PRESS_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
+    });
+  });
+
+  describe("Export Selected Segments (ADR 067)", () => {
+    const three = [
+      segment("a", "0", "3000"),
+      segment("b", "3000", "6000"),
+      segment("c", "6000", "9000"),
+    ];
+
+    it("names the selected segments of the active source, in array order", () => {
+      const several = createSnapshot({
+        timeline: {
+          segments: three,
+          currentSegmentId: null,
+          selectedSegmentIds: ["c", "a"],
+        },
+      });
+      expect(planShortcutCommand("exportSelectedSegments", several)).toEqual({
+        kind: "exportSelectedSegments",
+        segmentIds: ["a", "c"],
+      });
+      const one = createSnapshot({
+        timeline: { segments: three, currentSegmentId: "b" },
+      });
+      expect(planShortcutCommand("exportSelectedSegments", one)).toEqual({
+        kind: "exportSelectedSegments",
+        segmentIds: ["b"],
+      });
+    });
+
+    it("needs a selected segment", () => {
+      const none = createSnapshot({
+        timeline: { segments: three, currentSegmentId: null, selectedSegmentIds: [] },
+      });
+      expect(planShortcutCommand("exportSelectedSegments", none)).toBeNull();
+      // An id that names no segment of the active source is no selected segment.
+      const stale = createSnapshot({
+        timeline: {
+          segments: three,
+          currentSegmentId: null,
+          selectedSegmentIds: ["x"],
+        },
+      });
+      expect(planShortcutCommand("exportSelectedSegments", stale)).toBeNull();
+    });
+
+    it("needs what Export needs: open media, and no attached element or frame", () => {
+      const selected = { segments: three, currentSegmentId: "a" };
+      expect(
+        planShortcutCommand(
+          "exportSelectedSegments",
+          createSnapshot({ timeline: selected, probe: null }),
+        ),
+      ).toBeNull();
+      expect(planShortcutCommand("export", createSnapshot({ probe: null }))).toBeNull();
+      const loading = createSnapshot({
+        timeline: selected,
+        playback: {
+          isAttached: false,
+          isReady: false,
+          calibrationStatus: "calibrating",
+          presentedFrame: null,
+        },
+      });
+      expect(planShortcutCommand("exportSelectedSegments", loading)).toEqual({
+        kind: "exportSelectedSegments",
+        segmentIds: ["a"],
+      });
+    });
+
+    it("does nothing while an import runs", () => {
+      const snapshot = createSnapshot({
+        timeline: { segments: three, currentSegmentId: "a" },
+      });
+      expect(
+        planShortcutCommand("exportSelectedSegments", {
+          ...snapshot,
+          isImporting: true,
+        }),
+      ).toBeNull();
+      expect(
+        planShortcutCommand("exportSelectedSegments", {
+          ...snapshot,
+          isImporting: false,
+        }),
+      ).not.toBeNull();
+      // Export itself does not read the import.
+      expect(planShortcutCommand("export", { ...snapshot, isImporting: true })).toEqual(
+        {
+          kind: "export",
+        },
+      );
+    });
+
+    it("does nothing while a trim drags or an edge press is armed", () => {
+      const snapshot = createSnapshot({
+        timeline: { segments: three, currentSegmentId: "a" },
+      });
+      expect(
+        planShortcutCommand("exportSelectedSegments", {
+          ...snapshot,
+          isTrimDragging: true,
+        }),
+      ).toBeNull();
+      expect(
+        planShortcutCommand("exportSelectedSegments", {
+          ...snapshot,
+          isTrimArmed: true,
+        }),
+      ).toBeNull();
+      expect(TRIM_LOCKED_ACTIONS.has("exportSelectedSegments")).toBe(true);
+      expect(EDGE_PRESS_LOCKED_ACTIONS.has("exportSelectedSegments")).toBe(true);
     });
   });
 
@@ -2302,6 +2416,7 @@ describe("planShortcutCommand", () => {
           "deleteSegment",
           "exportFrame",
           "exportOrder",
+          "exportSelectedSegments",
           "markIn",
           "markOut",
           "redo",

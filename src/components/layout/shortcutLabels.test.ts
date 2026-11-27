@@ -4,10 +4,15 @@ import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   SHORTCUT_ACTIONS,
   SHORTCUT_BINDINGS,
+  UNBOUND_SHORTCUT_ACTIONS,
   bindingAppliesToPlatform,
+  type ShortcutAction,
   type ShortcutBinding,
   type ShortcutPlatform,
 } from "./shortcutBindings";
+
+/** The actions with no binding (ADR 067). */
+const UNBOUND = new Set<ShortcutAction>(UNBOUND_SHORTCUT_ACTIONS);
 import {
   SHORTCUT_KEY_NAME_KEYS,
   ariaKeyShortcutsFor,
@@ -575,12 +580,27 @@ describe("shortcutLabels", () => {
   });
 
   describe("shortcutFor", () => {
-    it("finds a binding for every action on both platforms", () => {
+    // ADR 067: every action has a binding but those that the table names as unbound.
+    it("finds a binding for every action on both platforms, but the unbound ones", () => {
       for (const action of SHORTCUT_ACTIONS) {
+        if (UNBOUND.has(action)) {
+          continue;
+        }
         for (const platform of PLATFORMS) {
           const binding = shortcutFor(action, platform);
           expect(binding?.action).toBe(action);
           expect(binding && bindingAppliesToPlatform(binding, platform)).toBe(true);
+        }
+      }
+    });
+
+    it("gives an unbound action no key, no chip and no aria-keyshortcuts value (ADR 067)", () => {
+      for (const action of UNBOUND) {
+        for (const platform of PLATFORMS) {
+          expect(shortcutFor(action, platform)).toBeNull();
+          expect(shortcutsFor(action, platform)).toStrictEqual([]);
+          expect(chipShortcutsFor(action, platform)).toStrictEqual([]);
+          expect(ariaKeyShortcutsFor(action, platform)).toBeUndefined();
         }
       }
     });
@@ -650,7 +670,10 @@ describe("shortcutLabels", () => {
     it("returns the same binding as the first entry of shortcutsFor", () => {
       for (const action of SHORTCUT_ACTIONS) {
         for (const platform of PLATFORMS) {
-          expect(shortcutFor(action, platform)).toBe(shortcutsFor(action, platform)[0]);
+          // An unbound action has no first entry, and its binding is null (ADR 067).
+          expect(shortcutFor(action, platform)).toBe(
+            shortcutsFor(action, platform)[0] ?? null,
+          );
         }
       }
     });
@@ -755,7 +778,9 @@ describe("shortcutLabels", () => {
         if (
           action === "zoomToFit" ||
           action === "stepBackOneFrame" ||
-          action === "stepForwardOneFrame"
+          action === "stepForwardOneFrame" ||
+          // An unbound action has no chip (ADR 067), which the test above states.
+          UNBOUND.has(action)
         ) {
           continue;
         }

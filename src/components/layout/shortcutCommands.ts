@@ -43,6 +43,7 @@ import type { Pts, Segment } from "@/types/project";
 import {
   canDeleteSegment,
   canExportMedia,
+  canExportSelectedSegments,
   canFitTimeline,
   canOpenExportOrder,
   canRedoEdit,
@@ -161,6 +162,11 @@ export interface ShortcutSnapshot {
    * Export Frame does nothing.
    */
   readonly frameExport?: FrameExportSnapshot;
+  /**
+   * True while an import loads (the status `loading` of the media store), the fact that a file
+   * drop also reads. Export Selected Segments does nothing then (ADR 067). Absent means false.
+   */
+  readonly isImporting?: boolean;
 }
 
 /**
@@ -168,8 +174,9 @@ export interface ShortcutSnapshot {
  * still owns their key presses. An edit during the drag would change the segment under the
  * trim, and the limit, the snap and the preview of the trim would then be stale. Select All
  * would move the selection away from the segment that the trim selected (ADR 045). Rename
- * Segment and Export Order would open a modal dialog while the drag holds the pointer (ADR 065,
- * ADR 066). Export Frame does nothing during a trim (ADR 069).
+ * Segment, Export Order and Export Selected Segments would open a modal dialog while the drag
+ * holds the pointer (ADR 065, ADR 066, ADR 067). Export Frame does nothing during a trim
+ * (ADR 069).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
   [
@@ -178,6 +185,7 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
     "deleteSegment",
     "renameSegment",
     "exportOrder",
+    "exportSelectedSegments",
     "exportFrame",
     "selectAllSegments",
     "undo",
@@ -187,12 +195,18 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
 
 /**
  * The actions that also do nothing while an edge press is armed (`isTrimArmed`), before it
- * becomes a trim. Rename Segment and Export Order open a modal dialog, and a move of the held
- * pointer behind it would start a trim while the dialog is open (ADR 065, ADR 066). Export
- * Frame opens the save dialog of the system, which is modal in the same way (ADR 069).
+ * becomes a trim. Rename Segment, Export Order and Export Selected Segments open a modal dialog,
+ * and a move of the held pointer behind it would start a trim while the dialog is open (ADR 065,
+ * ADR 066, ADR 067). Export Frame opens the save dialog of the system, which is modal in the same
+ * way (ADR 069).
  */
 export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
-  new Set<ShortcutAction>(["renameSegment", "exportOrder", "exportFrame"]);
+  new Set<ShortcutAction>([
+    "renameSegment",
+    "exportOrder",
+    "exportSelectedSegments",
+    "exportFrame",
+  ]);
 
 /**
  * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
@@ -264,6 +278,14 @@ export type ShortcutCommand =
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
   | { readonly kind: "export" }
+  | {
+      readonly kind: "exportSelectedSegments";
+      /**
+       * The selected segments of the active source, in array order (ADR 067). The run makes the
+       * list of the export of them, with its record, from these ids.
+       */
+      readonly segmentIds: readonly string[];
+    }
   | {
       readonly kind: "exportFrame";
       /** The facts that the plan recorded when it accepted the action (ADR 069). */
@@ -1004,6 +1026,23 @@ export function planShortcutCommand(
 
     case "export":
       return canExportMedia(hasMedia) ? { kind: "export" } : null;
+
+    case "exportSelectedSegments": {
+      // ADR 067. The condition of Export, the selected segments, and no import, with the trim
+      // locks above. It reads no frame and no time, so it does not read the preview.
+      const segmentIds = findSelectedSegments(
+        timeline.segments,
+        timeline.selectedSegmentIds,
+        timeline.sourceId,
+      ).map(({ segment }) => segment.id);
+      return canExportSelectedSegments(
+        hasMedia,
+        segmentIds.length,
+        snapshot.isImporting === true,
+      )
+        ? { kind: "exportSelectedSegments", segmentIds }
+        : null;
+    }
 
     case "exportFrame": {
       // ADR 069. The plan reads the playback store of the attached element, and records the

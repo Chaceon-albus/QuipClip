@@ -96,10 +96,12 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
   const facts: {
     isTrimDragging: boolean;
     isOverlayOpen: boolean;
+    isImporting: boolean;
     playback: ShortcutSnapshot["playback"];
   } = {
     isTrimDragging: false,
     isOverlayOpen: false,
+    isImporting: false,
     // The frame at 5 s is on screen, outside both segments.
     playback: {
       isAttached: true,
@@ -118,6 +120,7 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     timeline: timeline.getState(),
     viewport: { zoom: 1, maxZoom: 8 },
     isTrimDragging: facts.isTrimDragging,
+    isImporting: facts.isImporting,
   });
   const runCommand = vi.fn<(command: ShortcutCommand) => void>();
   // The state listens on a fake window with a manual clock, for the fallback of a popup that
@@ -278,6 +281,8 @@ describe("createSegmentContextMenu", () => {
         "Play Segment\t/",
         "|",
         "Rename…\tF2",
+        // ADR 067: the item has no binding, so no key after a tab.
+        "Export Segment…",
         "|",
         "Delete Segment\tDelete",
       ]);
@@ -620,6 +625,93 @@ describe("createSegmentContextMenu", () => {
         selectedSegmentIds: ["c"],
         currentSegmentId: "c",
       });
+    });
+  });
+
+  describe("Export Segment… (ADR 067)", () => {
+    it("exports the segment of the menu after the menu closes, when the choice came first", async () => {
+      const harness = createHarness();
+      const menuOpenAtRun: boolean[] = [];
+      harness.runCommand.mockImplementation(() => {
+        menuOpenAtRun.push(harness.menuState.isOpen());
+      });
+      const closed = harness.open();
+      const show = harness.lastShow();
+      expect(itemOf(show.entries, "exportSelectedSegments")).toMatchObject({
+        text: "Export Segment…",
+        enabled: true,
+        commandKind: "exportSelectedSegments",
+      });
+      show.popup();
+      show.select("exportSelectedSegments");
+      expect(harness.runCommand).not.toHaveBeenCalled();
+      show.close();
+      await closed;
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
+        kind: "exportSelectedSegments",
+        segmentIds: ["b"],
+      });
+      expect(menuOpenAtRun).toStrictEqual([false]);
+    });
+
+    it("exports the selection of the menu after the menu closes", async () => {
+      const harness = createHarness();
+      harness.timeline.getState().selectAllSegments();
+      const closed = harness.open({ segmentId: "a" });
+      const show = harness.lastShow();
+      expect(itemOf(show.entries, "exportSelectedSegments")).toMatchObject({
+        text: "Export 2 Segments…",
+        enabled: true,
+      });
+      show.select("exportSelectedSegments");
+      show.close();
+      await closed;
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
+        kind: "exportSelectedSegments",
+        segmentIds: ["a", "b"],
+      });
+    });
+
+    it("runs nothing when the selection is no longer the one of the menu as the menu ends", async () => {
+      const harness = createHarness();
+      harness.timeline.getState().selectAllSegments();
+      const closed = harness.open({ segmentId: "a" });
+      const show = harness.lastShow();
+      show.select("exportSelectedSegments");
+      harness.timeline.getState().toggleSegmentSelection("a");
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("runs nothing for one segment when another segment became current", async () => {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.select("exportSelectedSegments");
+      harness.timeline.getState().selectSegment("a");
+      show.close();
+      await closed;
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    });
+
+    it("is disabled while an import runs, and runs nothing when an import starts before the menu ends", async () => {
+      const harness = createHarness();
+      harness.facts.isImporting = true;
+      void harness.open();
+      expect(itemOf(harness.lastShow().entries, "exportSelectedSegments").enabled).toBe(
+        false,
+      );
+      harness.lastShow().close();
+
+      const next = createHarness();
+      const closed = next.open();
+      const show = next.lastShow();
+      show.select("exportSelectedSegments");
+      next.facts.isImporting = true;
+      show.close();
+      await closed;
+      expect(next.runCommand).not.toHaveBeenCalled();
     });
   });
 

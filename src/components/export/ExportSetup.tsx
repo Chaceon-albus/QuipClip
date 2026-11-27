@@ -1,6 +1,5 @@
 import {
   Fragment,
-  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -42,6 +41,12 @@ import {
 } from "@/features/settings/presetTestStore";
 import { useTimecodePreference } from "@/features/settings/timecodePreference";
 import {
+  narrowToExportScope,
+  resolveExportScope,
+  type ExportScope,
+} from "@/features/export/scope";
+import { useMediaStore, type MediaStoreState } from "@/features/media";
+import {
   selectExportSegmentCount,
   totalExportSegments,
   useTimelineStore,
@@ -60,9 +65,11 @@ import { usePresetTestAction } from "@/components/settings/usePresetTestAction";
 import { presentSettingsError } from "@/components/settings/settingsErrorPresenter";
 import type { Preset } from "@/features/settings/types";
 import {
-  activeSourceDurationTicks,
   decideSetupAutoTest,
   presentExportSummarySentence,
+  presentScopeSourceFile,
+  presentSelectedSegmentsLine,
+  scopeDurationTicks,
   presentPresetOptions,
   presentPresetSummary,
   presentSetupEncoderMark,
@@ -96,10 +103,12 @@ import {
 import type { LoudnessMeasurement } from "@/features/loudness/store";
 import { useSequenceMediaStore } from "@/features/sequence";
 
-// One bigint or null, which compare by value, so the step renders again only when the exact
-// duration changes.
-const selectActiveSourceDurationTicks = (state: TimelineStoreState) =>
-  activeSourceDurationTicks(state.segments, state.sourceId);
+const selectClips = (state: TimelineStoreState) => state.clips;
+const selectSequenceSegments = (state: TimelineStoreState) => state.sequenceSegments;
+const selectSequenceSources = (state: TimelineStoreState) => state.sequenceSources;
+const selectSegments = (state: TimelineStoreState) => state.segments;
+const selectSourceId = (state: TimelineStoreState) => state.sourceId;
+const selectImportedSources = (state: MediaStoreState) => state.sources;
 
 type Translate = (key: string, options?: Record<string, string | number>) => string;
 
@@ -725,6 +734,11 @@ function PresetOption({
 }
 
 export interface ExportSetupProps {
+  /**
+   * The scope of the setup step (ADR 067). Each fact of the step reads the segments of the scope:
+   * the count, the total duration, the sources, the streams, the summary and the size estimate.
+   */
+  scope: ExportScope;
   /** Identifier of the currently chosen preset, or null if no preset is available. */
   selectedPresetId: string | null;
   /** Currently selected preset, or null if absent. */
@@ -823,6 +837,7 @@ export interface ExportSetupProps {
  *   exists for it. The result does not block the export.
  */
 export function ExportSetup({
+  scope,
   selectedPresetId,
   selectedPreset,
   blocker,
@@ -860,31 +875,79 @@ export function ExportSetup({
     () => resolveTimecodeDisplay(timecodePreference, probe),
     [timecodePreference, probe],
   );
-  const segmentCount = useTimelineStore(selectExportSegmentCount);
+  // The number of the segments of the export, which the line of a list names (ADR 067).
+  const exportSegmentCount = useTimelineStore(selectExportSegmentCount);
+  // The timeline, from which each fact below reads the segments of the scope of the step
+  // (ADR 067). Nothing changes the timeline while the modal dialog shows, except an import that
+  // ends, so the memo below rarely runs again.
+  const clips = useTimelineStore(selectClips);
+  const sequenceSegments = useTimelineStore(selectSequenceSegments);
+  const sequenceSources = useTimelineStore(selectSequenceSources);
+  const segments = useTimelineStore(selectSegments);
+  const sourceId = useTimelineStore(selectSourceId);
+  const imported = useMediaStore(selectImportedSources);
+  const scoped = useMemo(() => {
+    const whole = { clips, sequenceSegments, sequenceSources, segments, sourceId };
+    return {
+      whole,
+      timeline: narrowToExportScope(whole, scope),
+      segments: resolveExportScope(whole, scope).segments,
+    };
+  }, [clips, sequenceSegments, sequenceSources, segments, sourceId, scope]);
+  const segmentCount = scoped.segments.length;
   // What the export writes with the preset value `source`, and the facts of the copy of the
   // audio (ADR 053): with one clip, its probe; with several, the canvas, the highest frame rate
   // and the widest audio of the sources of the pieces, by the rules that the plan applies.
-  const sourceFacts = useExportSourceFacts(probe);
+  const sourceFacts = useExportSourceFacts(probe, scope);
   const outputSource = sourceFacts.output;
-  // The total of the Export tooltip, for the sentence only. It is one bigint or null, which
-  // compare by value, so the step renders again only when the total changes. It adds the
-  // segments that the count counts (ADR 066).
-  const selectSegmentTotal = useCallback(
-    (state: TimelineStoreState) => totalExportSegments(state, probe, timecodeDisplay),
-    [probe, timecodeDisplay],
+  // The total of the Export tooltip, for the sentence only, of the segments that the count
+  // counts (ADR 066). For a list, it adds the segments of the scope (ADR 067).
+  const segmentTotal = useMemo(
+    () => totalExportSegments(scoped.timeline, probe, timecodeDisplay),
+    [scoped, probe, timecodeDisplay],
   );
-  const segmentTotal = useTimelineStore(selectSegmentTotal);
   // The size estimate reads the exact duration in ticks, never the display total.
-  const durationTicks = useTimelineStore(selectActiveSourceDurationTicks);
+  const durationTicks = useMemo(
+    () => scopeDurationTicks(scoped.whole, scope),
+    [scoped, scope],
+  );
+  // The sentence names the file of the segments of the scope, or no file when they read several
+  // (ADR 067).
+  const sourceFile = presentScopeSourceFile({
+    scope,
+    segments: scoped.segments,
+    wholeExportFileName: media?.fileName ?? null,
+    // With one clip, the media of the sequence is the media of that clip, the one source.
+    fileOf: (id) =>
+      imported[id] ?? (clips.length <= 1 ? (media ?? undefined) : undefined),
+  });
   const summarySentence = presentExportSummarySentence({
-    fileName: media?.fileName ?? null,
+    fileName: sourceFile.kind === "file" ? sourceFile.fileName : null,
+    severalFiles: sourceFile.kind === "several",
     segmentCount,
     segmentTotal,
     display: timecodeDisplay,
   });
-  const sentence = summarySentence ? (
+  const selectedLine = presentSelectedSegmentsLine(
+    scope,
+    segmentCount,
+    exportSegmentCount,
+  );
+  const sentenceNode = summarySentence ? (
     <SummarySentence view={summarySentence} translate={translate} />
   ) : null;
+  // A list shows one more line under the sentence (ADR 067).
+  const sentence =
+    selectedLine === null ? (
+      sentenceNode
+    ) : (
+      <div className="space-y-1">
+        {sentenceNode}
+        <p className="text-xs text-muted-foreground">
+          {translate(selectedLine.key, selectedLine.values)}
+        </p>
+      </div>
+    );
 
   // Read capability status with the same shallow selector as PresetLibrarySection
   const ffmpegState = useFfmpegStore(

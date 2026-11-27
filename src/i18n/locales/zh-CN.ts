@@ -314,6 +314,9 @@ export const zhCN: TranslationCatalog = {
       deleteSegment: "删除片段",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
       deleteSelectedSegments_other: "删除 {{count}} 个片段",
+      exportSegment: "导出片段…",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      exportSelectedSegments_other: "导出 {{count}} 个片段…",
     },
     renameSegment: {
       title: "重命名片段",
@@ -833,6 +836,8 @@ export const zhCN: TranslationCatalog = {
     setup: {
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
       summary_other: "从 {{fileName}} 导出 {{count}} 个片段 · 总时长 {{duration}}",
+      summaryNoFile_other: "导出 {{count}} 个片段 · 总时长 {{duration}}",
+      selectedSegments_other: "仅导出所选的 {{count}} 个片段（共 {{total}} 个）",
       presetLabel: "预设",
       qualityLabel: "质量",
       value: "{{value}}",
@@ -959,6 +964,7 @@ export const zhCN: TranslationCatalog = {
     preparationTimedOut:
       "无法在限定时间内完成导出准备。某个驱动器或共享位置可能没有响应。",
     noSegments: "没有标记用于导出的片段。",
+    selectedSegmentsChanged: "所选片段已更改，因此未导出。请重新选择片段。",
     tooManySegments: "标记用于导出的片段过多。",
     tooManySegmentsLimit:
       "标记用于导出的片段过多。一次导出最多拼接 {{limit}} 个部分。请将片段分成两次或更多次导出。",

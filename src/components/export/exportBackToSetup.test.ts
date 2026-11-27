@@ -18,10 +18,14 @@ import type { Pts } from "@/types/project";
 import {
   canGoBackToSetup,
   createOpenStepGeneration,
+  exportAnywayScope,
   guardOpenStepEffects,
   runOpenStepAgain,
+  takeBackScope,
   type OpenStepEffects,
 } from "./exportBackToSetup";
+import { WHOLE_EXPORT_SCOPE, type ExportScope } from "@/features/export/scope";
+import { createExportScopeStore } from "@/features/export/scopeStore";
 import { presentExportErrorRecovery } from "./exportErrorPresenter";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 
@@ -306,6 +310,60 @@ describe("guardOpenStepEffects", () => {
     guarded.setModalOpen(true);
 
     expect(setModalOpen).not.toHaveBeenCalled();
+  });
+
+  it("guards the scope of the setup step too, so a stale step sets no scope (ADR 067)", () => {
+    const publishScope = vi.fn();
+    let current = true;
+    const guarded = guardOpenStepEffects(() => current, {
+      setModalOpen: vi.fn(),
+      reportError: vi.fn(),
+      publishScope,
+    });
+    guarded.publishScope?.(WHOLE_EXPORT_SCOPE);
+    expect(publishScope).toHaveBeenCalledExactlyOnceWith(WHOLE_EXPORT_SCOPE);
+    current = false;
+    guarded.publishScope?.(WHOLE_EXPORT_SCOPE);
+    expect(publishScope).toHaveBeenCalledOnce();
+    // With no publisher, the guarded effects leave the default of the controller.
+    expect(
+      guardOpenStepEffects(() => true, { setModalOpen: vi.fn(), reportError: vi.fn() })
+        .publishScope,
+    ).toBeUndefined();
+  });
+});
+
+describe("the scope of a step that the dialog runs again (ADR 067)", () => {
+  const LIST: ExportScope = { kind: "list", record: [{ id: "b", pieces: [] }] };
+
+  it("Export anyway keeps the scope of the setup step of the target that it answers", () => {
+    const scopeStore = createExportScopeStore();
+    scopeStore.getState().publishSetup("export", LIST);
+    expect(exportAnywayScope(scopeStore, "export")).toBe(LIST);
+    expect(exportAnywayScope(scopeStore, "compose")).toBe(WHOLE_EXPORT_SCOPE);
+    expect(scopeStore.getState().setup.export).toBe(LIST);
+  });
+
+  it("Back sets the kept scope at the press, and keeps the scope after an open step", () => {
+    const scopeStore = createExportScopeStore({ shownRunIds: () => [] });
+    scopeStore.getState().keepRun("run-1", LIST);
+    const failed = new ExportError({ code: "ffmpegProcessFailed" });
+    expect(takeBackScope({ runId: "run-1", error: failed }, scopeStore, "export")).toBe(
+      LIST,
+    );
+    expect(scopeStore.getState().setup.export).toBe(LIST);
+    // Back writes only the scope of the target that it leaves.
+    expect(scopeStore.getState().setup.compose).toBe(WHOLE_EXPORT_SCOPE);
+
+    scopeStore.getState().publishSetup("compose", WHOLE_EXPORT_SCOPE);
+    const openError = new ExportError({ code: "noSegments" });
+    expect(
+      takeBackScope({ runId: null, error: openError }, scopeStore, "compose"),
+    ).toBe(WHOLE_EXPORT_SCOPE);
+    scopeStore.getState().publishSetup("compose", LIST);
+    expect(
+      takeBackScope({ runId: null, error: openError }, scopeStore, "compose"),
+    ).toBe(LIST);
   });
 });
 

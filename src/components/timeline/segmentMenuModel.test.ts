@@ -25,9 +25,11 @@ import {
   SEGMENT_MENU_ACTIONS,
   SEGMENT_MENU_DIALOG_ACTIONS,
   SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY,
+  SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY,
   SEGMENT_MENU_LABEL_KEYS,
   SEGMENT_MENU_LAYOUT,
   SEGMENT_MENU_PAUSE_LABEL_KEY,
+  SEGMENT_MENU_SELECTION_ACTIONS,
   buildSegmentMenuEntries,
   canOpenSegmentMenu,
   createSegmentMenuSourceTracker,
@@ -201,20 +203,32 @@ function enabledOf(entries: readonly SegmentMenuEntry[]): Record<string, boolean
 }
 
 describe("the layout of the segment menu", () => {
-  it("holds Go to In, Go to Out, Play Segment, Rename… between two separators, and Delete Segment", () => {
+  // ADR 067 puts Export Segment… directly after Rename….
+  it("holds Go to In, Go to Out, Play Segment, Rename… and Export Segment… between two separators, and Delete Segment", () => {
     expect(SEGMENT_MENU_LAYOUT).toStrictEqual([
       { kind: "item", action: "goToSegmentIn" },
       { kind: "item", action: "goToSegmentOut" },
       { kind: "item", action: "playSegment" },
       { kind: "separator" },
       { kind: "item", action: "renameSegment" },
+      { kind: "item", action: "exportSelectedSegments" },
       { kind: "separator" },
       { kind: "item", action: "deleteSegment" },
     ]);
   });
 
-  it("runs only Rename… after the menu closes, because it opens a dialog (ADR 065)", () => {
-    expect([...SEGMENT_MENU_DIALOG_ACTIONS]).toStrictEqual(["renameSegment"]);
+  it("runs Rename… and Export Segment… after the menu closes, because they open a dialog (ADR 065, ADR 067)", () => {
+    expect([...SEGMENT_MENU_DIALOG_ACTIONS]).toStrictEqual([
+      "renameSegment",
+      "exportSelectedSegments",
+    ]);
+  });
+
+  it("lets Delete and Export Selected Segments act on a selection (ADR 045, ADR 067)", () => {
+    expect([...SEGMENT_MENU_SELECTION_ACTIONS]).toStrictEqual([
+      "exportSelectedSegments",
+      "deleteSegment",
+    ]);
   });
 
   it("names each action of the menu once, and each is an action of the key table", () => {
@@ -247,6 +261,18 @@ describe("the layout of the segment menu", () => {
     expect(lookup(en, SEGMENT_MENU_LABEL_KEYS.deleteSegment)).toBe("Delete Segment");
     expect(lookup(en, SEGMENT_MENU_LABEL_KEYS.renameSegment)).toBe("Rename…");
     expect(lookup(zhCN, SEGMENT_MENU_LABEL_KEYS.renameSegment)).toBe("重命名…");
+    expect(lookup(en, SEGMENT_MENU_LABEL_KEYS.exportSelectedSegments)).toBe(
+      "Export Segment…",
+    );
+    expect(lookup(zhCN, SEGMENT_MENU_LABEL_KEYS.exportSelectedSegments)).toBe(
+      "导出片段…",
+    );
+    expect(enTranslate(SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY, { count: 3 })).toBe(
+      "Export 3 Segments…",
+    );
+    expect(zhTranslate(SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY, { count: 3 })).toBe(
+      "导出 3 个片段…",
+    );
   });
 });
 
@@ -260,6 +286,7 @@ describe("buildSegmentMenuEntries", () => {
       "playSegment",
       "|",
       "renameSegment",
+      "exportSelectedSegments",
       "|",
       "deleteSegment",
     ]);
@@ -299,6 +326,13 @@ describe("buildSegmentMenuEntries", () => {
         shortcut: "F2",
         accelerator: "F2",
       },
+      // Export Selected Segments has no binding, so no key and no accelerator (ADR 067).
+      {
+        label: "Export Segment…",
+        text: "Export Segment…",
+        shortcut: null,
+        accelerator: null,
+      },
       // The Mac key labelled delete sends Backspace, so the menu shows ⌫ (`shortcutFor`).
       {
         label: "Delete Segment",
@@ -321,6 +355,8 @@ describe("buildSegmentMenuEntries", () => {
       { text: "Go to Out\tShift+O", shortcut: "Shift+O", accelerator: null },
       { text: "Play Segment\t/", shortcut: "/", accelerator: null },
       { text: "Rename…\tF2", shortcut: "F2", accelerator: null },
+      // No key after a tab for an action with no binding (ADR 067).
+      { text: "Export Segment…", shortcut: null, accelerator: null },
       { text: "Delete Segment\tDelete", shortcut: "Delete", accelerator: null },
     ]);
   });
@@ -333,11 +369,19 @@ describe("buildSegmentMenuEntries", () => {
       "跳转到出点\tShift+O",
       "播放片段\t/",
       "重命名…\tF2",
+      "导出片段…",
       "删除片段\tDelete",
     ]);
     expect(
       items(build("macos", snapshot(), { zh: true })).map((item) => item.text),
-    ).toEqual(["跳转到入点", "跳转到出点", "播放片段", "重命名…", "删除片段"]);
+    ).toEqual([
+      "跳转到入点",
+      "跳转到出点",
+      "播放片段",
+      "重命名…",
+      "导出片段…",
+      "删除片段",
+    ]);
   });
 
   it("doubles an ampersand, so the native menu does not read it as a mnemonic", () => {
@@ -376,6 +420,7 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentOut: true,
       playSegment: true,
       renameSegment: true,
+      exportSelectedSegments: true,
       deleteSegment: true,
     });
   });
@@ -439,6 +484,7 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentOut: true,
       playSegment: true,
       renameSegment: true,
+      exportSelectedSegments: true,
       deleteSegment: true,
     });
 
@@ -454,6 +500,8 @@ describe("buildSegmentMenuEntries", () => {
       playSegment: false,
       // Rename reads no time (ADR 065).
       renameSegment: true,
+      // Export Selected Segments needs what Export needs: open media (ADR 067).
+      exportSelectedSegments: true,
       deleteSegment: true,
     });
 
@@ -472,6 +520,7 @@ describe("buildSegmentMenuEntries", () => {
       goToSegmentOut: false,
       playSegment: false,
       renameSegment: true,
+      exportSelectedSegments: false,
       deleteSegment: false,
     });
     expect(
@@ -489,11 +538,12 @@ describe("buildSegmentMenuEntries", () => {
       "seekToPts",
       "playSegment",
       "renameSegment",
+      "exportSelectedSegments",
       "deleteSegment",
     ]);
     expect(
       items(build("macos", snapshot({ probe: null }))).map((item) => item.commandKind),
-    ).toStrictEqual([null, null, null, "renameSegment", null]);
+    ).toStrictEqual([null, null, null, "renameSegment", null, null]);
   });
 
   describe("Play Segment while a segment plays", () => {
@@ -556,6 +606,7 @@ describe("buildSegmentMenuEntries", () => {
         ["Go to Out", true],
         ["Pause", true],
         ["Rename…", true],
+        ["Export Segment…", true],
         ["Delete Segment", true],
       ]);
     });
@@ -624,15 +675,24 @@ describe("planSegmentMenuCommand", () => {
     }
   });
 
-  it("plans only Delete for a selection, while the selection is the one of the menu", () => {
+  // ADR 067 adds Export Selected Segments as the second action on a selection.
+  it("plans only Delete and Export Selected Segments for a selection, while the selection is the one of the menu", () => {
     const state = selectionSnapshot();
     expect(
       planSegmentMenuCommand("deleteSegment", SELECTION_TARGET, state, "deleteSegment"),
     ).toStrictEqual({ kind: "deleteSegment" });
+    expect(
+      planSegmentMenuCommand(
+        "exportSelectedSegments",
+        SELECTION_TARGET,
+        state,
+        "exportSelectedSegments",
+      ),
+    ).toStrictEqual({ kind: "exportSelectedSegments", segmentIds: ["a", "b"] });
     // Go to In, Go to Out and Rename need one current segment, and Play Segment would act on
     // the segment at the playhead, which the menu did not name (ADR 045, ADR 065).
     for (const action of SEGMENT_MENU_ACTIONS) {
-      if (action !== "deleteSegment") {
+      if (action !== "deleteSegment" && action !== "exportSelectedSegments") {
         expect(planSegmentMenuCommand(action, SELECTION_TARGET, state)).toBeNull();
       }
     }
@@ -650,6 +710,72 @@ describe("planSegmentMenuCommand", () => {
       });
       expect(
         planSegmentMenuCommand("deleteSegment", SELECTION_TARGET, changed),
+      ).toBeNull();
+      expect(
+        planSegmentMenuCommand("exportSelectedSegments", SELECTION_TARGET, changed),
+      ).toBeNull();
+    }
+  });
+
+  it("plans Export Segment… for the segment of the menu only while it is selected alone (ADR 067)", () => {
+    expect(
+      planSegmentMenuCommand(
+        "exportSelectedSegments",
+        SEGMENT_B_TARGET,
+        snapshot(),
+        "exportSelectedSegments",
+      ),
+    ).toStrictEqual({ kind: "exportSelectedSegments", segmentIds: ["b"] });
+    // Another current segment, or a selection that holds more than the segment of the menu.
+    expect(
+      planSegmentMenuCommand(
+        "exportSelectedSegments",
+        SEGMENT_B_TARGET,
+        snapshot({ timeline: { currentSegmentId: "a" } }),
+      ),
+    ).toBeNull();
+    expect(
+      planSegmentMenuCommand(
+        "exportSelectedSegments",
+        SEGMENT_B_TARGET,
+        snapshot({
+          timeline: { currentSegmentId: "b", selectedSegmentIds: ["a", "b"] },
+        }),
+      ),
+    ).toBeNull();
+    // A plan of another kind than the item showed runs nothing.
+    expect(
+      planSegmentMenuCommand(
+        "exportSelectedSegments",
+        SEGMENT_B_TARGET,
+        snapshot(),
+        "deleteSegment",
+      ),
+    ).toBeNull();
+  });
+
+  it("runs Export Selected Segments for no menu while an import runs, or during a trim (ADR 067)", () => {
+    for (const [target, state] of [
+      [SEGMENT_B_TARGET, snapshot()],
+      [SELECTION_TARGET, selectionSnapshot()],
+    ] as const) {
+      expect(
+        planSegmentMenuCommand("exportSelectedSegments", target, {
+          ...state,
+          isImporting: true,
+        }),
+      ).toBeNull();
+      expect(
+        planSegmentMenuCommand("exportSelectedSegments", target, {
+          ...state,
+          isTrimDragging: true,
+        }),
+      ).toBeNull();
+      expect(
+        planSegmentMenuCommand("exportSelectedSegments", target, {
+          ...state,
+          isTrimArmed: true,
+        }),
       ).toBeNull();
     }
   });
@@ -693,7 +819,8 @@ describe("resolveSegmentMenuTarget", () => {
 });
 
 describe("the menu of a selection of several segments", () => {
-  it("keeps the shape of the menu, names the count on Delete, and disables the rest", () => {
+  // ADR 067: Export Selected Segments also acts on the selection, and names its count.
+  it("keeps the shape of the menu, names the count on Delete and Export, and disables the rest", () => {
     for (const platform of ["macos", "windows"] as const) {
       const entries = buildSegmentMenuEntries({
         target: SELECTION_TARGET,
@@ -710,8 +837,18 @@ describe("the menu of a selection of several segments", () => {
       expect(remove?.label).toBe("Delete 2 Segments");
       expect(remove?.enabled).toBe(true);
       expect(remove?.commandKind).toBe("deleteSegment");
+      const exportItem = list.find((item) => item.action === "exportSelectedSegments");
+      expect(exportItem?.label).toBe("Export 2 Segments…");
+      expect(exportItem?.text).toBe("Export 2 Segments…");
+      expect(exportItem?.shortcut).toBeNull();
+      expect(exportItem?.accelerator).toBeNull();
+      expect(exportItem?.enabled).toBe(true);
+      expect(exportItem?.commandKind).toBe("exportSelectedSegments");
       for (const item of list) {
-        if (item.action !== "deleteSegment") {
+        if (
+          item.action !== "deleteSegment" &&
+          item.action !== "exportSelectedSegments"
+        ) {
           expect(item.enabled).toBe(false);
           expect(item.label).toBe(enTranslate(SEGMENT_MENU_LABEL_KEYS[item.action]));
         }
@@ -731,6 +868,9 @@ describe("the menu of a selection of several segments", () => {
       for (const count of [2, 5]) {
         expect(fake(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, { count })).toBe(
           instance.t(SEGMENT_MENU_DELETE_SELECTION_LABEL_KEY, { count }),
+        );
+        expect(fake(SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY, { count })).toBe(
+          instance.t(SEGMENT_MENU_EXPORT_SELECTION_LABEL_KEY, { count }),
         );
       }
     }

@@ -210,12 +210,18 @@ export type BackendExportErrorCode = (typeof BACKEND_EXPORT_ERROR_CODES)[number]
  * `outputAlreadyQueued` comes from the export queue store. It refuses an export whose output
  * path is the path of the live run or of a waiting run, without regard to letter case, so two
  * runs of one batch never write one file (ADR 049).
+ *
+ * `selectedSegmentsChanged` comes from the export flow, for an export of a list of selected
+ * segments that is no longer valid: a segment of the list is no longer a segment of the export,
+ * or gives other pieces than when the action made the list (ADR 067). The export sends nothing,
+ * and the user selects the segments again.
  */
 export const FRONTEND_EXPORT_ERROR_CODES = [
   "dialogFailed",
   "sourceRevisionChanged",
   "presetNotFound",
   "outputAlreadyQueued",
+  "selectedSegmentsChanged",
 ] as const;
 
 export type FrontendExportErrorCode = (typeof FRONTEND_EXPORT_ERROR_CODES)[number];

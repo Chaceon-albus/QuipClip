@@ -19,13 +19,20 @@ import {
   buildExportRequest,
   createComposeFlowTarget,
   exportComposeStore,
+  exportFileName,
   exportOutputExtension,
   exportQueueStore,
+  exportScopeStore,
   exportStore,
   hasPendingExportWork,
   isExportRunLive,
+  narrowToExportScope,
+  normalizeExportError,
   openExportSaveDialog,
+  resolveExportScope,
+  segmentFileName,
   ExportError,
+  WHOLE_EXPORT_SCOPE,
   type ExportAudioMode,
   type ExportComposeStore,
   type ExportErrorCode,
@@ -33,6 +40,10 @@ import {
   type ExportQueueStore,
   type ExportQueueSubmitResult,
   type ExportRequest,
+  type ExportScope,
+  type ExportScopeInput,
+  type ExportScopeStore,
+  type ExportScopeTarget,
   type ExportStore,
   type ExportStreams,
   type ExportRunLiveState,
@@ -104,6 +115,24 @@ export interface ExportRequestParts {
   readonly audioOverrides: Readonly<Record<string, AudioStreamOverride>>;
   /** The builder of the request of one clip. Defaults to `buildExportRequest`. */
   readonly buildRequest?: typeof buildExportRequest;
+  /**
+   * The scope of the export (ADR 067). The request takes only the segments of the scope
+   * (`narrowToExportScope`). Defaults to the whole export.
+   */
+  readonly scope?: ExportScope;
+}
+
+/** The parts of the timeline that the segments of a scope read, from the parts of a request. */
+function scopeInputOfParts(
+  parts: Pick<ExportRequestParts, "timeline" | "segments" | "sourceId">,
+): ExportScopeInput {
+  return {
+    clips: parts.timeline.clips,
+    sequenceSegments: parts.timeline.sequenceSegments,
+    sequenceSources: parts.timeline.sequenceSources,
+    segments: parts.segments,
+    sourceId: parts.sourceId,
+  };
 }
 
 /**
@@ -114,11 +143,19 @@ export interface ExportRequestParts {
  */
 export function composeExportRequest(parts: ExportRequestParts): ExportRequest | null {
   const { timeline, media, preset, streams, audioMode, outputPath } = parts;
+  // The builders read only the segments of the scope (ADR 067). A list that is not valid builds
+  // no request, so it never gives other frames than the user selected.
+  const scope = parts.scope ?? WHOLE_EXPORT_SCOPE;
+  const input = scopeInputOfParts(parts);
+  if (!resolveExportScope(input, scope).valid) {
+    return null;
+  }
+  const scoped = narrowToExportScope(input, scope);
   // `exportSegmentIds` chooses its array by the same rule (ADR 066).
   if (isSequenceExport(timeline.clips)) {
     return buildSequenceExportRequest({
       clips: timeline.clips,
-      segments: timeline.sequenceSegments,
+      segments: scoped.sequenceSegments,
       sources: new Map(Object.entries(timeline.sequenceSources)),
       media: parts.sources,
       outputPath,
@@ -133,7 +170,7 @@ export function composeExportRequest(parts: ExportRequestParts): ExportRequest |
   return (parts.buildRequest ?? buildExportRequest)({
     media,
     outputPath,
-    segments: parts.segments,
+    segments: scoped.segments,
     activeSourceId: parts.sourceId,
     preset,
     streams,
@@ -461,6 +498,50 @@ export interface ExportFlowControllerOptions {
    * write queue serialization. Never defaults to raw IPC saveSettings (ADR 013, ADR 024).
    */
   saveSettings?: (settings: Settings) => Promise<unknown>;
+
+  /**
+   * The scope of the action that starts the OPEN step (ADR 067): the whole export for the Export
+   * action, or the list of Export Selected Segments with its record. Defaults to the whole export.
+   * The START step does not read it: it reads the scope of the setup step of its target
+   * (`scopeStore`, `scopeTarget`).
+   */
+  scope?: ExportScope;
+
+  /**
+   * Sets the scope of the setup step of `scopeTarget`. The OPEN step calls it with `scope` only
+   * when its target shows its setup step or the error of its checks. Defaults to `publishSetup`
+   * of `scopeStore` for `scopeTarget`.
+   */
+  publishScope?: (scope: ExportScope) => void;
+
+  /**
+   * The store of the scopes of the flow (ADR 067). The START step reads the scope of the setup
+   * step of its target there, and keeps the scope of its request there with the answer. Defaults
+   * to `exportScopeStore`.
+   */
+  scopeStore?: ExportScopeStore;
+
+  /**
+   * The setup scope of the flow target (ADR 067): `export` for the export store, `compose` for the
+   * compose store. Each target has its own setup scope, because the dialog can hold a step on each
+   * at the same time. Defaults to `export`, the target of the defaults of this controller.
+   */
+  scopeTarget?: ExportScopeTarget;
+
+  /**
+   * The failure that the export store holds after a start that the backend refused with no run
+   * id (`failed`). The START step keeps the scope of its request with it. Defaults to the error of
+   * `exportStore`.
+   */
+  getStartFailure?: () => ExportError | null;
+
+  /**
+   * The failure that the state of the flow target holds now, or null: the export store, or the
+   * compose store (`openExportFlow`). The OPEN step reads it after it reported the error of a
+   * check, to know whether the dialog shows that error (ADR 067). Defaults to the error of
+   * `exportStore`.
+   */
+  getError?: () => ExportError | null;
 }
 
 /**
@@ -495,6 +576,12 @@ export class ExportFlowController {
   private readonly buildRequestFn: typeof buildExportRequest;
   private readonly resetFn: () => void;
   private readonly saveSettingsFn: (settings: Settings) => Promise<unknown>;
+  private readonly scope: ExportScope;
+  private readonly publishScopeFn: (scope: ExportScope) => void;
+  private readonly scopeStore: ExportScopeStore;
+  private readonly getStartFailureFn: () => ExportError | null;
+  private readonly getErrorFn: () => ExportError | null;
+  private readonly scopeTarget: ExportScopeTarget;
 
   constructor(options: ExportFlowControllerOptions) {
     this.setModalOpen = options.setModalOpen;
@@ -532,6 +619,41 @@ export class ExportFlowController {
     this.saveSettingsFn =
       options.saveSettings ??
       ((settings) => settingsStore.getState().saveSettings(settings));
+    this.scope = options.scope ?? WHOLE_EXPORT_SCOPE;
+    this.scopeStore = options.scopeStore ?? exportScopeStore;
+    this.scopeTarget = options.scopeTarget ?? "export";
+    const scopeStore = this.scopeStore;
+    const scopeTarget = this.scopeTarget;
+    this.publishScopeFn =
+      options.publishScope ??
+      ((scope) => {
+        scopeStore.getState().publishSetup(scopeTarget, scope);
+      });
+    this.getStartFailureFn =
+      options.getStartFailure ?? (() => exportStore.getState().error);
+    this.getErrorFn = options.getError ?? (() => exportStore.getState().error);
+  }
+
+  /**
+   * The parts of the timeline that the segments of a scope read now: the timeline store, with
+   * the segments and the active source of the providers of this controller.
+   */
+  private scopeInputNow(): ExportScopeInput {
+    const timeline = timelineStore.getState();
+    return {
+      clips: timeline.clips,
+      sequenceSegments: timeline.sequenceSegments,
+      sequenceSources: timeline.sequenceSources,
+      segments: this.getSegmentsFn(),
+      sourceId: this.getSourceIdFn(),
+    };
+  }
+
+  /** True when `scope` is valid now (`resolveExportScope`). The whole export is always valid. */
+  private isScopeValidNow(scope: ExportScope): boolean {
+    return (
+      scope.kind === "export" || resolveExportScope(this.scopeInputNow(), scope).valid
+    );
   }
 
   /**
@@ -560,6 +682,12 @@ export class ExportFlowController {
    *    save dialog.
    * 7. On good path: calls `setModalOpen(true)` with the store at `idle` and returns true.
    *    It must NOT open the save dialog.
+   *
+   * The checks of steps 5 and 6 read the segments of `scope`, the scope of the action that
+   * started this step (ADR 067). When the step shows the setup step or the error of a check, it
+   * first tests that a list is still valid, and shows `selectedSegmentsChanged` when it is not.
+   * It then sets the scope of the setup step to its scope (`publishScope`). A step that shows a
+   * live run, or that shows nothing, sets no scope.
    */
   async run(): Promise<boolean> {
     const exportState = this.getExportStateFn();
@@ -584,53 +712,46 @@ export class ExportFlowController {
 
     const media = this.getMediaFn();
     if (!media) {
-      this.reportErrorFn(new ExportError({ code: "sourceNotFound" }));
-      this.setModalOpen(true);
-      return false;
+      return this.show(new ExportError({ code: "sourceNotFound" }));
     }
 
     const activeSourceId = this.getSourceIdFn();
-    const segments = this.getSegmentsFn();
+    // The checks read the segments of the scope of the action (ADR 067).
+    const scoped = narrowToExportScope(this.scopeInputNow(), this.scope);
 
     // A sequence of several clips exports its segments as pieces of several sources (ADR 053).
     if (timelineStore.getState().clips.length > 1) {
-      const { pieces, sourceIds } = sequencePiecesNow();
+      const { pieces, sourceIds } = sequenceExportPieces(
+        scoped.clips,
+        scoped.sequenceSegments,
+        new Map(Object.entries(scoped.sequenceSources)),
+      );
       if (pieces.length === 0) {
-        this.reportErrorFn(new ExportError({ code: "noSegments" }));
-        this.setModalOpen(true);
-        return false;
+        return this.show(new ExportError({ code: "noSegments" }));
       }
       const limitError = exportLimitError(pieces, sourceIds.length);
       if (limitError !== null) {
-        this.reportErrorFn(limitError);
-        this.setModalOpen(true);
-        return false;
+        return this.show(limitError);
       }
       // The request names the file of each source, so a source without imported media cannot
       // export.
       const imported = mediaStore.getState().sources;
       if (sourceIds.some((id) => imported[id] === undefined)) {
-        this.reportErrorFn(new ExportError({ code: "sourceNotFound" }));
-        this.setModalOpen(true);
-        return false;
+        return this.show(new ExportError({ code: "sourceNotFound" }));
       }
       if (!(await this.sourcesStillMatch(sourceIds))) {
-        this.reportErrorFn(new ExportError({ code: "sourceRevisionChanged" }));
-        this.setModalOpen(true);
-        return false;
+        return this.show(new ExportError({ code: "sourceRevisionChanged" }));
       }
-      this.setModalOpen(true);
-      return true;
+      return this.show(null);
     }
 
+    const segments = scoped.segments;
     // The same match buildExportRequest and sourceRevisionStillMatches use
     if (
       !activeSourceId ||
       !segments.some((segment) => segment.sourceId === activeSourceId)
     ) {
-      this.reportErrorFn(new ExportError({ code: "noSegments" }));
-      this.setModalOpen(true);
-      return false;
+      return this.show(new ExportError({ code: "noSegments" }));
     }
     // With one clip, each segment is one piece of the one source, in array order, as
     // buildExportRequest sends it.
@@ -645,21 +766,50 @@ export class ExportFlowController {
       1,
     );
     if (limitError !== null) {
-      this.reportErrorFn(limitError);
-      this.setModalOpen(true);
-      return false;
+      return this.show(limitError);
     }
 
     if (!(await this.sourceRevisionStillMatches(media, activeSourceId, segments))) {
       // A confirmation, not a terminal failure. The dialog offers Export anyway, Re-import,
       // and Cancel, and "Export anyway" re-runs this flow with the check skipped.
-      this.reportErrorFn(new ExportError({ code: "sourceRevisionChanged" }));
-      this.setModalOpen(true);
-      return false;
+      return this.show(new ExportError({ code: "sourceRevisionChanged" }));
     }
 
+    return this.show(null);
+  }
+
+  /**
+   * Shows the result of the checks of the OPEN step: the setup step for null, and else the error
+   * of the check. Returns true when it shows the setup step.
+   *
+   * Before it shows anything for a list, it tests that the list is still valid. A list that is not
+   * valid shows `selectedSegmentsChanged` in place of the result of the checks (ADR 067). It
+   * reports the error and opens the modal. It then sets the scope of the setup step to the scope
+   * of this step only when the dialog shows the step: the target is idle for the setup step, or
+   * holds the error of this step. Otherwise it sets nothing. The result does not read that test:
+   * it stays true when the checks passed, as before.
+   */
+  private show(error: ExportError | null): boolean {
+    const shown = this.isScopeValidNow(this.scope)
+      ? error
+      : new ExportError({ code: "selectedSegmentsChanged" });
+    if (shown !== null) {
+      this.reportErrorFn(shown);
+    }
     this.setModalOpen(true);
-    return true;
+    // The dialog shows the state of the target. It shows the setup step of this step only while
+    // the target is idle, and the error of this step only while the target holds that error
+    // instance. The target can keep showing something else: a refusal of an earlier request
+    // that arrived while this step waited, a live run that ignores the report, or the report of
+    // a step that another step replaced. This step then shows nothing and sets no scope.
+    const showsStep =
+      shown === null
+        ? this.getExportStateFn().status === "idle"
+        : this.getErrorFn() === shown;
+    if (showsStep) {
+      this.publishScopeFn(this.scope);
+    }
+    return shown === null;
   }
 
   /**
@@ -705,6 +855,15 @@ export class ExportFlowController {
    *    `presetId !== settings.activePresetId`, persists the choice via `saveSettings`.
    *    The save is fire-and-forget. Rejections are caught and ignored (ADR 024).
    * 8. Returns true.
+   *
+   * The step reads the scope of the setup step one time, when it starts (ADR 067). The default
+   * name, the save dialog, the request and the answer use that scope. For a list, the step tests
+   * that the list is valid before the save dialog opens and again after it closes, also after a
+   * cancel but not after a failure of the dialog, and reports
+   * `selectedSegmentsChanged` and sends nothing when it is not. A list that gives exactly one
+   * segment gets the default name of `segmentFileName`. Each failure that the step reports, and a
+   * start failure that the export store holds, keeps the scope (`keepFailure`). A run that the
+   * queue takes keeps it by its run id (`keepRun`).
    */
   async confirm(
     presetId: string,
@@ -712,10 +871,27 @@ export class ExportFlowController {
     audioMode: ExportAudioMode,
     adjusted?: AdjustedGain,
   ): Promise<boolean> {
+    // ADR 067: the scope of the setup step of the target, read one time. Everything below uses it: the default
+    // name, the save dialog, the request, and the answer to the request. Each failure that this
+    // step reports keeps it (`fail`).
+    const scope = this.scopeStore.getState().setup[this.scopeTarget];
+    const fail = (error: unknown): void => {
+      const normalized = normalizeExportError(error);
+      this.scopeStore.getState().keepFailure(normalized, scope);
+      this.reportErrorFn(normalized);
+    };
+
     const settings = this.getSettingsFn();
     const preset = settings?.presets.find((p) => p.id === presetId);
     if (!settings || !preset) {
-      this.reportErrorFn(new ExportError({ code: "presetNotFound" }));
+      fail(new ExportError({ code: "presetNotFound" }));
+      this.setModalOpen(true);
+      return false;
+    }
+
+    // A list that is no longer valid sends nothing (ADR 067).
+    if (!this.isScopeValidNow(scope)) {
+      fail(new ExportError({ code: "selectedSegmentsChanged" }));
       this.setModalOpen(true);
       return false;
     }
@@ -729,11 +905,11 @@ export class ExportFlowController {
       this.getAudioOverridesFn(),
     );
     const extension = exportOutputExtension(preset.container, streams);
-    const defaultName = media?.fileName
-      ? `${media.fileName.replace(/\.[^/.]+$/, "")}_export.${extension}`
-      : undefined;
+    const defaultName = this.defaultNameOf(scope, media, extension);
 
     let outputPath: string | null;
+    // True when the save dialog reported its own failure through `reportError`.
+    let dialogReported = false;
     try {
       // The dialog reports its own failure, through the reporter of this controller and not
       // through the default of the dialog. The check of a null answer below reads
@@ -743,12 +919,24 @@ export class ExportFlowController {
         extension,
         filterName: streams === "audioOnly" ? this.audioFilterName : this.filterName,
         defaultName,
-        reportError: this.reportErrorFn,
+        reportError: (error) => {
+          dialogReported = true;
+          fail(error);
+        },
       });
     } catch (err) {
-      this.reportErrorFn(
+      fail(
         err instanceof ExportError ? err : new ExportError({ code: "dialogFailed" }),
       );
+      this.setModalOpen(true);
+      return false;
+    }
+
+    // The timeline can change while the save dialog is open, as when an import ends (ADR 067).
+    // The test runs before anything else, also when the user cancelled the dialog. A failure
+    // that the dialog reported keeps its own report.
+    if (!(!outputPath && dialogReported) && !this.isScopeValidNow(scope)) {
+      fail(new ExportError({ code: "selectedSegmentsChanged" }));
       this.setModalOpen(true);
       return false;
     }
@@ -783,11 +971,12 @@ export class ExportFlowController {
         adjusted?.request === null ? undefined : adjusted?.tenthsDb,
       audioOverrides: overrides,
       buildRequest: this.buildRequestFn,
+      scope,
     });
 
     if (!request) {
       const code: ExportErrorCode = currentMedia ? "noSegments" : "sourceNotFound";
-      this.reportErrorFn(new ExportError({ code }));
+      fail(new ExportError({ code }));
       this.setModalOpen(true);
       return false;
     }
@@ -827,19 +1016,32 @@ export class ExportFlowController {
     try {
       result = await this.submitFn(request);
     } catch (err) {
-      this.reportErrorFn(err);
+      fail(err);
       this.setModalOpen(true);
       return false;
     }
     if (result.kind === "refused") {
-      this.reportErrorFn(result.error);
+      // A refusal can arrive after another setup step opened (ADR 049). It keeps the scope of
+      // this request with it, and the scope of the setup step does not change.
+      fail(result.error);
       this.setModalOpen(true);
       return false;
     }
-    if (result.kind === "failed" || result.kind === "superseded") {
+    if (result.kind === "failed") {
+      // The export store holds the failure, so nothing is reported here. The scope of this
+      // request stays with that failure.
+      const failure = this.getStartFailureFn();
+      if (failure !== null) {
+        this.scopeStore.getState().keepFailure(failure, scope);
+      }
+      return false;
+    }
+    if (result.kind === "superseded") {
       // The export store holds the outcome, so nothing is reported here.
       return false;
     }
+    // The run keeps the scope of its request by its id (ADR 067).
+    this.scopeStore.getState().keepRun(result.runId, scope);
 
     const freshSettings = this.getSettingsFn();
     if (
@@ -854,6 +1056,42 @@ export class ExportFlowController {
     }
 
     return true;
+  }
+
+  /**
+   * The name that the save dialog proposes (ADR 024, ADR 067). For a list that gives exactly one
+   * segment, it is the name of `segmentFileName`, from the file that the first piece of that
+   * segment reads. For the whole export, and for a list of two or more segments, it is
+   * `<source name>_export.<extension>`. Undefined when the name of the file is not known.
+   */
+  private defaultNameOf(
+    scope: ExportScope,
+    media: MediaFlowDescriptor | null,
+    extension: string,
+  ): string | undefined {
+    if (scope.kind === "list") {
+      const { segments } = resolveExportScope(this.scopeInputNow(), scope);
+      const only = segments.length === 1 ? segments[0] : undefined;
+      if (only !== undefined) {
+        const sourceId = only.pieces[0]?.sourceId;
+        // With one clip, the attached media is the file of the one clip.
+        const fileName =
+          timelineStore.getState().clips.length > 1
+            ? sourceId === undefined
+              ? undefined
+              : mediaStore.getState().sources[sourceId]?.fileName
+            : media?.fileName;
+        return fileName
+          ? segmentFileName({
+              sourceFileName: fileName,
+              number: only.number,
+              name: only.name,
+              extension,
+            })
+          : undefined;
+      }
+    }
+    return media?.fileName ? exportFileName(media.fileName, extension) : undefined;
   }
 
   /**
@@ -947,13 +1185,14 @@ export class ExportFlowController {
   }
 }
 
-/** The pieces and the sources of the segments on the sequence now (ADR 052). */
-function sequencePiecesNow() {
-  const timeline = timelineStore.getState();
-  return sequenceExportPieces(
-    timeline.clips,
-    timeline.sequenceSegments,
-    new Map(Object.entries(timeline.sequenceSources)),
+/**
+ * True when `scope` is valid with the timeline of the store now (`resolveExportScope`), as the
+ * flow tests it with its default providers. The whole export is always valid. Back tests the
+ * scope that it restores with it (ADR 067).
+ */
+export function isExportScopeValidNow(scope: ExportScope): boolean {
+  return (
+    scope.kind === "export" || resolveExportScope(timelineStore.getState(), scope).valid
   );
 }
 
@@ -1011,6 +1250,13 @@ export async function runExportFlow(
   const reportError =
     options.reportError ??
     ((error: unknown) => exportStore.getState().reportError(error));
+  const scopeStore = options.scopeStore ?? exportScopeStore;
+  const scopeTarget = options.scopeTarget ?? "export";
+  const publishScope =
+    options.publishScope ??
+    ((scope: ExportScope) => {
+      scopeStore.getState().publishSetup(scopeTarget, scope);
+    });
   const controller = new ExportFlowController({
     ...options,
     getMedia,
@@ -1022,6 +1268,12 @@ export async function runExportFlow(
     reportError: (error) => {
       if (isCurrent()) {
         reportError(error);
+      }
+    },
+    // A step that another step replaced shows nothing, so it sets no scope (ADR 067).
+    publishScope: (scope) => {
+      if (isCurrent()) {
+        publishScope(scope);
       }
     },
   });
@@ -1087,6 +1339,8 @@ function exportStoreFlowTarget(store: ExportStore): ExportFlowTarget {
     reset: () => {
       store.getState().reset();
     },
+    getError: () => store.getState().error,
+    scopeTarget: "export",
   };
 }
 

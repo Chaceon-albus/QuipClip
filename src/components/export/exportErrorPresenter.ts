@@ -100,6 +100,9 @@ const EXPORT_ERROR_RECOVERY: Readonly<Record<ExportErrorCode, ExportErrorRecover
   ffprobeProcessFailed: null,
   ffprobeParseFailed: null,
   noSegments: null,
+  // A selected segment changed after the action made its list (ADR 067). The user selects the
+  // segments again, as for `noSegments`.
+  selectedSegmentsChanged: null,
   tooManySegments: null,
   // The segments must come nearer to the order of their source on the timeline (ADR 055).
   piecesOutOfOrder: null,

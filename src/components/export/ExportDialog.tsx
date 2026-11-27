@@ -21,6 +21,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   confirmExportFlow,
+  isExportScopeValidNow,
   needsStrictRevisionCheck,
   runExportFlow,
 } from "@/components/layout/exportFlowController";
@@ -28,6 +29,7 @@ import {
   canCopyAudio,
   composeFlowTarget,
   exportComposeStore,
+  exportScopeStore,
   exportStore,
   isExportRunLive,
   resolveExportAudioMode,
@@ -35,10 +37,12 @@ import {
   exportQueueStore,
   selectExportOutputAction,
   selectExportQueueRows,
+  showExportStoreTarget,
   sourceHasAudio,
   useExportComposeStore,
   useExportOutputActionStore,
   useExportQueueStore,
+  useExportScopeStore,
   useExportStore,
   useExportRunTiming,
   useExportStreamChoice,
@@ -60,6 +64,8 @@ import { ExportSetup } from "./ExportSetup";
 import {
   canGoBackToSetup,
   createOpenStepGeneration,
+  exportAnywayScope,
+  goBackToSetup,
   guardOpenStepEffects,
   runOpenStepAgain,
 } from "./exportBackToSetup";
@@ -491,8 +497,15 @@ export function ExportDialog({
   const streamChoice = useExportStreamChoice((state) => state.choice);
   const setStream = useExportStreamChoice((state) => state.setStream);
   const probe = useAttachedMediaStore((state) => state.media?.probe ?? null);
+  // The scope of the setup step that the dialog shows (ADR 067): the scope of the compose target
+  // while the frame composes, and of the export store otherwise. Each fact of the step reads the
+  // segments of it. The frame holds the target while the dialog closes, so a closing setup step
+  // keeps its facts.
+  const exportSetupScope = useExportScopeStore((state) => state.setup.export);
+  const composeSetupScope = useExportScopeStore((state) => state.setup.compose);
+  const setupScope = frame.composing ? composeSetupScope : exportSetupScope;
   // With several clips, the sources of the pieces decide, not the attached clip (ADR 053).
-  const sourceFacts = useExportSourceFacts(probe);
+  const sourceFacts = useExportSourceFacts(probe, setupScope);
   const streams = resolveExportStreams(
     streamChoice,
     sourceHasAudio(sourceFacts.output),
@@ -533,6 +546,7 @@ export function ExportDialog({
     selectedPreset,
     streams,
     sourceChangeAccepted,
+    setupScope,
   );
   const loudnessAdjust = useLoudnessAdjust({
     active: adjustActive,
@@ -682,6 +696,8 @@ export function ExportDialog({
       holdFrame();
     }
     clearSetupStep();
+    // The dialog shows the export store only when it is not idle, and closes otherwise, so no
+    // setup step shows here without an open step (ADR 067).
     exportComposeStore.getState().exit();
     if (exit === "closeDialog") {
       setStopArmedAt(null);
@@ -799,8 +815,12 @@ export function ExportDialog({
   // step, and the open step runs again on the compose store with the check skipped. The
   // export store and its live run do not change. A step that answers after the user left the
   // compose state changes nothing (`backStep`).
+  //
+  // The step opens the setup step again for the same export, so the scope of the setup step
+  // stays (`exportAnywayScope`, ADR 067).
   const handleExportAnyway = () => {
     if (exportComposeStore.getState().composing) {
+      const scope = exportAnywayScope(exportScopeStore, "compose");
       setSourceChangeAccepted(true);
       setChoosingDestination(false);
       composeFlowTarget.reset();
@@ -814,13 +834,18 @@ export function ExportDialog({
         ...guardOpenStepEffects(isCurrent, {
           setModalOpen: onOpenChange,
           reportError: composeFlowTarget.reportError,
+          publishScope: (published) => {
+            exportScopeStore.getState().publishSetup("compose", published);
+          },
         }),
         filterName: t("dialog.videoFilter"),
         audioFilterName: t("dialog.audioFilter"),
         skipSourceRevisionCheck: true,
+        scope,
       });
       return;
     }
+    const scope = exportAnywayScope(exportScopeStore, "export");
     const kept = requestedPresetId;
     closeAndReset();
     setRequestedPresetId(kept);
@@ -834,6 +859,7 @@ export function ExportDialog({
       filterName: t("dialog.videoFilter"),
       audioFilterName: t("dialog.audioFilter"),
       skipSourceRevisionCheck: true,
+      scope,
     });
   };
 
@@ -894,30 +920,55 @@ export function ExportDialog({
     setSourceChangeAccepted(false);
     setChoosingDestination(false);
     setStopArmedAt(null);
-    if (composes) {
-      composeFlowTarget.reset();
-    } else {
-      reset();
-    }
-    void runOpenStepAgain({
-      generation: backStep,
-      effects: {
-        setModalOpen: onOpenChange,
-        reportError: composes
-          ? composeFlowTarget.reportError
-          : (err) => {
-              exportStore.getState().reportError(err);
-            },
+    const reportToTarget = composes
+      ? composeFlowTarget.reportError
+      : (err: unknown) => {
+          exportStore.getState().reportError(err);
+        };
+    // The scope that the result or the failure kept is read before the reset clears it, and the
+    // setup step takes it from this press on. A list that is no longer valid shows
+    // `selectedSegmentsChanged`, and no open step starts (`goBackToSetup`, ADR 067).
+    goBackToSetup({
+      target: composes
+        ? { runId: null, error: exportComposeStore.getState().error }
+        : {
+            runId: exportStore.getState().runId,
+            error: exportStore.getState().error,
+          },
+      scopeStore: exportScopeStore,
+      scopeTarget: composes ? "compose" : "export",
+      isScopeValid: isExportScopeValidNow,
+      reset: composes ? composeFlowTarget.reset : reset,
+      reportError: (err) => {
+        // A Back step that still waits must not change the dialog after this report.
+        backStep.invalidate();
+        setBackCheckPending(false);
+        reportToTarget(err);
       },
-      setPending: setBackCheckPending,
-      run: (effects) =>
-        runExportFlow({
-          ...flowTargetOf(composes),
-          ...effects,
-          filterName: t("dialog.videoFilter"),
-          audioFilterName: t("dialog.audioFilter"),
-          strictSourceRevisionCheck,
-        }),
+      openStep: (scope) => {
+        void runOpenStepAgain({
+          generation: backStep,
+          effects: {
+            setModalOpen: onOpenChange,
+            reportError: reportToTarget,
+            publishScope: (published) => {
+              exportScopeStore
+                .getState()
+                .publishSetup(composes ? "compose" : "export", published);
+            },
+          },
+          setPending: setBackCheckPending,
+          run: (effects) =>
+            runExportFlow({
+              ...flowTargetOf(composes),
+              ...effects,
+              filterName: t("dialog.videoFilter"),
+              audioFilterName: t("dialog.audioFilter"),
+              strictSourceRevisionCheck,
+              scope,
+            }),
+        });
+      },
     });
   };
 
@@ -963,7 +1014,10 @@ export function ExportDialog({
         setSourceChangeAccepted(false);
         if (composes) {
           clearSetupStep();
-          exportComposeStore.getState().exit();
+          // The dialog shows the export store from here on. When that store is still idle, its
+          // setup step shows with no open step, and it has the whole export
+          // (`showExportStoreTarget`, ADR 067).
+          showExportStoreTarget({ dialogOpen: true });
         }
       }
     } finally {
@@ -1126,6 +1180,7 @@ export function ExportDialog({
       return (
         <StepFade key="setup">
           <ExportSetup
+            scope={setupScope}
             selectedPresetId={effectivePresetId}
             selectedPreset={selectedPreset}
             blocker={blocker}

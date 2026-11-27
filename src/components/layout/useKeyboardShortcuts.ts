@@ -2,9 +2,9 @@ import { useEffect } from "react";
 import { exportOrderDialogStore } from "@/components/timeline/exportOrderDialogStore";
 import { segmentRenameDialogStore } from "@/components/timeline/segmentRenameDialogStore";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
-import { exportPanelStore } from "@/features/export";
+import { createSegmentListScope, exportPanelStore } from "@/features/export";
 import { frameExportController } from "@/features/frameExport";
-import { openMediaFileDialog } from "@/features/media";
+import { mediaStore, openMediaFileDialog } from "@/features/media";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
@@ -44,6 +44,8 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
     isTrimDragging: segmentTrimSession.isDragging(),
     isTrimArmed: segmentTrimSession.isPressArmed(),
     frameExport: readFrameExportSnapshot(),
+    // The fact that a file drop reads (`useFileDropOpen`).
+    isImporting: mediaStore.getState().status === "loading",
   };
 }
 
@@ -135,6 +137,17 @@ export function runShortcutCommand(command: ShortcutCommand): void {
         setModalOpen: exportPanelStore.getState().setOpen,
         filterName: i18n.t("dialog.videoFilter"),
         audioFilterName: i18n.t("dialog.audioFilter"),
+      });
+      return;
+    case "exportSelectedSegments":
+      // The Export action with the list of the selected segments as its scope (ADR 067). The list
+      // reads its record here, one time. While a run is active or waits, the setup step is the
+      // step of a new export for the queue (`openExportFlow`, ADR 049).
+      void openExportFlow({
+        setModalOpen: exportPanelStore.getState().setOpen,
+        filterName: i18n.t("dialog.videoFilter"),
+        audioFilterName: i18n.t("dialog.audioFilter"),
+        scope: createSegmentListScope(timeline, command.segmentIds),
       });
       return;
     case "exportFrame":

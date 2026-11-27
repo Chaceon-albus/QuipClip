@@ -14,6 +14,7 @@
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { ExportRunLiveState } from "./runState";
+import type { ExportScopeTarget } from "./scopeStore";
 import type { ExportError } from "./types";
 import { normalizeExportError } from "./validation";
 
@@ -85,17 +86,27 @@ export type ExportComposeStore = ReturnType<typeof createExportComposeStore>;
 export const exportComposeStore: ExportComposeStore = createExportComposeStore();
 
 /**
- * The three options of the export flow controller that decide where the OPEN and START steps
- * read the state, report a failure, and reset.
+ * The options of the export flow controller that decide where the OPEN and START steps read the
+ * state, report a failure, and reset.
  */
 export type ExportFlowTarget = {
   getExportState: () => ExportRunLiveState;
   reportError: (error: unknown) => void;
   reset: () => void;
+  /**
+   * The failure that the target holds now, or null. The OPEN step reads it after it reported the
+   * error of a check, to know whether the dialog shows that error (ADR 067).
+   */
+  getError: () => ExportError | null;
+  /**
+   * The setup scope that belongs to the target (ADR 067). An open step on the target publishes
+   * its scope there, and the confirm step of a setup step of the target reads it there.
+   */
+  scopeTarget: ExportScopeTarget;
 };
 
 /**
- * Binds the three target options of the export flow controller to a compose store.
+ * Binds the target options of the export flow controller to a compose store.
  *
  * `getExportState` answers the status of the compose store with `tracking` false. The
  * compose store never holds a run, so this state is never live (`isExportRunLive`).
@@ -111,6 +122,8 @@ export function createComposeFlowTarget(
     reset: () => {
       store.getState().reset();
     },
+    getError: () => store.getState().error,
+    scopeTarget: "compose",
   };
 }
 

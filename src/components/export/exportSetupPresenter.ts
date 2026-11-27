@@ -8,6 +8,13 @@
 
 import { evenSide } from "@/features/export/outputSummary";
 import {
+  narrowToExportScope,
+  scopeSourceIds,
+  type ExportScope,
+  type ExportScopeInput,
+  type ExportScopeSegment,
+} from "@/features/export/scope";
+import {
   formatAudioSampleRateKHz,
   presentContainer,
   presentPresetEncoderMark,
@@ -197,11 +204,17 @@ export type ExportSummaryInput = {
   readonly segmentTotal: bigint | null;
   /** The timecode format of the open source (`resolveTimecodeDisplay`, ADR 028). */
   readonly display: TimecodeDisplay;
+  /**
+   * True when the segments of the scope of the setup step read more than one file (ADR 067). The
+   * sentence then names no file, and `fileName` is not read. Absent means false.
+   */
+  readonly severalFiles?: boolean;
 };
 
 /** The values of the summary sentence at the top of the setup step. */
 export type ExportSummarySentenceView = {
-  readonly key: "export.setup.summary";
+  /** `export.setup.summaryNoFile` names no file, and its view has empty file names. */
+  readonly key: "export.setup.summary" | "export.setup.summaryNoFile";
   /** The number of segments. It also selects the plural form. */
   readonly count: number;
   /**
@@ -249,10 +262,27 @@ export function isolateText(text: string): string {
  *
  * Returns null with no open source or no segment. The export flow reports both before it
  * shows the setup step (ADR 024), so the step does not state an export that cannot run.
+ *
+ * With `severalFiles`, the sentence names no file: "Export 3 segments · 00:01:23:12 in total"
+ * (ADR 067). It returns null with no segment.
  */
 export function presentExportSummarySentence(
   input: ExportSummaryInput,
 ): ExportSummarySentenceView | null {
+  if (input.severalFiles === true) {
+    if (input.segmentCount <= 0) {
+      return null;
+    }
+    return {
+      key: "export.setup.summaryNoFile",
+      count: input.segmentCount,
+      fileName: "",
+      fullFileName: "",
+      shortened: false,
+      title: "",
+      duration: formatSegmentTotal(input.segmentTotal, input.display),
+    };
+  }
   if (input.fileName === null || input.segmentCount <= 0) {
     return null;
   }
@@ -679,6 +709,105 @@ export function activeSourceDurationTicks(
     ticks += length;
   }
   return ticks;
+}
+
+/**
+ * The exact duration that the size estimate reads for `scope` (ADR 067): `activeSourceDurationTicks`
+ * of the segments of the scope that have a place on the timeline, the derived segments
+ * (`narrowToExportScope`). For the whole export, it is the value of every segment of the active
+ * source, as before.
+ */
+export function scopeDurationTicks(
+  timeline: ExportScopeInput,
+  scope: ExportScope,
+): bigint | null {
+  const scoped = narrowToExportScope(timeline, scope);
+  return activeSourceDurationTicks(scoped.segments, scoped.sourceId);
+}
+
+/** The file that the summary sentence of the setup step names (ADR 067). */
+export type ScopeSourceFile =
+  /** The name of the file, or null when it is not known, and the sentence then does not show. */
+  | { readonly kind: "file"; readonly fileName: string | null }
+  /** The segments read more than one file, so the sentence names none. */
+  | { readonly kind: "several" };
+
+/** The facts that `presentScopeSourceFile` reads. */
+export interface ScopeSourceFileInput {
+  readonly scope: ExportScope;
+  /** The segments of the scope (`resolveExportScope`). */
+  readonly segments: readonly ExportScopeSegment[];
+  /** The name of the file that the sentence names for the whole export, as before. */
+  readonly wholeExportFileName: string | null;
+  /**
+   * The file of a source: its canonical path and its name, or undefined when the source has no
+   * imported media.
+   */
+  readonly fileOf: (
+    sourceId: string,
+  ) => { readonly path: string; readonly fileName: string } | undefined;
+}
+
+/**
+ * The file that the summary sentence names (ADR 067). For the whole export, it is the file that
+ * the sentence named before. For a list, it is the file that the pieces of the scope read, when
+ * they read one file, and no file when they read several.
+ *
+ * The sentence counts files and not sources. Two sources with the same canonical path, such as
+ * one file imported again after its modification time changed, are one file. A path compares as
+ * the repository compares it (`mayHoldSourceRevision`): the canonical path of the import, as it
+ * is. A source with no imported media counts as a file of its own. The checks, the limits and
+ * the request keep their source ids.
+ */
+export function presentScopeSourceFile(input: ScopeSourceFileInput): ScopeSourceFile {
+  if (input.scope.kind === "export") {
+    return { kind: "file", fileName: input.wholeExportFileName };
+  }
+  const files = new Map<string, string | null>();
+  for (const id of scopeSourceIds(input.segments)) {
+    const file = input.fileOf(id);
+    // A key of the path, or of the source when its file is not known. The two prefixes keep a
+    // path apart from a source id.
+    files.set(
+      file === undefined ? `source:${id}` : `path:${file.path}`,
+      file?.fileName ?? null,
+    );
+  }
+  if (files.size > 1) {
+    return { kind: "several" };
+  }
+  const [only] = files.values();
+  return { kind: "file", fileName: only ?? null };
+}
+
+/** The line of the setup step for a list of selected segments (ADR 067). */
+export type SelectedSegmentsLineView = {
+  readonly key: "export.setup.selectedSegments";
+  readonly values: {
+    /** The number of the segments of the scope. It also selects the plural form. */
+    readonly count: number;
+    /** The number of the segments of the export. */
+    readonly total: number;
+  };
+};
+
+/**
+ * The line that says that the export takes only the selected segments, with the number of the
+ * segments of the scope and the number of the segments of the export (ADR 067). Null for the
+ * whole export, which shows no such line.
+ */
+export function presentSelectedSegmentsLine(
+  scope: ExportScope,
+  scopeCount: number,
+  exportCount: number,
+): SelectedSegmentsLineView | null {
+  if (scope.kind === "export") {
+    return null;
+  }
+  return {
+    key: "export.setup.selectedSegments",
+    values: { count: scopeCount, total: exportCount },
+  };
 }
 
 /** An exact non-negative number of bytes, `num / den`. */

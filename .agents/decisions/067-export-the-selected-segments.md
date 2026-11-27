@@ -53,6 +53,12 @@ again. So a list never gives fewer frames, or other frames, than the user select
 
 The scope goes with each step of the flow. No step reads a scope that another step set later.
 
+The dialog has two places that can show a setup step: the export of the dialog, and the new
+export for the queue while a run is active or waits (ADR 049). Each place has its own scope.
+Each rule below is about the scope of the place of its step. So a step, an error or a failure
+that one place holds while the dialog shows the other place does not change what the dialog
+shows, and an answer in one place reads the scope of that place.
+
 - **An action of the user.** The Export action starts an open step with the whole export. The
   action of this record starts an open step with a new list of the selected segments, with its
   record. An open step can wait for a check of the source files. When it shows the setup step,
@@ -80,6 +86,12 @@ The scope goes with each step of the flow. No step reads a scope that another st
   when the list is no longer valid. A run with no kept scope, such as a run from before the
   page loaded again (ADR 051), has the whole export as its scope.
 - **Back from the error of an open step.** The scope stays. That open step set it.
+- **A setup step that no step opened.** The dialog can come to show the export of the dialog
+  with no open step and no Back. The indicator of the status bar opens the dialog on it. The
+  dialog also goes back to it when the queue takes a new export (ADR 049). When that place
+  holds no run, no result and no error at that moment, the dialog shows its setup step. The
+  scope of that setup step becomes the whole export. When the dialog shows that place already,
+  the scope stays.
 - **The dialog hides or closes, or the user cancels the save dialog.** The scope stays.
 
 A request is complete when the queue takes it. The scope has no effect on a run.
@@ -173,6 +185,13 @@ replaced.
 - After the page loads again, Back from the result of an earlier run opens the setup step of
   the whole export, also when that run had a list. The step shows no line for selected
   segments then, and it counts all the segments.
+- A setup step that the indicator of the status bar opens is a step of the whole export, also
+  when the last setup step of that place had a list.
+- An open step that answers shows its setup step, as before, also when the dialog shows a setup
+  step that no step opened. So a click on the indicator of the status bar while the checks of
+  Export Selected Segments wait can show the setup step of the whole export first. When the
+  checks end, the dialog shows the setup step of the list, with its line for the selected
+  segments. The confirm step reads the scope only when the user confirms.
 - The default name of a list of several segments is the name of the whole export. The save
   dialog asks before it replaces that file.
 - While an import runs, the item of the menu is disabled.
