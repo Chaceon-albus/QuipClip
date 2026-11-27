@@ -4,8 +4,9 @@ use crate::ffmpeg::capabilities::PROBE_DETAIL_LIMIT;
 use crate::ffmpeg::{self, FfmpegPaths, MediaProbe, ProbeError};
 use crate::flv::cache::Revision;
 use crate::flv::growth;
+use crate::project::{self, SourceFingerprint};
 use crate::settings;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+// The text form of a fingerprint and the fingerprint of the process cover the same bytes.
+const _: () = assert!(project::FINGERPRINT_MAX_LEN == growth::FINGERPRINT_LEN);
 
 /// Facts about one validated media file that the frontend can use immediately.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -23,6 +27,33 @@ pub struct ImportMediaResult {
     pub size: u64,
     pub mtime: i64,
     pub probe: MediaProbe,
+    /// The fingerprint that this import kept for its revision (ADR 058), in the text form of
+    /// the project file (ADR 072), or `None` when it kept none. Only an FLV has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<SourceFingerprint>,
+}
+
+/// The revision of a file that the caller expects (ADR 072): the size, the modification time,
+/// and the fingerprint of an FLV when the project file has one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpectedRevision {
+    pub size: u64,
+    pub mtime: i64,
+    /// Absent for a revision with no fingerprint. A present `null` is refused.
+    #[serde(default, deserialize_with = "crate::project::deserialize_present")]
+    pub fingerprint: Option<SourceFingerprint>,
+}
+
+/// What the check of a file against an expected revision found, when it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedVerdict {
+    /// The revision has no fingerprint, and the file has its size and its modification time.
+    /// The import continues as an import with no expected revision.
+    Same,
+    /// The revision has this fingerprint, and the file holds it: `Same` or `Grown` of ADR 072.
+    /// The import reads the file as the expected revision.
+    Fingerprinted(growth::Fingerprint),
 }
 
 /// The revision facts of one media file, and nothing else.
@@ -58,6 +89,9 @@ pub enum ImportMediaErrorCode {
     /// loading state for as long as the application runs.
     FfprobeTimedOut,
     AssetScopeDenied,
+    /// The file is not the revision that the caller expects (ADR 072). The command ran no probe
+    /// and gave the web view no permission to read the file.
+    RevisionMismatch,
     CommandExecutionFailed,
 }
 
@@ -100,10 +134,15 @@ pub(crate) struct ValidatedMedia {
 }
 
 /// Validate, inspect, and authorize exactly one user-selected media file.
+///
+/// With `expected`, the file must be that revision (ADR 072), or the command answers
+/// `revisionMismatch` before the probe and before the grant. An FLV whose revision has a
+/// fingerprint and that a recorder wrote further is read as its first `expected.size` bytes.
 #[tauri::command]
 pub async fn import_media(
     app: tauri::AppHandle,
     path: String,
+    expected: Option<ExpectedRevision>,
 ) -> Result<ImportMediaResult, ImportMediaError> {
     let app_data_directory = app
         .path()
@@ -113,6 +152,7 @@ pub async fn import_media(
     tauri::async_runtime::spawn_blocking(move || {
         import_media_with(
             &path,
+            expected.as_ref(),
             &app_data_directory,
             settings::configured_ffmpeg_path,
             ffmpeg::discover,
@@ -128,8 +168,10 @@ pub async fn import_media(
     .map_err(|error| join_failure(&error))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_media_with<ConfiguredPath, Discover, Probe, Allow>(
     path: &str,
+    expected: Option<&ExpectedRevision>,
     app_data_directory: &Path,
     configured_path: ConfiguredPath,
     discover: Discover,
@@ -143,17 +185,39 @@ where
     Allow: FnOnce(&Path) -> Result<(), String>,
 {
     let media = validate_media(path)?;
-    // Right after the size, before the probe can take seconds: a recorder that starts the file
-    // again meanwhile must not give its bytes to this revision (ADR 058). A file that is not an
-    // FLV gives none after one block.
-    let fingerprint = growth::fingerprint(&media.path, media.size);
+    // The check of an expected revision comes before the probe and before the grant (ADR 072).
+    let verdict = expected
+        .map(|expected| check_expected(&media, expected))
+        .transpose()?;
+    // The revision that this import reads, and its fingerprint.
+    let (size, mtime, fingerprint, must_be_flv) = match (expected, verdict) {
+        (Some(expected), Some(ExpectedVerdict::Fingerprinted(fingerprint))) => {
+            (expected.size, expected.mtime, Some(fingerprint), true)
+        }
+        // Right after the size, before the probe can take seconds: a recorder that starts the
+        // file again meanwhile must not give its bytes to this revision (ADR 058). A file that
+        // is not an FLV gives none after one block.
+        _ => (
+            media.size,
+            media.mtime,
+            growth::fingerprint(&media.path, media.size),
+            false,
+        ),
+    };
     let configured = configured_path(app_data_directory);
     let executables = discover(configured.as_deref(), app_data_directory)
         .map_err(|_| generated_error(ImportMediaErrorCode::FfmpegPairMissing))?;
     // The probe reads an FLV no further than the size of this revision, so the length that it
     // reports is the length of the revision, also while a recorder still writes the file
     // (ADR 058).
-    let probe = probe(&executables.ffprobe, &media.path, media.size).map_err(map_probe_error)?;
+    let probe = probe(&executables.ffprobe, &media.path, size).map_err(map_probe_error)?;
+    let is_flv = probe.format_names.iter().any(|name| name == "flv");
+    // Only an FLV can hold a fingerprint, so a revision with one names an FLV (ADR 072).
+    if must_be_flv && !is_flv {
+        return Err(ImportMediaError::new(
+            ImportMediaErrorCode::RevisionMismatch,
+        ));
+    }
 
     // The scope denial carries its diagnostic. `import_media`'s closure stringifies the Tauri
     // error on purpose, and a denial is not an enumerable condition: the scope layer refuses a
@@ -165,14 +229,13 @@ where
     })?;
 
     // Later checks of this revision accept the file when a recorder only added to it.
-    if let Some(fingerprint) =
-        fingerprint.filter(|_| probe.format_names.iter().any(|name| name == "flv"))
-    {
+    let kept = fingerprint.filter(|_| is_flv);
+    if let Some(fingerprint) = kept {
         growth::keep(
             &Revision {
                 path: media.path_text.clone(),
-                size: media.size,
-                mtime: media.mtime,
+                size,
+                mtime,
             },
             fingerprint,
         );
@@ -181,10 +244,53 @@ where
     Ok(ImportMediaResult {
         path: media.path_text,
         file_name: media.file_name,
-        size: media.size,
-        mtime: media.mtime,
+        size,
+        mtime,
         probe,
+        fingerprint: kept.map(|fingerprint| {
+            SourceFingerprint::from_parts(fingerprint.start(), fingerprint.fnv1a64())
+        }),
     })
+}
+
+/// Compare the file that `media` describes with the revision `expected` (ADR 072).
+///
+/// - With no fingerprint, the file holds the revision when its size and its modification time
+///   are those of the revision (`Same`).
+/// - With a fingerprint, the file holds the revision when its size is not smaller, its
+///   modification time is not earlier, and the fingerprint of its first `expected.size` bytes
+///   has the start and the hash of the expected one (`Same` or `Grown`).
+///
+/// Each other case is `revisionMismatch`. A fingerprint that breaks a rule of the project file
+/// names no revision of a file, so it is `revisionMismatch` too.
+///
+/// First the file must open for reading. A stat does not show that: a file whose permissions
+/// refuse each read keeps its size and its modification time. Such a file fails with
+/// `metadataFailed` and the error of the system as its detail.
+fn check_expected(
+    media: &ValidatedMedia,
+    expected: &ExpectedRevision,
+) -> Result<ExpectedVerdict, ImportMediaError> {
+    fs::File::open(&media.path).map_err(|error| {
+        ImportMediaError::with_detail(ImportMediaErrorCode::MetadataFailed, error.to_string())
+    })?;
+    let mismatch = || ImportMediaError::new(ImportMediaErrorCode::RevisionMismatch);
+    let Some(text) = expected.fingerprint.as_ref() else {
+        return if media.size == expected.size && media.mtime == expected.mtime {
+            Ok(ExpectedVerdict::Same)
+        } else {
+            Err(mismatch())
+        };
+    };
+    let (start, hash) = project::parse_fingerprint(text, expected.size).ok_or_else(mismatch)?;
+    let wanted = growth::Fingerprint::new(start, hash);
+    if media.size < expected.size || media.mtime < expected.mtime {
+        return Err(mismatch());
+    }
+    match growth::fingerprint(&media.path, expected.size) {
+        Some(found) if found == wanted => Ok(ExpectedVerdict::Fingerprinted(wanted)),
+        _ => Err(mismatch()),
+    }
 }
 
 /// Read the revision facts of one already-imported media file.
@@ -196,16 +302,31 @@ where
 /// that is no longer a regular file, and metadata outside the safe-integer range are decided in
 /// the one place `import_media` decides them and are reported with the same
 /// [`ImportMediaErrorCode`] values the frontend already translates.
+///
+/// With `expected`, the command gives the verdict of `import_media` for that revision (ADR 072)
+/// with no probe: a file that does not hold it answers `revisionMismatch`. A file that holds it
+/// answers its stat, as without `expected`.
 #[tauri::command]
-pub async fn read_source_revision(path: String) -> Result<SourceRevision, ImportMediaError> {
-    tauri::async_runtime::spawn_blocking(move || read_source_revision_blocking(&path))
-        .await
-        .map_err(|error| join_failure(&error))?
+pub async fn read_source_revision(
+    path: String,
+    expected: Option<ExpectedRevision>,
+) -> Result<SourceRevision, ImportMediaError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_source_revision_blocking(&path, expected.as_ref())
+    })
+    .await
+    .map_err(|error| join_failure(&error))?
 }
 
 /// The body of [`read_source_revision`], off the async runtime so a test can reach it.
-fn read_source_revision_blocking(path: &str) -> Result<SourceRevision, ImportMediaError> {
+fn read_source_revision_blocking(
+    path: &str,
+    expected: Option<&ExpectedRevision>,
+) -> Result<SourceRevision, ImportMediaError> {
     let media = validate_media(path)?;
+    if let Some(expected) = expected {
+        check_expected(&media, expected)?;
+    }
     Ok(SourceRevision {
         path: media.path_text,
         size: media.size,
@@ -427,6 +548,7 @@ mod tests {
             let called = RefCell::new(false);
             let error = import_media_with(
                 &path,
+                None,
                 &directory.path,
                 |_| unreachable!(),
                 |_, _| {
@@ -460,7 +582,7 @@ mod tests {
                 ImportMediaErrorCode::PathNotFile,
             ),
         ] {
-            let error = read_source_revision_blocking(&path).unwrap_err();
+            let error = read_source_revision_blocking(&path, None).unwrap_err();
             assert_eq!(error.code, expected);
         }
     }
@@ -471,7 +593,7 @@ mod tests {
         let media_path = directory.file("clip.mp4", b"media");
         let canonical = media_path.canonicalize().unwrap();
 
-        let revision = read_source_revision_blocking(media_path.to_str().unwrap()).unwrap();
+        let revision = read_source_revision_blocking(media_path.to_str().unwrap(), None).unwrap();
 
         assert_eq!(revision.path, canonical.to_str().unwrap());
         assert_eq!(revision.size, 5);
@@ -490,7 +612,7 @@ mod tests {
         let directory = TestDirectory::new();
         let media_path = directory.file("clip.mp4", b"media");
 
-        let revision = read_source_revision_blocking(media_path.to_str().unwrap()).unwrap();
+        let revision = read_source_revision_blocking(media_path.to_str().unwrap(), None).unwrap();
         let value = serde_json::to_value(&revision).unwrap();
 
         assert_eq!(value["size"], 5);
@@ -511,6 +633,7 @@ mod tests {
 
         let error = import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| None,
             |_, _| Err(ffmpeg::LocateError::NotFound { inspected: vec![] }),
@@ -540,6 +663,7 @@ mod tests {
 
         let result = import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| {
                 events.borrow_mut().push("configured-path");
@@ -581,6 +705,7 @@ mod tests {
 
         import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| Some(PathBuf::from("/configured/bin")),
             |configured, _| {
@@ -606,6 +731,7 @@ mod tests {
 
         import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| None,
             |configured, _| {
@@ -628,6 +754,7 @@ mod tests {
 
         let error = import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
@@ -691,6 +818,7 @@ mod tests {
 
         let error = import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
@@ -835,6 +963,7 @@ mod tests {
         let app_data = media_path.parent().unwrap();
         import_media_with(
             media_path.to_str().unwrap(),
+            None,
             app_data,
             |_| None,
             |_, _| Ok(fake_executables(app_data)),
@@ -856,6 +985,7 @@ mod tests {
         let media_path = directory.file("live.flv", bytes);
         let result = import_media_with(
             media_path.to_str().unwrap(),
+            None,
             &directory.path,
             |_| None,
             |_, _| Ok(fake_executables(&directory.path)),
@@ -915,6 +1045,481 @@ mod tests {
             ),
             growth::Verdict::Changed
         );
+    }
+
+    /// What one import with an expected revision did: its result, the size that each probe
+    /// read, and the number of grants of the asset scope.
+    struct ExpectedImport {
+        result: Result<ImportMediaResult, ImportMediaError>,
+        probes: Vec<u64>,
+        grants: usize,
+    }
+
+    fn import_expecting(
+        path: &Path,
+        expected: &ExpectedRevision,
+        probe: MediaProbe,
+    ) -> ExpectedImport {
+        let probes = RefCell::new(Vec::new());
+        let grants = RefCell::new(0);
+        let app_data = path.parent().unwrap();
+        let result = import_media_with(
+            path.to_str().unwrap(),
+            Some(expected),
+            app_data,
+            |_| None,
+            |_, _| Ok(fake_executables(app_data)),
+            |_, _, size| {
+                probes.borrow_mut().push(size);
+                Ok(probe)
+            },
+            |_| {
+                *grants.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+        ExpectedImport {
+            result,
+            probes: probes.into_inner(),
+            grants: grants.into_inner(),
+        }
+    }
+
+    fn assert_mismatch_without_probe(import: &ExpectedImport, case: &str) {
+        assert_eq!(
+            import.result.as_ref().map(|_| ()).unwrap_err().code,
+            ImportMediaErrorCode::RevisionMismatch,
+            "{case}"
+        );
+        assert!(import.probes.is_empty(), "{case}");
+        assert_eq!(import.grants, 0, "{case}");
+    }
+
+    fn flv_probe() -> MediaProbe {
+        MediaProbe {
+            format_names: vec!["flv".to_owned()],
+            ..fake_probe()
+        }
+    }
+
+    /// The text form of a fingerprint of the process.
+    fn text_of(fingerprint: growth::Fingerprint) -> SourceFingerprint {
+        SourceFingerprint::from_parts(fingerprint.start(), fingerprint.fnv1a64())
+    }
+
+    /// A recording cut inside a tag, as a recorder leaves it between two writes, written as
+    /// `live.flv` in a new directory. Returns the whole recording and the revision of the cut
+    /// file with its fingerprint, as a project file holds it.
+    fn saved_flv() -> (TestDirectory, PathBuf, Vec<u8>, ExpectedRevision) {
+        let bytes = crate::flv::test_support::recording(
+            &crate::flv::test_support::RecordingOptions::default(),
+        )
+        .bytes;
+        let directory = TestDirectory::new();
+        let path = directory.file("live.flv", &bytes[..bytes.len() - 1000]);
+        let media = validate_media(path.to_str().unwrap()).unwrap();
+        let fingerprint = growth::fingerprint(&media.path, media.size).unwrap();
+        let expected = ExpectedRevision {
+            size: media.size,
+            mtime: media.mtime,
+            fingerprint: Some(text_of(fingerprint)),
+        };
+        (directory, path, bytes, expected)
+    }
+
+    /// The verdict of ADR 058 on the file at `path` now, for the revision of `result`.
+    fn verdict_now(path: &Path, result: &ImportMediaResult) -> growth::Verdict {
+        let now = validate_media(path.to_str().unwrap()).unwrap();
+        growth::verdict(
+            &Revision {
+                path: result.path.clone(),
+                size: result.size,
+                mtime: result.mtime,
+            },
+            &now.path,
+            now.size,
+            now.mtime,
+        )
+    }
+
+    #[test]
+    fn the_same_flv_imports_as_the_expected_revision_and_keeps_its_fingerprint() {
+        let (_directory, path, bytes, expected) = saved_flv();
+        let import = import_expecting(&path, &expected, flv_probe());
+        let result = import.result.unwrap();
+        assert_eq!(import.probes, vec![expected.size]);
+        assert_eq!(import.grants, 1);
+        assert_eq!(result.size, expected.size);
+        assert_eq!(result.mtime, expected.mtime);
+        assert_eq!(result.fingerprint, expected.fingerprint);
+        // The process keeps the fingerprint, so a later check accepts the file that grew.
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(verdict_now(&path, &result), growth::Verdict::Grown);
+    }
+
+    #[test]
+    fn a_grown_flv_imports_as_the_revision_that_the_project_saved() {
+        let (_directory, path, bytes, expected) = saved_flv();
+        fs::write(&path, &bytes).unwrap();
+        let import = import_expecting(&path, &expected, flv_probe());
+        let result = import.result.unwrap();
+        // The probe reads the first `size` bytes, and the answer is the expected revision.
+        assert_eq!(import.probes, vec![expected.size]);
+        assert_eq!(import.grants, 1);
+        assert_eq!(result.size, expected.size);
+        assert!(result.size < bytes.len() as u64);
+        assert_eq!(result.mtime, expected.mtime);
+        assert_eq!(result.fingerprint, expected.fingerprint);
+        assert_eq!(verdict_now(&path, &result), growth::Verdict::Grown);
+    }
+
+    #[test]
+    fn a_file_that_is_not_the_expected_revision_runs_no_probe_and_no_grant() {
+        let (_directory, path, bytes, expected) = saved_flv();
+        let cut = expected.size as usize;
+        let fingerprint = expected.fingerprint.clone().unwrap();
+        let (start, hash) = project::parse_fingerprint(&fingerprint, expected.size).unwrap();
+
+        // A recorder that started the file again: other bytes in front of the size.
+        let mut restarted = bytes.clone();
+        restarted[cut - 10] ^= 0xFF;
+        fs::write(&path, &restarted).unwrap();
+        assert_mismatch_without_probe(
+            &import_expecting(&path, &expected, flv_probe()),
+            "restarted",
+        );
+
+        // A smaller file.
+        fs::write(&path, &bytes[..cut - 1]).unwrap();
+        assert_mismatch_without_probe(&import_expecting(&path, &expected, flv_probe()), "smaller");
+
+        // The file as it was saved, against other expectations.
+        fs::write(&path, &bytes[..cut]).unwrap();
+        let mtime = validate_media(path.to_str().unwrap()).unwrap().mtime;
+        let cases = [
+            (
+                "an earlier time",
+                ExpectedRevision {
+                    mtime: mtime + 1,
+                    ..expected.clone()
+                },
+            ),
+            (
+                "another start",
+                ExpectedRevision {
+                    mtime,
+                    fingerprint: Some(SourceFingerprint::from_parts(start + 1, hash)),
+                    ..expected.clone()
+                },
+            ),
+            (
+                "another hash",
+                ExpectedRevision {
+                    mtime,
+                    fingerprint: Some(SourceFingerprint::from_parts(start, hash ^ 1)),
+                    ..expected.clone()
+                },
+            ),
+            (
+                "a fingerprint that breaks its form",
+                ExpectedRevision {
+                    mtime,
+                    fingerprint: Some(SourceFingerprint {
+                        start: fingerprint.start.clone(),
+                        fnv1a64: fingerprint.fnv1a64.to_uppercase(),
+                    }),
+                    ..expected.clone()
+                },
+            ),
+            (
+                "a start beyond the size",
+                ExpectedRevision {
+                    mtime,
+                    fingerprint: Some(SourceFingerprint::from_parts(expected.size, hash)),
+                    ..expected.clone()
+                },
+            ),
+        ];
+        for (case, other) in &cases {
+            assert_mismatch_without_probe(&import_expecting(&path, other, flv_probe()), case);
+        }
+        // The same file against its own revision still imports.
+        let same = ExpectedRevision {
+            mtime,
+            ..expected.clone()
+        };
+        assert!(import_expecting(&path, &same, flv_probe()).result.is_ok());
+    }
+
+    #[test]
+    fn a_revision_with_a_fingerprint_needs_an_flv() {
+        // A file that is not an FLV has no fingerprint: no probe runs.
+        let directory = TestDirectory::new();
+        let path = directory.file("clip.mp4", &[0u8; 4096]);
+        let media = validate_media(path.to_str().unwrap()).unwrap();
+        let expected = ExpectedRevision {
+            size: media.size,
+            mtime: media.mtime,
+            fingerprint: Some(SourceFingerprint::from_parts(0, 0x1234)),
+        };
+        assert_mismatch_without_probe(&import_expecting(&path, &expected, flv_probe()), "zeros");
+
+        // The bytes of an FLV whose probe names another format: the probe runs, the grant does
+        // not, and the process keeps no fingerprint.
+        let (_flv_directory, flv_path, bytes, expected) = saved_flv();
+        fs::write(&flv_path, &bytes).unwrap();
+        let import = import_expecting(&flv_path, &expected, fake_probe());
+        assert_eq!(
+            import.result.as_ref().map(|_| ()).unwrap_err().code,
+            ImportMediaErrorCode::RevisionMismatch
+        );
+        assert_eq!(import.probes, vec![expected.size]);
+        assert_eq!(import.grants, 0);
+        let now = validate_media(flv_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            growth::verdict(
+                &Revision {
+                    path: now.path_text.clone(),
+                    size: expected.size,
+                    mtime: expected.mtime,
+                },
+                &now.path,
+                now.size,
+                now.mtime,
+            ),
+            growth::Verdict::Changed
+        );
+    }
+
+    #[test]
+    fn a_revision_with_no_fingerprint_needs_the_same_size_and_time() {
+        let directory = TestDirectory::new();
+        let path = directory.file("clip.mp4", b"media");
+        let media = validate_media(path.to_str().unwrap()).unwrap();
+        let same = ExpectedRevision {
+            size: 5,
+            mtime: media.mtime,
+            fingerprint: None,
+        };
+        let import = import_expecting(&path, &same, fake_probe());
+        let result = import.result.unwrap();
+        assert_eq!(import.probes, vec![5]);
+        assert_eq!(import.grants, 1);
+        assert_eq!((result.size, result.mtime), (5, media.mtime));
+        assert_eq!(result.fingerprint, None);
+        for (case, other) in [
+            (
+                "another size",
+                ExpectedRevision {
+                    size: 4,
+                    ..same.clone()
+                },
+            ),
+            (
+                "another time",
+                ExpectedRevision {
+                    mtime: media.mtime - 1,
+                    ..same.clone()
+                },
+            ),
+        ] {
+            assert_mismatch_without_probe(&import_expecting(&path, &other, fake_probe()), case);
+        }
+
+        // An FLV of the same revision imports as with no expected revision, and keeps its
+        // fingerprint. One that grew needs the fingerprint in the expected revision.
+        let (_flv_directory, flv_path, bytes, with_fingerprint) = saved_flv();
+        let without = ExpectedRevision {
+            fingerprint: None,
+            ..with_fingerprint.clone()
+        };
+        let result = import_expecting(&flv_path, &without, flv_probe())
+            .result
+            .unwrap();
+        assert_eq!(result.fingerprint, with_fingerprint.fingerprint);
+        fs::write(&flv_path, &bytes).unwrap();
+        assert_mismatch_without_probe(
+            &import_expecting(&flv_path, &without, flv_probe()),
+            "grown without a fingerprint",
+        );
+    }
+
+    #[test]
+    fn an_import_answers_the_fingerprint_that_it_kept() {
+        let (directory, path, _bytes, expected) = saved_flv();
+        let import = |probe: MediaProbe| {
+            import_media_with(
+                path.to_str().unwrap(),
+                None,
+                &directory.path,
+                |_| None,
+                |_, _| Ok(fake_executables(&directory.path)),
+                |_, _, _| Ok(probe),
+                |_| Ok(()),
+            )
+            .unwrap()
+        };
+        let flv = import(flv_probe());
+        assert_eq!(flv.fingerprint, expected.fingerprint);
+        let value = serde_json::to_value(&flv).unwrap();
+        let fingerprint = expected.fingerprint.unwrap();
+        assert_eq!(
+            value["fingerprint"],
+            serde_json::json!({ "start": fingerprint.start, "fnv1a64": fingerprint.fnv1a64 })
+        );
+        // Another container keeps none, and the answer has no field.
+        let other = import(fake_probe());
+        assert_eq!(other.fingerprint, None);
+        assert!(serde_json::to_value(&other)
+            .unwrap()
+            .get("fingerprint")
+            .is_none());
+    }
+
+    #[test]
+    fn a_revision_read_gives_the_verdict_of_an_expected_revision() {
+        let (_directory, path, bytes, expected) = saved_flv();
+        let text = path.to_str().unwrap();
+        // The same file answers its stat.
+        let same = read_source_revision_blocking(text, Some(&expected)).unwrap();
+        assert_eq!((same.size, same.mtime), (expected.size, expected.mtime));
+        // A file that grew answers the stat of the file now.
+        fs::write(&path, &bytes).unwrap();
+        let grown = read_source_revision_blocking(text, Some(&expected)).unwrap();
+        assert_eq!(grown.size, bytes.len() as u64);
+        // Another file answers the error.
+        let mut restarted = bytes.clone();
+        restarted[expected.size as usize - 10] ^= 0xFF;
+        fs::write(&path, &restarted).unwrap();
+        assert_eq!(
+            read_source_revision_blocking(text, Some(&expected))
+                .unwrap_err()
+                .code,
+            ImportMediaErrorCode::RevisionMismatch
+        );
+        // With no fingerprint, only the same size and time hold.
+        let now = read_source_revision_blocking(text, None).unwrap();
+        let exact = ExpectedRevision {
+            size: now.size,
+            mtime: now.mtime,
+            fingerprint: None,
+        };
+        assert_eq!(
+            read_source_revision_blocking(text, Some(&exact)).unwrap(),
+            now
+        );
+        assert_eq!(
+            read_source_revision_blocking(
+                text,
+                Some(&ExpectedRevision {
+                    size: now.size - 1,
+                    ..exact
+                })
+            )
+            .unwrap_err()
+            .code,
+            ImportMediaErrorCode::RevisionMismatch
+        );
+    }
+
+    #[test]
+    fn a_mismatch_wins_over_a_missing_ffmpeg() {
+        // The check comes before discovery: no callback may run.
+        let directory = TestDirectory::new();
+        let path = directory.file("clip.mp4", b"media");
+        let media = validate_media(path.to_str().unwrap()).unwrap();
+        let other = ExpectedRevision {
+            size: 4,
+            mtime: media.mtime,
+            fingerprint: None,
+        };
+        let error = import_media_with(
+            path.to_str().unwrap(),
+            Some(&other),
+            &directory.path,
+            |_| panic!("the configured path must not be read"),
+            |_, _| panic!("discovery must not run"),
+            |_, _, _| panic!("the probe must not run"),
+            |_| panic!("the grant must not happen"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ImportMediaErrorCode::RevisionMismatch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_expected_revision_needs_a_file_that_opens_for_reading() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.file("clip.mp4", b"media");
+        let media = validate_media(path.to_str().unwrap()).unwrap();
+        let same = ExpectedRevision {
+            size: media.size,
+            mtime: media.mtime,
+            fingerprint: None,
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::File::open(&path).is_ok();
+        let text = path.to_str().unwrap();
+        // The stat alone does not see the permissions, so a revision read with no expected
+        // revision still answers.
+        let stat = read_source_revision_blocking(text, None);
+        let with_expected = read_source_revision_blocking(text, Some(&same));
+        let import = import_expecting(&path, &same, fake_probe());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(stat.unwrap().size, media.size);
+        // A process that reads each file anyway, such as one of the superuser, cannot test this.
+        if readable {
+            return;
+        }
+        let error = with_expected.unwrap_err();
+        assert_eq!(error.code, ImportMediaErrorCode::MetadataFailed);
+        assert!(error.detail.is_some());
+        let error = import.result.as_ref().map(|_| ()).unwrap_err();
+        assert_eq!(error.code, ImportMediaErrorCode::MetadataFailed);
+        assert!(import.probes.is_empty());
+        assert_eq!(import.grants, 0);
+    }
+
+    #[test]
+    fn an_expected_revision_reads_from_camel_case_json_and_refuses_null() {
+        let plain: ExpectedRevision =
+            serde_json::from_value(serde_json::json!({ "size": 5, "mtime": -3 })).unwrap();
+        assert_eq!(
+            plain,
+            ExpectedRevision {
+                size: 5,
+                mtime: -3,
+                fingerprint: None
+            }
+        );
+        let with: ExpectedRevision = serde_json::from_value(serde_json::json!({
+            "size": 5,
+            "mtime": 1,
+            "fingerprint": { "start": "0", "fnv1a64": "00000000000000ff" }
+        }))
+        .unwrap();
+        assert_eq!(
+            with.fingerprint,
+            Some(SourceFingerprint::from_parts(0, 0xff))
+        );
+        for bad in [
+            serde_json::json!({ "size": 5, "mtime": 1, "fingerprint": null }),
+            serde_json::json!({ "size": 5, "mtime": 1, "videoEndPts": "1" }),
+            serde_json::json!({ "size": 5 }),
+            serde_json::json!({ "size": -1, "mtime": 1 }),
+            serde_json::json!({
+                "size": 5,
+                "mtime": 1,
+                "fingerprint": { "start": "0", "fnv1a64": "00000000000000ff", "x": 1 }
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<ExpectedRevision>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     fn fake_executables(directory: &Path) -> FfmpegPaths {

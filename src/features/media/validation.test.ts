@@ -651,6 +651,55 @@ describe("Media Validation & Normalization", () => {
       expect(validateImportMediaResult(valid)).toEqual(valid);
     });
 
+    /** An import result of an FLV with `fingerprint`. Only an FLV keeps one (ADR 058). */
+    function createFlvImportResult(fingerprint: unknown): Record<string, unknown> {
+      return {
+        ...createValidImportResult({
+          probe: {
+            ...createValidProbe(),
+            formatNames: ["flv"],
+            formatLongName: "FLV (Flash Video)",
+          },
+        }),
+        fingerprint,
+      };
+    }
+
+    it("keeps a fingerprint of an FLV that fits the size of the revision, as a copy (ADR 072)", () => {
+      // The size is 10485760: the fingerprint covers the last 64 KiB in front of it.
+      const fingerprint = { start: "10420224", fnv1a64: "9f3c5a7714e0b2d1" };
+      const valid = createFlvImportResult(fingerprint);
+      const result = validateImportMediaResult(valid);
+      expect(result.fingerprint).toEqual(fingerprint);
+      expect(result.fingerprint).not.toBe(fingerprint);
+      expect(
+        "fingerprint" in validateImportMediaResult(createValidImportResult()),
+      ).toBe(false);
+    });
+
+    it("refuses a fingerprint that is null, malformed, or outside the revision", () => {
+      for (const fingerprint of [
+        null,
+        { start: "10420223", fnv1a64: "9f3c5a7714e0b2d1" },
+        { start: "10485760", fnv1a64: "9f3c5a7714e0b2d1" },
+        { start: "10420224", fnv1a64: "9F3C5A7714E0B2D1" },
+        { start: "010420224", fnv1a64: "9f3c5a7714e0b2d1" },
+        { start: 10420224, fnv1a64: "9f3c5a7714e0b2d1" },
+      ]) {
+        expect(() =>
+          validateImportMediaResult(createFlvImportResult(fingerprint)),
+        ).toThrow(TypeError);
+      }
+    });
+
+    it("refuses a fingerprint when the probe does not name flv", () => {
+      const payload: Record<string, unknown> = {
+        ...createValidImportResult(),
+        fingerprint: { start: "10420224", fnv1a64: "9f3c5a7714e0b2d1" },
+      };
+      expect(() => validateImportMediaResult(payload)).toThrow(TypeError);
+    });
+
     it("accepts valid nullable optional fields in probe", () => {
       const validWithNulls = createValidImportResult({
         probe: {

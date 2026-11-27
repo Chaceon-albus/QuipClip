@@ -15,6 +15,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 export const BACKEND_COMMANDS = {
   IMPORT_MEDIA: "import_media",
   READ_SOURCE_REVISION: "read_source_revision",
+  LOAD_PROJECT: "load_project",
+  SAVE_PROJECT: "save_project",
   START_CAPABILITY_PROBE: "start_capability_probe",
   TEST_PRESET: "test_preset",
   PRESET_TEST_RESULTS: "preset_test_results",

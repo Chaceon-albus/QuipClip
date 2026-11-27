@@ -355,6 +355,7 @@ export const zhCN: TranslationCatalog = {
     ffprobeTimedOut:
       "ffprobe 未在限定时间内响应。该文件可能位于已停止响应的驱动器或共享位置上。",
     assetScopeDenied: "资源协议拒绝访问该媒体文件。",
+    revisionMismatch: "该文件在项目保存后已更改。",
     commandExecutionFailed: "无法运行媒体导入命令。",
     dialogFailed: "无法打开文件选择对话框。",
     sourceExtentUnknown:

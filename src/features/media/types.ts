@@ -4,10 +4,19 @@
  * See ADR 002, ADR 003, ADR 007, and ADR 010.
  */
 
-import type { FrameCount, Pts, Rational, TickCount } from "@/types/project";
+import type {
+  FrameCount,
+  Pts,
+  Rational,
+  SourceFingerprint,
+  TickCount,
+} from "@/types/project";
 
 /**
  * Backend error codes returned by the Rust `import_media` command.
+ *
+ * `revisionMismatch`: the file is not the revision that the caller expects (ADR 072). The
+ * command ran no probe and gave the web view no permission to read the file.
  */
 export const BACKEND_IMPORT_MEDIA_ERROR_CODES = [
   "invalidPath",
@@ -23,6 +32,7 @@ export const BACKEND_IMPORT_MEDIA_ERROR_CODES = [
   "ffprobeParseFailed",
   "ffprobeTimedOut",
   "assetScopeDenied",
+  "revisionMismatch",
   "commandExecutionFailed",
 ] as const;
 
@@ -210,6 +220,25 @@ export type ImportMediaResult = {
   mtime: number;
   /** Detailed container and stream probe facts. */
   probe: MediaProbe;
+  /**
+   * The fingerprint that the import kept for its revision (ADR 058), in the text form of the
+   * project file (ADR 072), or absent when it kept none. Only an FLV has one.
+   */
+  fingerprint?: SourceFingerprint;
+};
+
+/**
+ * The revision of a file that the caller of `importMedia` or `readSourceRevision` expects
+ * (ADR 072): the size, the modification time, and the fingerprint of an FLV when the project file
+ * has one. A file that does not hold it fails with `revisionMismatch`.
+ */
+export type ExpectedRevision = {
+  /** File size in bytes. */
+  size: number;
+  /** Modification timestamp in integer seconds since the Unix epoch. */
+  mtime: number;
+  /** The fingerprint of the revision, or absent when the project file has none. */
+  fingerprint?: SourceFingerprint;
 };
 
 /**

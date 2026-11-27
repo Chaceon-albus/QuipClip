@@ -8,6 +8,9 @@ use std::path::{Component, Path, PathBuf};
 
 const JAVASCRIPT_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+/// The end of the name of a project file. The test ignores the letter case (ADR 072).
+const PROJECT_FILE_EXTENSION: &str = ".qcproj";
+
 /// Stable error names translated by the frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +26,9 @@ pub enum ProjectCommandErrorCode {
     InvalidProject,
     UnsafeProjectValue,
     FutureSchemaVersion,
+    /// The project file, or the document that a save would write, is larger than
+    /// `project::PROJECT_FILE_MAX_BYTES` (32 MiB).
+    TooLarge,
     CommandExecutionFailed,
 }
 
@@ -64,30 +70,94 @@ impl ProjectCommandError {
     }
 }
 
+/// The answer of [`load_project`] (ADR 072).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedProject {
+    /// The canonical path of the project file.
+    pub path: String,
+    /// The validated document.
+    pub project: ProjectFile,
+    /// The candidate paths of each source, in the order of `project.sources`: the `relPath`
+    /// resolved against the directory of the project file when the entry has one, and then the
+    /// `path`. Equal paths appear once.
+    pub candidates: Vec<Vec<String>>,
+}
+
+/// The answer of [`save_project`] (ADR 072).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedProject {
+    /// The canonical path of the written project file.
+    pub path: String,
+}
+
 /// Load one validated project from an explicit file path.
 #[tauri::command]
-pub async fn load_project(path: String) -> Result<ProjectFile, ProjectCommandError> {
+pub async fn load_project(path: String) -> Result<LoadedProject, ProjectCommandError> {
     tauri::async_runtime::spawn_blocking(move || load_project_with(&path))
         .await
         .map_err(|_| generated_error(ProjectCommandErrorCode::CommandExecutionFailed))?
 }
 
-fn load_project_with(path: &str) -> Result<ProjectFile, ProjectCommandError> {
+fn load_project_with(path: &str) -> Result<LoadedProject, ProjectCommandError> {
     let path = validate_load_path(path)?;
-    project::load(path).map_err(|error| map_project_error(error, IoOperation::Read))
+    let document =
+        project::load(&path).map_err(|error| map_project_error(error, IoOperation::Read))?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| ProjectCommandError::new(ProjectCommandErrorCode::InvalidPath))?;
+    let candidates = document
+        .sources
+        .iter()
+        .map(|source| project::candidate_paths(directory, source))
+        .collect();
+    Ok(LoadedProject {
+        path: unicode_text(&path)?,
+        project: document,
+        candidates,
+    })
 }
 
-/// Save one validated project to an explicit file path.
+/// Save one validated project to an explicit file path. The backend writes the `relPath` of
+/// each source, and ignores the value of the caller (ADR 072).
 #[tauri::command]
-pub async fn save_project(path: String, project: ProjectFile) -> Result<(), ProjectCommandError> {
+pub async fn save_project(
+    path: String,
+    project: ProjectFile,
+) -> Result<SavedProject, ProjectCommandError> {
     tauri::async_runtime::spawn_blocking(move || save_project_with(&path, &project))
         .await
         .map_err(|_| generated_error(ProjectCommandErrorCode::CommandExecutionFailed))?
 }
 
-fn save_project_with(path: &str, project: &ProjectFile) -> Result<(), ProjectCommandError> {
+fn save_project_with(
+    path: &str,
+    project: &ProjectFile,
+) -> Result<SavedProject, ProjectCommandError> {
     let path = validate_save_path(path)?;
-    project::save(path, project).map_err(|error| map_project_error(error, IoOperation::Write))
+    project::save(&path, project).map_err(|error| map_project_error(error, IoOperation::Write))?;
+    Ok(SavedProject {
+        path: unicode_text(&path)?,
+    })
+}
+
+/// The text of a path that `ensure_unicode_path` accepted.
+fn unicode_text(path: &Path) -> Result<String, ProjectCommandError> {
+    ensure_unicode_path(path)?;
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| ProjectCommandError::new(ProjectCommandErrorCode::PathNotUnicode))
+}
+
+/// True when the path text `path` ends in `.qcproj`, with ASCII case folding (ADR 072). The
+/// test reads the text as the caller sent it, before `Path` reads components: `Path` drops a
+/// final `.`, so `/work/cut.qcproj/.` would otherwise pass.
+fn has_project_extension(path: &str) -> bool {
+    path.len() >= PROJECT_FILE_EXTENSION.len()
+        && path.is_char_boundary(path.len() - PROJECT_FILE_EXTENSION.len())
+        && path[path.len() - PROJECT_FILE_EXTENSION.len()..]
+            .eq_ignore_ascii_case(PROJECT_FILE_EXTENSION)
 }
 
 fn validate_load_path(path: &str) -> Result<PathBuf, ProjectCommandError> {
@@ -107,6 +177,11 @@ fn validate_load_path(path: &str) -> Result<PathBuf, ProjectCommandError> {
 
 fn validate_save_path(path: &str) -> Result<PathBuf, ProjectCommandError> {
     validate_path_text(path)?;
+    if !has_project_extension(path) {
+        return Err(ProjectCommandError::new(
+            ProjectCommandErrorCode::InvalidPath,
+        ));
+    }
     let requested = Path::new(path);
     let file_name = requested
         .file_name()
@@ -205,6 +280,9 @@ fn map_project_error(error: ProjectFileError, operation: IoOperation) -> Project
             found,
             supported,
         ),
+        ProjectFileError::TooLarge { .. } => {
+            ProjectCommandError::new(ProjectCommandErrorCode::TooLarge)
+        }
     }
 }
 
@@ -258,6 +336,18 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
             field: Some(format!("segments[{index}].name")),
             ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
         },
+        ProjectValidationError::InvalidSourcePath { index } => ProjectCommandError {
+            field: Some(format!("sources[{index}].path")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::InvalidRelPath { index } => ProjectCommandError {
+            field: Some(format!("sources[{index}].relPath")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
+        ProjectValidationError::InvalidFingerprint { index } => ProjectCommandError {
+            field: Some(format!("sources[{index}].fingerprint")),
+            ..ProjectCommandError::new(ProjectCommandErrorCode::InvalidProject)
+        },
         ProjectValidationError::EmptySourceId { index }
         | ProjectValidationError::DuplicateSourceId { index } => ProjectCommandError {
             field: Some(format!("sources[{index}].id")),
@@ -292,7 +382,7 @@ fn map_validation_error(error: ProjectValidationError) -> ProjectCommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Clip, RenderSettings, Resolution, Segment, Source};
+    use crate::project::{Clip, Segment, Source, SourceFingerprint};
     use crate::time::{FrameCount, Pts, Rational, TickCount};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -303,10 +393,7 @@ mod tests {
         let project = example_project();
         let project_value = serde_json::to_value(project).unwrap();
         assert_eq!(project_value["schemaVersion"], 1);
-        assert_eq!(
-            project_value["renderSettings"]["frameRate"],
-            serde_json::json!({ "n": 30, "d": 1 })
-        );
+        assert!(project_value.get("renderSettings").is_none());
         assert_eq!(project_value["sources"][0]["relPath"], "clip.mp4");
         assert_eq!(project_value["segments"][0]["outPts"], "20");
         assert!(project_value.get("schema_version").is_none());
@@ -327,17 +414,32 @@ mod tests {
         let path = directory.path.join("round-trip.qcproj");
         fs::write(&path, b"old project contents").unwrap();
         let project = example_project();
+        let canonical = fs::canonicalize(&path).unwrap();
 
-        run(save_project(
+        let saved = run(save_project(
             path.to_str().unwrap().to_owned(),
             project.clone(),
         ))
         .unwrap();
+        assert_eq!(saved.path, canonical.to_str().unwrap());
 
-        assert_eq!(
-            run(load_project(path.to_str().unwrap().to_owned())).unwrap(),
-            project
-        );
+        let loaded = run(load_project(path.to_str().unwrap().to_owned())).unwrap();
+        assert_eq!(loaded.path, canonical.to_str().unwrap());
+        // The save wrote the relative path itself: `/clips/clip.mp4` from the test directory.
+        let mut expected = project;
+        expected.sources[0].rel_path = loaded.project.sources[0].rel_path.clone();
+        assert_eq!(loaded.project, expected);
+        // `/clips/clip.mp4` has no drive, so it is not absolute on Windows and gets no relative
+        // path there.
+        if cfg!(unix) {
+            assert!(loaded.project.sources[0]
+                .rel_path
+                .as_deref()
+                .is_some_and(
+                    |rel_path| rel_path.starts_with("../") && rel_path.ends_with("clips/clip.mp4")
+                ));
+        }
+        assert_eq!(loaded.candidates, vec![vec!["/clips/clip.mp4".to_owned()]]);
         assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
         let entries = fs::read_dir(&directory.path)
             .unwrap()
@@ -441,15 +543,214 @@ mod tests {
                 .code,
             ProjectCommandErrorCode::PathNotFile
         );
+        let folder = directory.path.join("folder.qcproj");
+        fs::create_dir(&folder).unwrap();
         assert_eq!(
             run(save_project(
-                directory.path.to_str().unwrap().to_owned(),
+                folder.to_str().unwrap().to_owned(),
                 example_project()
             ))
             .unwrap_err()
             .code,
             ProjectCommandErrorCode::PathNotFile
         );
+    }
+
+    #[test]
+    fn the_save_refuses_a_name_that_does_not_end_in_the_project_extension() {
+        let directory = TestDirectory::new();
+        for name in ["cut.json", "cut", "cut.qcproj.bak", "cut.qcpro", "qcproj"] {
+            let path = directory.path.join(name);
+            let error = run(save_project(
+                path.to_str().unwrap().to_owned(),
+                example_project(),
+            ))
+            .unwrap_err();
+            assert_eq!(error.code, ProjectCommandErrorCode::InvalidPath, "{name}");
+            assert!(!path.exists(), "{name}");
+        }
+        // The test ignores the letter case.
+        for name in ["cut.QCPROJ", "cut.QcProj", "片段.qcproj", ".qcproj"] {
+            let path = directory.path.join(name);
+            let saved = run(save_project(
+                path.to_str().unwrap().to_owned(),
+                example_project(),
+            ))
+            .unwrap();
+            assert!(saved.path.ends_with(name), "{name}");
+            assert!(path.is_file(), "{name}");
+        }
+        // The directory of the file is a directory, not a name with the extension.
+        assert_eq!(
+            run(save_project(
+                directory
+                    .path
+                    .join("cut.qcproj")
+                    .join("..")
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                example_project(),
+            ))
+            .unwrap_err()
+            .code,
+            ProjectCommandErrorCode::InvalidPath
+        );
+        // The test reads the text as the caller sent it: `Path` drops a final `.`, so these
+        // would otherwise write `fresh.qcproj`. (`cut.qcproj` exists already on a file system that
+        // ignores the letter case, from `cut.QCPROJ` above.)
+        let target = directory.path.join("fresh.qcproj");
+        let target_text = target.to_str().unwrap();
+        let separator = std::path::MAIN_SEPARATOR;
+        for text in [
+            format!("{target_text}/."),
+            format!("{target_text}{separator}."),
+            format!("{target_text}/"),
+            format!("{target_text} "),
+        ] {
+            assert_eq!(
+                run(save_project(text.clone(), example_project()))
+                    .unwrap_err()
+                    .code,
+                ProjectCommandErrorCode::InvalidPath,
+                "{text}"
+            );
+            assert!(!target.exists(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_load_answers_the_relative_candidate_and_then_the_path_after_a_move() {
+        let directory = TestDirectory::new();
+        let root = fs::canonicalize(&directory.path).unwrap();
+        let old = root.join("old");
+        fs::create_dir_all(old.join("clips")).unwrap();
+        let mut project = example_project();
+        let old_clip = old.join("clips").join("a.mp4").to_str().unwrap().to_owned();
+        project.sources[0].path = old_clip.clone();
+        run(save_project(
+            old.join("cut.qcproj").to_str().unwrap().to_owned(),
+            project,
+        ))
+        .unwrap();
+        // The folder of the project moves with its clips.
+        let new = root.join("new");
+        fs::rename(&old, &new).unwrap();
+
+        let loaded = run(load_project(
+            new.join("cut.qcproj").to_str().unwrap().to_owned(),
+        ))
+        .unwrap();
+        assert_eq!(
+            loaded.project.sources[0].rel_path.as_deref(),
+            Some("clips/a.mp4")
+        );
+        assert_eq!(
+            loaded.candidates,
+            vec![vec![
+                new.join("clips").join("a.mp4").to_str().unwrap().to_owned(),
+                old_clip,
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_project_file_larger_than_the_limit_is_too_large() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("large.qcproj");
+        // A sparse file: the load reads the limit and one byte more, and no further.
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(project::PROJECT_FILE_MAX_BYTES + 1)
+            .unwrap();
+        let error = run(load_project(path.to_str().unwrap().to_owned())).unwrap_err();
+        assert_eq!(error.code, ProjectCommandErrorCode::TooLarge);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["code"],
+            serde_json::json!("tooLarge")
+        );
+        assert_eq!(
+            map_project_error(ProjectFileError::TooLarge { limit: 1 }, IoOperation::Write).code,
+            ProjectCommandErrorCode::TooLarge
+        );
+    }
+
+    #[test]
+    fn the_load_answers_the_candidates_of_each_source_in_order() {
+        let directory = TestDirectory::new();
+        let root = fs::canonicalize(&directory.path).unwrap();
+        let path = root.join("cut.qcproj");
+        let mut project = example_project();
+        let mut second = project.sources[0].clone();
+        second.id = "s2".to_owned();
+        second.path = root
+            .join("media")
+            .join("b.mp4")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        project.sources.push(second);
+        run(save_project(path.to_str().unwrap().to_owned(), project)).unwrap();
+
+        let loaded = run(load_project(path.to_str().unwrap().to_owned())).unwrap();
+        assert_eq!(
+            loaded.project.sources[1].rel_path.as_deref(),
+            Some("media/b.mp4")
+        );
+        let b = root
+            .join("media")
+            .join("b.mp4")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            loaded.candidates,
+            vec![vec!["/clips/clip.mp4".to_owned()], vec![b]]
+        );
+        let value = serde_json::to_value(&loaded).unwrap();
+        assert!(value["candidates"].is_array());
+        assert!(value["project"]["sources"].is_array());
+        assert!(value["path"].is_string());
+        assert_eq!(value.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_commands_carry_the_fingerprint_and_map_the_new_fields() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("fingerprint.qcproj");
+        let mut project = example_project();
+        project.sources[0].fingerprint = Some(SourceFingerprint {
+            start: "0".to_owned(),
+            fnv1a64: "00000000000000ff".to_owned(),
+        });
+        run(save_project(
+            path.to_str().unwrap().to_owned(),
+            project.clone(),
+        ))
+        .unwrap();
+        let loaded = run(load_project(path.to_str().unwrap().to_owned())).unwrap();
+        assert_eq!(
+            loaded.project.sources[0].fingerprint,
+            project.sources[0].fingerprint
+        );
+
+        // A start that is not smaller than the size of the source (100).
+        project.sources[0].fingerprint = Some(SourceFingerprint {
+            start: "100".to_owned(),
+            fnv1a64: "00000000000000ff".to_owned(),
+        });
+        let error = run(save_project(path.to_str().unwrap().to_owned(), project)).unwrap_err();
+        assert_eq!(error.code, ProjectCommandErrorCode::InvalidProject);
+        assert_eq!(error.field.as_deref(), Some("sources[0].fingerprint"));
+
+        // A relative path with a root, written by another program.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["sources"][0]["relPath"] = serde_json::json!("/clips/clip.mp4");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = run(load_project(path.to_str().unwrap().to_owned())).unwrap_err();
+        assert_eq!(error.code, ProjectCommandErrorCode::InvalidProject);
+        assert_eq!(error.field.as_deref(), Some("sources[0].relPath"));
     }
 
     #[test]
@@ -565,6 +866,18 @@ mod tests {
                 ProjectValidationError::InvalidSegmentName { index: 6 },
                 "segments[6].name",
             ),
+            (
+                ProjectValidationError::InvalidRelPath { index: 7 },
+                "sources[7].relPath",
+            ),
+            (
+                ProjectValidationError::InvalidFingerprint { index: 8 },
+                "sources[8].fingerprint",
+            ),
+            (
+                ProjectValidationError::InvalidSourcePath { index: 9 },
+                "sources[9].path",
+            ),
         ];
         for (error, field) in cases {
             let mapped = map_validation_error(error);
@@ -576,14 +889,10 @@ mod tests {
     fn example_project() -> ProjectFile {
         ProjectFile {
             schema_version: 1,
-            render_settings: RenderSettings {
-                frame_rate: Rational::new(30, 1).unwrap(),
-                resolution: Resolution { w: 1920, h: 1080 },
-            },
             sources: vec![Source {
                 id: "s1".to_owned(),
                 path: "/clips/clip.mp4".to_owned(),
-                rel_path: "clip.mp4".to_owned(),
+                rel_path: Some("clip.mp4".to_owned()),
                 size: 100,
                 mtime: 1_700_000_000,
                 video_stream_index: 0,
@@ -596,6 +905,7 @@ mod tests {
                 r_frame_rate: Some(Rational::new(30, 1).unwrap()),
                 reported_frame_count: Some(FrameCount::new(300).unwrap()),
                 audio_stream_index: None,
+                fingerprint: None,
             }],
             clips: vec![Clip {
                 id: "c1".to_owned(),

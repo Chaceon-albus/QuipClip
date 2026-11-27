@@ -564,6 +564,7 @@ export const en = {
     ffprobeTimedOut:
       "ffprobe did not answer in time. The file might be on a drive or a share that stopped responding.",
     assetScopeDenied: "The asset protocol denied access to the media file.",
+    revisionMismatch: "The file changed after the project was saved.",
     commandExecutionFailed: "QuipClip could not run the media import command.",
     dialogFailed: "QuipClip could not open the file selection dialog.",
     sourceExtentUnknown:

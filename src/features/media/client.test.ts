@@ -105,7 +105,7 @@ describe("Media Import Client", () => {
   it("invokes the backend with the exact command name and arguments", async () => {
     const mockInvoke = vi.fn().mockResolvedValue(createValidImportResult());
 
-    const result = await importMedia("/path/to/source.mp4", {
+    const result = await importMedia("/path/to/source.mp4", undefined, {
       invoke: mockInvoke,
     });
 
@@ -121,7 +121,7 @@ describe("Media Import Client", () => {
     const expected = createValidImportResult();
     const mockInvoke = vi.fn().mockResolvedValue(expected);
 
-    const result = await importMedia("/path/to/source.mp4", {
+    const result = await importMedia("/path/to/source.mp4", undefined, {
       invoke: mockInvoke,
     });
 
@@ -149,7 +149,7 @@ describe("Media Import Client", () => {
     };
     const mockInvoke = vi.fn().mockResolvedValue(withNulls);
 
-    const result = await importMedia("/path/to/source.mp4", {
+    const result = await importMedia("/path/to/source.mp4", undefined, {
       invoke: mockInvoke,
     });
 
@@ -167,7 +167,7 @@ describe("Media Import Client", () => {
         });
 
         await expect(
-          importMedia("/path/to/source.mp4", { invoke: mockInvoke }),
+          importMedia("/path/to/source.mp4", undefined, { invoke: mockInvoke }),
         ).rejects.toMatchObject({
           code,
           detail: `Diagnostic info for ${code}`,
@@ -175,7 +175,7 @@ describe("Media Import Client", () => {
         });
 
         try {
-          await importMedia("/path/to/source.mp4", { invoke: mockInvoke });
+          await importMedia("/path/to/source.mp4", undefined, { invoke: mockInvoke });
         } catch (error) {
           expect(error).toBeInstanceOf(ImportMediaError);
         }
@@ -187,7 +187,7 @@ describe("Media Import Client", () => {
     const mockInvoke = vi.fn().mockRejectedValue("unexpected rejection");
 
     await expect(
-      importMedia("/path/to/source.mp4", { invoke: mockInvoke }),
+      importMedia("/path/to/source.mp4", undefined, { invoke: mockInvoke }),
     ).rejects.toMatchObject({
       code: "unknown",
       detail: "unexpected rejection",
@@ -197,7 +197,9 @@ describe("Media Import Client", () => {
   it("normalizes Error object rejections with detail undefined to prevent leaking local English messages", async () => {
     const mockInvoke = vi.fn().mockRejectedValue(new Error("IPC failed"));
 
-    const promise = importMedia("/path/to/source.mp4", { invoke: mockInvoke });
+    const promise = importMedia("/path/to/source.mp4", undefined, {
+      invoke: mockInvoke,
+    });
     await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
     await expect(promise).rejects.toMatchObject({
       code: "unknown",
@@ -212,7 +214,9 @@ describe("Media Import Client", () => {
       // missing fileName and probe
     });
 
-    const promise = importMedia("/path/to/source.mp4", { invoke: mockInvoke });
+    const promise = importMedia("/path/to/source.mp4", undefined, {
+      invoke: mockInvoke,
+    });
     await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
     await expect(promise).rejects.toMatchObject({
       code: "unknown",
@@ -229,9 +233,13 @@ describe("Media Import Client", () => {
         mtime: 1724976000,
       });
 
-      const revision = await readSourceRevision("/Users/test/Videos/clip.mp4", {
-        invoke: mockInvoke,
-      });
+      const revision = await readSourceRevision(
+        "/Users/test/Videos/clip.mp4",
+        undefined,
+        {
+          invoke: mockInvoke,
+        },
+      );
 
       expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.READ_SOURCE_REVISION, {
         path: "/Users/test/Videos/clip.mp4",
@@ -246,7 +254,9 @@ describe("Media Import Client", () => {
     it("normalizes a backend rejection into an ImportMediaError with its stable code", async () => {
       const mockInvoke = vi.fn().mockRejectedValue({ code: "pathNotFound" });
 
-      const promise = readSourceRevision("/gone.mp4", { invoke: mockInvoke });
+      const promise = readSourceRevision("/gone.mp4", undefined, {
+        invoke: mockInvoke,
+      });
       await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
       await expect(promise).rejects.toMatchObject({ code: "pathNotFound" });
     });
@@ -254,8 +264,98 @@ describe("Media Import Client", () => {
     it("normalizes a malformed success response rather than answering a partial revision", async () => {
       const mockInvoke = vi.fn().mockResolvedValue({ path: "/clip.mp4", size: 1 });
 
-      const promise = readSourceRevision("/clip.mp4", { invoke: mockInvoke });
+      const promise = readSourceRevision("/clip.mp4", undefined, {
+        invoke: mockInvoke,
+      });
       await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
+      await expect(promise).rejects.toMatchObject({ code: "unknown" });
+    });
+  });
+
+  describe("an expected revision (ADR 072)", () => {
+    const fingerprint = { start: "5177344", fnv1a64: "9f3c5a7714e0b2d1" };
+
+    it("sends the expected revision of import_media and keeps the fingerprint of the answer", async () => {
+      const valid = createValidImportResult();
+      const answer = {
+        ...valid,
+        probe: { ...valid.probe, formatNames: ["flv"] },
+        fingerprint,
+      };
+      const mockInvoke = vi.fn().mockResolvedValue(answer);
+
+      const result = await importMedia(
+        "/live.flv",
+        { size: 5242880, mtime: 1724976000, fingerprint },
+        { invoke: mockInvoke },
+      );
+
+      expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.IMPORT_MEDIA, {
+        path: "/live.flv",
+        expected: { size: 5242880, mtime: 1724976000, fingerprint },
+      });
+      expect(result.fingerprint).toEqual(fingerprint);
+    });
+
+    it("sends no fingerprint key for a revision with none", async () => {
+      const mockInvoke = vi.fn().mockResolvedValue(createValidImportResult());
+
+      await importMedia("/clip.mp4", { size: 1, mtime: 2 }, { invoke: mockInvoke });
+
+      expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.IMPORT_MEDIA, {
+        path: "/clip.mp4",
+        expected: { size: 1, mtime: 2 },
+      });
+    });
+
+    it("reports revisionMismatch with its stable code", async () => {
+      const mockInvoke = vi.fn().mockRejectedValue({ code: "revisionMismatch" });
+
+      const promise = importMedia(
+        "/clip.mp4",
+        { size: 1, mtime: 2 },
+        { invoke: mockInvoke },
+      );
+      await expect(promise).rejects.toBeInstanceOf(ImportMediaError);
+      await expect(promise).rejects.toMatchObject({ code: "revisionMismatch" });
+    });
+
+    it("sends the expected revision of read_source_revision", async () => {
+      const mockInvoke = vi.fn().mockResolvedValue({
+        path: "/live.flv",
+        size: 9000000,
+        mtime: 1724976100,
+      });
+
+      const revision = await readSourceRevision(
+        "/live.flv",
+        { size: 5242880, mtime: 1724976000, fingerprint },
+        { invoke: mockInvoke },
+      );
+
+      expect(mockInvoke).toHaveBeenCalledWith(BACKEND_COMMANDS.READ_SOURCE_REVISION, {
+        path: "/live.flv",
+        expected: { size: 5242880, mtime: 1724976000, fingerprint },
+      });
+      expect(revision).toStrictEqual({
+        path: "/live.flv",
+        size: 9000000,
+        mtime: 1724976100,
+      });
+
+      mockInvoke.mockRejectedValueOnce({ code: "revisionMismatch" });
+      await expect(
+        readSourceRevision("/live.flv", { size: 1, mtime: 2 }, { invoke: mockInvoke }),
+      ).rejects.toMatchObject({ code: "revisionMismatch" });
+    });
+
+    it("refuses an answer whose fingerprint does not fit its size", async () => {
+      const mockInvoke = vi.fn().mockResolvedValue({
+        ...createValidImportResult(),
+        fingerprint: { start: "0", fnv1a64: "9f3c5a7714e0b2d1" },
+      });
+
+      const promise = importMedia("/live.flv", undefined, { invoke: mockInvoke });
       await expect(promise).rejects.toMatchObject({ code: "unknown" });
     });
   });

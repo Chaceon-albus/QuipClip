@@ -44,6 +44,25 @@ pub struct Fingerprint {
     hash: u64,
 }
 
+impl Fingerprint {
+    /// The fingerprint of the bytes `[start, size)` of a revision with the FNV-1a hash `hash`.
+    /// The caller checks the bounds against the size of the revision, as
+    /// `crate::project::parse_fingerprint` does for the text form of a project file (ADR 072).
+    pub fn new(start: u64, hash: u64) -> Self {
+        Self { start, hash }
+    }
+
+    /// The offset of the first byte that the fingerprint covers.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The FNV-1a hash of the bytes from [`Self::start`] to the size of the revision.
+    pub fn fnv1a64(&self) -> u64 {
+        self.hash
+    }
+}
+
 static FINGERPRINTS: Mutex<Vec<(Revision, Fingerprint)>> = Mutex::new(Vec::new());
 
 fn fingerprints() -> MutexGuard<'static, Vec<(Revision, Fingerprint)>> {

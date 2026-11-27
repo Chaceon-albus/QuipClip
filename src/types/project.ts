@@ -49,14 +49,66 @@ export type Resolution = {
 };
 
 /**
- * Project render settings defining output frame rate and canvas dimensions (ADR 010).
+ * The most bytes in front of the size of a revision that the fingerprint of an FLV covers
+ * (ADR 058). The Rust project module has the same bound.
  */
-export type RenderSettings = {
-  /** Output render frame rate as an exact rational. */
-  frameRate: Rational;
-  /** Output video dimensions in pixels. */
-  resolution: Resolution;
+export const FINGERPRINT_MAX_LENGTH = 65_536;
+
+/**
+ * The text form of the fingerprint of an FLV in a project file (ADR 058, ADR 072): the FNV-1a hash
+ * of the bytes from `start` to the size of the revision.
+ */
+export type SourceFingerprint = {
+  /**
+   * The offset of the first byte that the hash covers, as a canonical decimal string: digits
+   * only, and no leading zero but `"0"` itself. It is smaller than the size of the revision, and
+   * the size less `start` is `FINGERPRINT_MAX_LENGTH` at most.
+   */
+  start: string;
+  /** The hash as exactly 16 lowercase hexadecimal digits. */
+  fnv1a64: string;
 };
+
+const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+const FNV1A64_TEXT = /^[0-9a-f]{16}$/;
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+/**
+ * True when `value` is a fingerprint of the text form for a revision of `size` bytes, by the rule
+ * of the Rust project module (ADR 072). The object has exactly the two fields. The values compare
+ * as BigInt, so a start that a Number cannot hold is still compared exactly.
+ */
+export function isSourceFingerprint(
+  value: unknown,
+  size: number,
+): value is SourceFingerprint {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 2 || !("start" in record) || !("fnv1a64" in record)) {
+    return false;
+  }
+  const { start, fnv1a64 } = record;
+  if (
+    typeof start !== "string" ||
+    !CANONICAL_DECIMAL.test(start) ||
+    typeof fnv1a64 !== "string" ||
+    !FNV1A64_TEXT.test(fnv1a64) ||
+    !Number.isSafeInteger(size) ||
+    size < 0
+  ) {
+    return false;
+  }
+  const startValue = BigInt(start);
+  const sizeValue = BigInt(size);
+  return (
+    startValue <= U64_MAX &&
+    startValue < sizeValue &&
+    sizeValue - startValue <= BigInt(FINGERPRINT_MAX_LENGTH)
+  );
+}
 
 /**
  * Persisted media source entry stored in a .qcproj project file (ADR 002, ADR 007, ADR 010).
@@ -68,8 +120,12 @@ export type PersistedSource = {
   id: string;
   /** Absolute path to the source media file on disk. */
   path: string;
-  /** Relative path from the project file directory to the source file when sharing a volume. */
-  relPath: string;
+  /**
+   * The path of the source relative to the directory of the project file, with `/` between its
+   * parts, or absent when the two paths have no common root (ADR 072). The backend writes it at
+   * each save and ignores the value that the page sends.
+   */
+  relPath?: string;
   /** File size in bytes, used to verify file revision independently of path. */
   size: number;
   /** File modification timestamp (mtime), used to detect modified or replaced files. */
@@ -102,6 +158,12 @@ export type PersistedSource = {
    * `isValidAudioStreamIndex` refuses (`hasValidAudioStreamIndexField`).
    */
   audioStreamIndex?: number;
+  /**
+   * The fingerprint of an FLV that the import kept, or absent when it kept none (ADR 058, ADR
+   * 072). The project file writes the field only for a source with one. The loader refuses `null`
+   * and a value that `isSourceFingerprint` refuses.
+   */
+  fingerprint?: SourceFingerprint;
   /**
    * Proxies are machine-specific caches and must not be persisted to project files (ADR 010).
    */
@@ -174,6 +236,8 @@ export type Source = {
   reportedFrameCount: FrameCount | null;
   /** The audio stream override of the source (ADR 070), or absent for none. */
   audioStreamIndex?: number;
+  /** The fingerprint of an FLV that the import kept (ADR 072), or absent for none. */
+  fingerprint?: SourceFingerprint;
   /** Optional runtime proxy information for playback when native decoding is unavailable. */
   proxy?: SourceProxy;
 };
@@ -184,13 +248,14 @@ export type Source = {
  * Does not use object spread and does not rely solely on `never` fields, guaranteeing that
  * runtime proxy paths, URLs, or other machine-specific caches never leak into persisted project documents.
  *
- * See ADR 007 and ADR 010.
+ * It writes no `relPath`: the backend writes that field at each save (ADR 072).
+ *
+ * See ADR 007, ADR 010 and ADR 072.
  */
 export function toPersistedSource(source: Source): PersistedSource {
   const persisted: PersistedSource = {
     id: source.id,
     path: source.path,
-    relPath: source.relPath,
     size: source.size,
     mtime: source.mtime,
     videoStreamIndex: source.videoStreamIndex,
@@ -206,6 +271,13 @@ export function toPersistedSource(source: Source): PersistedSource {
   // The file has the field only for a source with an override (ADR 070).
   if (source.audioStreamIndex !== undefined) {
     persisted.audioStreamIndex = source.audioStreamIndex;
+  }
+  // The file has the field only for a source with a fingerprint (ADR 072).
+  if (source.fingerprint !== undefined) {
+    persisted.fingerprint = {
+      start: source.fingerprint.start,
+      fnv1a64: source.fingerprint.fnv1a64,
+    };
   }
   return persisted;
 }
@@ -283,14 +355,12 @@ export type SequenceSegment = {
 
 /**
  * QuipClip project document format (.qcproj).
- * Holds render settings, imported sources, the clips of the sequence, and the ordered segments (ADR 007,
- * ADR 010, ADR 052).
+ * Holds the imported sources, the clips of the sequence, and the ordered segments (ADR 007,
+ * ADR 010, ADR 052, ADR 072).
  */
 export type Project = {
   /** Format schema version, identifying the serialization structure (schemaVersion 1). */
   schemaVersion: 1;
-  /** Render and export settings including output frame rate and resolution (ADR 010). */
-  renderSettings: RenderSettings;
   /** List of imported media sources in their persisted document shape (ADR 010). */
   sources: PersistedSource[];
   /** The sequence: each clip places one source, in sequence order (ADR 052). */

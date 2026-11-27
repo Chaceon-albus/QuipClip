@@ -1,0 +1,40 @@
+{
+  "description": "The path text of a source in a project file (ADR 072). The Rust project module and the TypeScript validation of a loaded document both read these cases, so Rust never answers load_project with a path text that the page refuses. Each valid case is valid on every host.",
+  "relPath": [
+    { "text": "a.mp4", "valid": true },
+    { "text": "clips/a.mp4", "valid": true },
+    { "text": "../a.mp4", "valid": true },
+    { "text": "../../x/y/a.mp4", "valid": true },
+    { "text": "a b/ç.mkv", "valid": true },
+    { "text": "a..b/c.mp4", "valid": true },
+    { "text": ".hidden/a.mp4", "valid": true },
+    { "text": "C/a.mp4", "valid": true },
+    { "text": "", "valid": false },
+    { "text": "..", "valid": false },
+    { "text": "../..", "valid": false },
+    { "text": "a/../b.mp4", "valid": false },
+    { "text": "link/../take.mp4", "valid": false },
+    { "text": "a/..", "valid": false },
+    { "text": "/a.mp4", "valid": false },
+    { "text": "/", "valid": false },
+    { "text": "a//b.mp4", "valid": false },
+    { "text": "a/", "valid": false },
+    { "text": "./a.mp4", "valid": false },
+    { "text": "a/./b.mp4", "valid": false },
+    { "text": ".", "valid": false },
+    { "text": "a/.", "valid": false },
+    { "text": "C:/clips/a.mp4", "valid": false },
+    { "text": "c:a.mp4", "valid": false },
+    { "text": "Z:", "valid": false },
+    { "text": "//server/share/a.mp4", "valid": false },
+    { "text": "a\u0000b.mp4", "valid": false }
+  ],
+  "path": [
+    { "text": "/Users/x/a.mp4", "valid": true },
+    { "text": "C:\\clips\\a.mp4", "valid": true },
+    { "text": "clips/a.mp4", "valid": true },
+    { "text": " ", "valid": true },
+    { "text": "", "valid": false },
+    { "text": "/Users/x/a\u0000.mp4", "valid": false }
+  ]
+}

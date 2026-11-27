@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   PROJECT_SCHEMA_VERSION,
+  FINGERPRINT_MAX_LENGTH,
   hasValidAudioStreamIndexField,
+  isSourceFingerprint,
   isValidAudioStreamIndex,
   toPersistedSource,
   type PersistedSource,
@@ -52,17 +54,13 @@ describe("project type definitions and schema", () => {
     };
     const project: Project = {
       schemaVersion: PROJECT_SCHEMA_VERSION,
-      renderSettings: {
-        frameRate: avgFrameRate,
-        resolution: { w: 1920, h: 1080 },
-      },
       sources: [persisted],
       clips: [clip],
       segments: [segment],
     };
 
     expect(project.schemaVersion).toBe(1);
-    expect(project.renderSettings.resolution).toEqual({ w: 1920, h: 1080 });
+    expect("renderSettings" in project).toBe(false);
     expect(project.sources[0].id).toBe("s1");
     expect(project.sources[0].videoStartPts).toBe("-1800");
     expect(project.sources[0].videoDurationTicks).toBe("32370000");
@@ -141,7 +139,6 @@ describe("project type definitions and schema", () => {
       expect(persisted).toEqual({
         id: "s1",
         path: "/media/clip.mp4",
-        relPath: "clip.mp4",
         size: 1048576,
         mtime: 1787073674,
         videoStreamIndex: 0,
@@ -156,11 +153,12 @@ describe("project type definitions and schema", () => {
       });
 
       expect("proxy" in persisted).toBe(false);
+      // The backend writes the relative path at each save (ADR 072).
+      expect("relPath" in persisted).toBe(false);
       expect(Object.keys(persisted).sort()).toEqual(
         [
           "id",
           "path",
-          "relPath",
           "size",
           "mtime",
           "videoStreamIndex",
@@ -227,6 +225,91 @@ describe("project type definitions and schema", () => {
         audioStreamIndex: 0,
       };
       expect(toPersistedSource(runtime).audioStreamIndex).toBe(0);
+    });
+
+    it("copies the fingerprint of a source that has one, as a new object (ADR 072)", () => {
+      const fingerprint = { start: "1048576", fnv1a64: "9f3c5a7714e0b2d1" };
+      const runtime: Source = {
+        id: "s4",
+        path: "/media/live.flv",
+        relPath: "live.flv",
+        size: 1_048_577,
+        mtime: 1,
+        videoStreamIndex: 0,
+        videoTimeBase: { n: 1, d: 1000 },
+        videoStartPts: null,
+        videoEndPts: null,
+        videoDurationTicks: null,
+        approximateDurationSeconds: null,
+        avgFrameRate: null,
+        rFrameRate: null,
+        reportedFrameCount: null,
+        fingerprint,
+      };
+      const persisted = toPersistedSource(runtime);
+      expect(persisted.fingerprint).toEqual(fingerprint);
+      expect(persisted.fingerprint).not.toBe(fingerprint);
+      const withoutFingerprint: Source = { ...runtime };
+      delete withoutFingerprint.fingerprint;
+      expect("fingerprint" in toPersistedSource(withoutFingerprint)).toBe(false);
+    });
+  });
+
+  describe("the fingerprint of a persisted source (ADR 072)", () => {
+    const hash = "9f3c5a7714e0b2d1";
+
+    it("accepts a canonical start below the size, at most 64 KiB in front of it", () => {
+      expect(isSourceFingerprint({ start: "0", fnv1a64: hash }, 1)).toBe(true);
+      expect(
+        isSourceFingerprint({ start: "0", fnv1a64: hash }, FINGERPRINT_MAX_LENGTH),
+      ).toBe(true);
+      expect(isSourceFingerprint({ start: "1048576", fnv1a64: hash }, 1_114_112)).toBe(
+        true,
+      );
+      expect(isSourceFingerprint({ start: "1114111", fnv1a64: hash }, 1_114_112)).toBe(
+        true,
+      );
+      expect(isSourceFingerprint({ start: "1", fnv1a64: "0000000000000000" }, 2)).toBe(
+        true,
+      );
+      expect(isSourceFingerprint({ start: "1", fnv1a64: "ffffffffffffffff" }, 2)).toBe(
+        true,
+      );
+    });
+
+    it("refuses each bound and each other form", () => {
+      // The start must be smaller than the size, and at most 64 KiB in front of it.
+      expect(isSourceFingerprint({ start: "0", fnv1a64: hash }, 0)).toBe(false);
+      expect(isSourceFingerprint({ start: "5", fnv1a64: hash }, 5)).toBe(false);
+      expect(
+        isSourceFingerprint({ start: "0", fnv1a64: hash }, FINGERPRINT_MAX_LENGTH + 1),
+      ).toBe(false);
+      expect(isSourceFingerprint({ start: "1048575", fnv1a64: hash }, 1_114_112)).toBe(
+        false,
+      );
+      for (const start of ["", "01", "00", "+1", "-1", " 1", "1.0", "1e3", "x"]) {
+        expect(isSourceFingerprint({ start, fnv1a64: hash }, 1_000)).toBe(false);
+      }
+      for (const fnv1a64 of [
+        "",
+        "9f3c5a7714e0b2d",
+        "9f3c5a7714e0b2d10",
+        "9F3C5A7714E0B2D1",
+        "9f3c5a7714e0b2dg",
+      ]) {
+        expect(isSourceFingerprint({ start: "1", fnv1a64 }, 1_000)).toBe(false);
+      }
+      for (const value of [
+        null,
+        "1:9f3c5a7714e0b2d1",
+        [],
+        { start: 1, fnv1a64: hash },
+        { start: "1" },
+        { start: "1", fnv1a64: hash, size: 2 },
+      ]) {
+        expect(isSourceFingerprint(value, 1_000)).toBe(false);
+      }
+      expect(isSourceFingerprint({ start: "1", fnv1a64: hash }, 1.5)).toBe(false);
     });
   });
 

@@ -1,13 +1,14 @@
 //! Persistence for versioned QuipClip project files.
 
 use crate::time::{FrameCount, Pts, Rational, TickCount};
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io;
-use std::path::Path;
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 /// The project schema this build reads and writes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -17,26 +18,26 @@ const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 /// The largest number of characters (Unicode scalar values) in the name of a segment (ADR 065).
 pub const SEGMENT_NAME_MAX_CHARS: usize = 80;
 
+/// The most bytes in front of the size of a revision that the fingerprint of an FLV covers
+/// (ADR 058). `crate::flv::growth::FINGERPRINT_LEN` has the same value.
+pub const FINGERPRINT_MAX_LEN: u64 = 64 * 1024;
+
+/// The largest project file in bytes that `load` reads and `save` writes (32 MiB). A larger file
+/// is refused with [`ProjectFileError::TooLarge`], so a wrong or hostile file cannot fill the
+/// memory of the process.
+pub const PROJECT_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 /// A project document stored in a `.qcproj` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectFile {
     pub schema_version: u32,
-    pub render_settings: RenderSettings,
     pub sources: Vec<Source>,
     /// The sequence: each clip places one source, and the array order is the sequence order
     /// (ADR 052).
     pub clips: Vec<Clip>,
     /// The segments in export order (ADR 007). Each boundary names a clip (ADR 052).
     pub segments: Vec<Segment>,
-}
-
-/// Output settings that do not define source edit positions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenderSettings {
-    pub frame_rate: Rational,
-    pub resolution: Resolution,
 }
 
 /// The output resolution in pixels.
@@ -53,7 +54,16 @@ pub struct Resolution {
 pub struct Source {
     pub id: String,
     pub path: String,
-    pub rel_path: String,
+    /// The path of the source relative to the directory of the project file, with `/` between
+    /// its parts, or `None` when the two paths have no common root (ADR 072). `save` writes it
+    /// from `path` and ignores the value of the caller. The file has no `relPath` field for
+    /// `None`, and the loader refuses `null` and a value that `is_valid_rel_path` refuses.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub rel_path: Option<String>,
     pub size: u64,
     pub mtime: i64,
     pub video_stream_index: u32,
@@ -78,6 +88,281 @@ pub struct Source {
         deserialize_with = "deserialize_present_stream_index"
     )]
     pub audio_stream_index: Option<u32>,
+    /// The fingerprint of an FLV that the import kept, or `None` when it kept none (ADR 058,
+    /// ADR 072). The file has no `fingerprint` field for `None`, and the loader refuses `null`.
+    /// `validate_project` refuses a fingerprint that `parse_fingerprint` refuses.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub fingerprint: Option<SourceFingerprint>,
+}
+
+/// The text form of the fingerprint of an FLV (ADR 058, ADR 072): the FNV-1a hash of the bytes
+/// from `start` to the size of the revision.
+///
+/// - `start` is a canonical decimal string of a `u64`: digits only, and no leading zero but
+///   `"0"` itself. It is smaller than the size of the revision, and the size less `start` is
+///   [`FINGERPRINT_MAX_LEN`] at most.
+/// - `fnv1a64` is the hash as exactly 16 lowercase hexadecimal digits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceFingerprint {
+    pub start: String,
+    pub fnv1a64: String,
+}
+
+/// The fields of [`SourceFingerprint`], read by the derived reader of serde. That reader also
+/// takes a sequence (`["13", "9f3c5a7714e0b2d1"]`), so [`SourceFingerprint`] gives it a map only.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceFingerprintFields {
+    start: String,
+    fnv1a64: String,
+}
+
+impl<'de> Deserialize<'de> for SourceFingerprint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectOnly;
+
+        impl<'de> Visitor<'de> for ObjectOnly {
+            type Value = SourceFingerprint;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object with the fields start and fnv1a64")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let fields = SourceFingerprintFields::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(SourceFingerprint {
+                    start: fields.start,
+                    fnv1a64: fields.fnv1a64,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(ObjectOnly)
+    }
+}
+
+impl SourceFingerprint {
+    /// The text form of the fingerprint `[start, size)` with the hash `hash`.
+    pub fn from_parts(start: u64, hash: u64) -> Self {
+        Self {
+            start: start.to_string(),
+            fnv1a64: format!("{hash:016x}"),
+        }
+    }
+}
+
+/// The start and the hash of `fingerprint`, the fingerprint of a revision of `size` bytes, or
+/// `None` when it breaks a rule of [`SourceFingerprint`].
+pub fn parse_fingerprint(fingerprint: &SourceFingerprint, size: u64) -> Option<(u64, u64)> {
+    let start = parse_canonical_u64(&fingerprint.start)?;
+    if start >= size || size - start > FINGERPRINT_MAX_LEN {
+        return None;
+    }
+    let hash_text = fingerprint.fnv1a64.as_bytes();
+    if hash_text.len() != 16
+        || !hash_text
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return None;
+    }
+    let hash = u64::from_str_radix(&fingerprint.fnv1a64, 16).ok()?;
+    Some((start, hash))
+}
+
+/// The value of a canonical decimal string of a `u64`, or `None` for another text.
+fn parse_canonical_u64(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty()
+        || !bytes.iter().all(u8::is_ascii_digit)
+        || (bytes.len() > 1 && bytes[0] == b'0')
+    {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// True when `rel_path` is a relative path of the project file (ADR 072): parts with `/` between
+/// them, zero or more `..` parts first and then one or more names. Each part is exactly one path
+/// component of the kind `ParentDir` or `Normal`. That refuses an empty text, an empty part, `.`,
+/// a root, a drive, a NUL, a `..` after a name, and on Windows a part that holds a backslash. On
+/// every host, the first part must not have the form of a drive (an ASCII letter and `:`), so a
+/// file from Windows reads the same on macOS.
+///
+/// A `..` after a name is refused because the candidate builder resolves the parts by their text:
+/// with only leading `..` parts, it never takes a named component off, so a symbolic link in the
+/// path cannot change the file that the path names.
+pub fn is_valid_rel_path(rel_path: &str) -> bool {
+    if rel_path.contains('\0') || starts_with_drive(rel_path) {
+        return false;
+    }
+    let mut parts = rel_path.split('/').peekable();
+    while parts.peek() == Some(&"..") {
+        parts.next();
+    }
+    let mut names = 0usize;
+    for part in parts {
+        if !is_rel_path_name(part) {
+            return false;
+        }
+        names += 1;
+    }
+    names > 0
+}
+
+/// True when `text` starts with the form of a drive: an ASCII letter and `:`.
+fn starts_with_drive(text: &str) -> bool {
+    matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
+}
+
+/// True when `part` is exactly one path component of the kind `Normal`, and the text of that
+/// component is the whole part. `Path::components` drops a `.` after a name, so the last test
+/// refuses a part such as `a\.` on Windows.
+fn is_rel_path_name(part: &str) -> bool {
+    let mut components = Path::new(part).components();
+    match (components.next(), components.next()) {
+        (Some(component @ Component::Normal(_)), None) => {
+            component.as_os_str().to_str() == Some(part)
+        }
+        _ => false,
+    }
+}
+
+/// True when `path` is a path text that a document can hold for a source: not empty, and with
+/// no NUL (ADR 072).
+pub fn is_valid_source_path(path: &str) -> bool {
+    !path.is_empty() && !path.contains('\0')
+}
+
+/// The path of `source` relative to the directory `base`, with `/` between its parts (ADR
+/// 072), or `None` when the two paths are not both absolute, when their prefixes or roots are
+/// not equal (another drive or another share on Windows), when a component is not valid
+/// Unicode, or when the result is not a valid `relPath`.
+///
+/// The comparison is by component, not by text: `fs::canonicalize` gives a verbatim path on
+/// Windows (`\\?\C:\...`), and a verbatim drive and a plain drive of the same letter are one
+/// root. The source file does not have to exist.
+pub fn relative_path(base: &Path, source: &Path) -> Option<String> {
+    if !base.is_absolute() || !source.is_absolute() {
+        return None;
+    }
+    let base_components: Vec<Component<'_>> = base.components().collect();
+    let source_components: Vec<Component<'_>> = source.components().collect();
+    let (base_root, base_rest) = split_root(&base_components)?;
+    let (source_root, source_rest) = split_root(&source_components)?;
+    if !same_root(&base_root, &source_root) {
+        return None;
+    }
+    let common = base_rest
+        .iter()
+        .zip(source_rest)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts: Vec<&str> = Vec::new();
+    for component in &base_rest[common..] {
+        component.as_os_str().to_str()?;
+        parts.push("..");
+    }
+    for component in &source_rest[common..] {
+        parts.push(component.as_os_str().to_str()?);
+    }
+    let joined = parts.join("/");
+    is_valid_rel_path(&joined).then_some(joined)
+}
+
+/// The root of an absolute path. [`same_root`] compares two of them.
+#[derive(Debug)]
+enum RootKey<'a> {
+    /// The root of a path with no prefix, as each absolute path on Unix has.
+    Plain,
+    /// A drive, by its letter.
+    Disk(u8),
+    /// A share, by its server and its name.
+    Share(&'a str, &'a str),
+    /// Each other prefix, by its text.
+    Other(&'a str),
+}
+
+/// True when two roots are one root: a verbatim drive or share is equal to the plain one, and
+/// the letter of a drive and the names of a share compare with ASCII case folding only. Two
+/// names that differ outside ASCII are two roots.
+fn same_root(left: &RootKey<'_>, right: &RootKey<'_>) -> bool {
+    match (left, right) {
+        (RootKey::Plain, RootKey::Plain) => true,
+        (RootKey::Disk(left), RootKey::Disk(right)) => left.eq_ignore_ascii_case(right),
+        (RootKey::Share(left_server, left_share), RootKey::Share(right_server, right_share)) => {
+            left_server.eq_ignore_ascii_case(right_server)
+                && left_share.eq_ignore_ascii_case(right_share)
+        }
+        (RootKey::Other(left), RootKey::Other(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// The root of an absolute path, and the components after it, or `None` for a path with no
+/// root or with a prefix that is not Unicode.
+fn split_root<'a, 'b>(
+    components: &'b [Component<'a>],
+) -> Option<(RootKey<'a>, &'b [Component<'a>])> {
+    match components {
+        [Component::RootDir, rest @ ..] => Some((RootKey::Plain, rest)),
+        [Component::Prefix(prefix), Component::RootDir, rest @ ..] => {
+            let key = match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => RootKey::Disk(letter),
+                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                    RootKey::Share(server.to_str()?, share.to_str()?)
+                }
+                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => {
+                    RootKey::Other(prefix.as_os_str().to_str()?)
+                }
+            };
+            Some((key, rest))
+        }
+        _ => None,
+    }
+}
+
+/// The paths at which a project file in the directory `project_directory` looks for `source`,
+/// in order (ADR 072): its `relPath` resolved against that directory when the entry has one,
+/// and then its `path`. Equal paths appear once.
+///
+/// Each part of `relPath` is resolved by its text: a name is added as a component, and `..`
+/// takes the last component off. A verbatim path of Windows (`\\?\C:\...`) does not resolve
+/// `..` when the system reads it, and `project_directory` is canonical, so the result names the
+/// file that `save` measured the path to. A valid `relPath` has its `..` parts first
+/// ([`is_valid_rel_path`]), so a `..` only takes off a component of `project_directory`, never a
+/// name of the `relPath`, and a symbolic link in the `relPath` cannot change the target.
+pub fn candidate_paths(project_directory: &Path, source: &Source) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(rel_path) = source.rel_path.as_deref() {
+        let mut resolved = PathBuf::from(project_directory);
+        for part in rel_path.split('/') {
+            if part == ".." {
+                resolved.pop();
+            } else {
+                resolved.push(part);
+            }
+        }
+        if let Some(text) = resolved.to_str() {
+            candidates.push(text.to_owned());
+        }
+    }
+    if !candidates.contains(&source.path) {
+        candidates.push(source.path.clone());
+    }
+    candidates
 }
 
 /// Reads an `audioStreamIndex` field that is present. Only a non-negative integer that fits a
@@ -129,6 +414,17 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
+/// Reads an optional field that is present, such as `relPath` or `fingerprint`. Only a value of
+/// the type is accepted, so `null` is a JSON error. An absent field is `None` through
+/// `serde(default)`, and never reaches this function.
+pub(crate) fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// True when the text is a valid segment name by the rule of ADR 065, the rule of
 /// `isValidSegmentName` in `src/features/timeline/segmentName.ts`:
 ///
@@ -156,7 +452,14 @@ pub enum ProjectFileError {
     Io(io::Error),
     Json(serde_json::Error),
     Validation(ProjectValidationError),
-    FutureSchemaVersion { found: u64, supported: u32 },
+    FutureSchemaVersion {
+        found: u64,
+        supported: u32,
+    },
+    /// The file, or the serialized document of a save, has more than `limit` bytes.
+    TooLarge {
+        limit: u64,
+    },
 }
 
 /// A structurally valid project whose values violate project invariants.
@@ -220,6 +523,15 @@ pub enum ProjectValidationError {
     InvalidSegmentName {
         index: usize,
     },
+    InvalidRelPath {
+        index: usize,
+    },
+    InvalidFingerprint {
+        index: usize,
+    },
+    InvalidSourcePath {
+        index: usize,
+    },
 }
 
 impl fmt::Display for ProjectValidationError {
@@ -277,6 +589,18 @@ impl fmt::Display for ProjectValidationError {
                 formatter,
                 "segments[{index}].name must have 1 to {SEGMENT_NAME_MAX_CHARS} characters, no white space at either end, and no control character or line separator (ADR 065)"
             ),
+            Self::InvalidRelPath { index } => write!(
+                formatter,
+                "sources[{index}].relPath must be `..` parts and then names, with `/` between them, no drive and no NUL (ADR 072)"
+            ),
+            Self::InvalidSourcePath { index } => write!(
+                formatter,
+                "sources[{index}].path must not be empty and must have no NUL (ADR 072)"
+            ),
+            Self::InvalidFingerprint { index } => write!(
+                formatter,
+                "sources[{index}].fingerprint must have a canonical decimal start below the size, at most {FINGERPRINT_MAX_LEN} bytes in front of the size, and 16 lowercase hexadecimal digits (ADR 072)"
+            ),
         }
     }
 }
@@ -293,6 +617,9 @@ impl fmt::Display for ProjectFileError {
                 formatter,
                 "project schema version {found} is newer than supported version {supported}"
             ),
+            Self::TooLarge { limit } => {
+                write!(formatter, "project file has more than {limit} bytes")
+            }
         }
     }
 }
@@ -303,7 +630,7 @@ impl Error for ProjectFileError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::Validation(error) => Some(error),
-            Self::FutureSchemaVersion { .. } => None,
+            Self::FutureSchemaVersion { .. } | Self::TooLarge { .. } => None,
         }
     }
 }
@@ -332,9 +659,21 @@ struct SchemaEnvelope {
     schema_version: u64,
 }
 
-/// Load and validate a project document from disk.
+/// Load and validate a project document from disk. A file of more than
+/// [`PROJECT_FILE_MAX_BYTES`] bytes is refused, and no more than one byte past that limit is read.
 pub fn load(path: impl AsRef<Path>) -> Result<ProjectFile, ProjectFileError> {
-    let bytes = fs::read(path)?;
+    load_within(path.as_ref(), PROJECT_FILE_MAX_BYTES)
+}
+
+/// [`load`] with the limit `limit`, so a test can use a small one.
+fn load_within(path: &Path, limit: u64) -> Result<ProjectFile, ProjectFileError> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(ProjectFileError::TooLarge { limit });
+    }
     let envelope: SchemaEnvelope = serde_json::from_slice(&bytes)?;
     if envelope.schema_version > u64::from(CURRENT_SCHEMA_VERSION) {
         return Err(ProjectFileError::FutureSchemaVersion {
@@ -348,12 +687,40 @@ pub fn load(path: impl AsRef<Path>) -> Result<ProjectFile, ProjectFileError> {
 }
 
 /// Save a project as readable UTF-8 JSON and atomically replace the destination.
-pub fn save(path: impl AsRef<Path>, project: &ProjectFile) -> Result<(), ProjectFileError> {
-    let path = path.as_ref();
-    validate_project(project)?;
-    let json = crate::fsutil::to_pretty_json_line(project)?;
+///
+/// The `relPath` of each source is written here, from the canonical directory of `path` to the
+/// `path` of the source (ADR 072). The values of the caller are ignored. The result is the
+/// written document. A serialized document of more than [`PROJECT_FILE_MAX_BYTES`] bytes is
+/// refused before the write.
+pub fn save(
+    path: impl AsRef<Path>,
+    project: &ProjectFile,
+) -> Result<ProjectFile, ProjectFileError> {
+    save_within(path.as_ref(), project, PROJECT_FILE_MAX_BYTES)
+}
+
+/// [`save`] with the limit `limit`, so a test can use a small one.
+fn save_within(
+    path: &Path,
+    project: &ProjectFile,
+    limit: u64,
+) -> Result<ProjectFile, ProjectFileError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = fs::canonicalize(parent)?;
+    let mut written = project.clone();
+    for source in &mut written.sources {
+        source.rel_path = relative_path(&directory, Path::new(&source.path));
+    }
+    validate_project(&written)?;
+    let json = crate::fsutil::to_pretty_json_line(&written)?;
+    if json.len() as u64 > limit {
+        return Err(ProjectFileError::TooLarge { limit });
+    }
     crate::fsutil::write_bytes_atomically(path, &json)?;
-    Ok(())
+    Ok(written)
 }
 
 fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError> {
@@ -361,15 +728,6 @@ fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError>
         return Err(ProjectValidationError::SchemaVersion {
             found: project.schema_version,
             expected: CURRENT_SCHEMA_VERSION,
-        });
-    }
-    validate_rational_numbers(
-        "renderSettings.frameRate",
-        project.render_settings.frame_rate,
-    )?;
-    if project.render_settings.frame_rate.num() <= 0 {
-        return Err(ProjectValidationError::InvalidFrameRate {
-            field: "renderSettings.frameRate".to_owned(),
         });
     }
 
@@ -383,6 +741,23 @@ fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError>
         }
         validate_unsigned_integer(&format!("sources[{index}].size"), source.size)?;
         validate_signed_integer(&format!("sources[{index}].mtime"), source.mtime)?;
+        if !is_valid_source_path(&source.path) {
+            return Err(ProjectValidationError::InvalidSourcePath { index });
+        }
+        if source
+            .rel_path
+            .as_deref()
+            .is_some_and(|rel_path| !is_valid_rel_path(rel_path))
+        {
+            return Err(ProjectValidationError::InvalidRelPath { index });
+        }
+        if source
+            .fingerprint
+            .as_ref()
+            .is_some_and(|fingerprint| parse_fingerprint(fingerprint, source.size).is_none())
+        {
+            return Err(ProjectValidationError::InvalidFingerprint { index });
+        }
         validate_positive_rational(
             &format!("sources[{index}].videoTimeBase"),
             source.video_time_base,
@@ -567,7 +942,6 @@ mod tests {
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
     const EXAMPLE: &str = r#"{
   "schemaVersion": 1,
-  "renderSettings": {"frameRate":{"n":30000,"d":1001},"resolution":{"w":1920,"h":1080}},
   "sources": [{
     "id":"s1","path":"/clips/a.mp4","relPath":"a.mp4","size":1234,"mtime":1700000000,
     "videoStreamIndex":0,"videoTimeBase":{"n":1,"d":90000},"videoStartPts":"-1800",
@@ -598,9 +972,29 @@ mod tests {
         assert_eq!(project.clips[1].source_id, "s2");
         assert_eq!(project.segments[0].out_pts, Pts::new(27000));
         assert_eq!(project.segments[1].out_clip_id, "c3");
-        save(&path, &project).unwrap();
-        assert_eq!(load(&path).unwrap(), project);
+        let written = save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), written);
+        // Only the relative paths change: the save writes them from the place of the file.
+        let mut expected = project.clone();
+        for (source, written) in expected.sources.iter_mut().zip(&written.sources) {
+            source.rel_path.clone_from(&written.rel_path);
+        }
+        assert_eq!(written, expected);
         assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn a_document_with_render_settings_is_refused() {
+        // ADR 072 removes `renderSettings`, and no build wrote a file with it.
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["renderSettings"] = serde_json::json!({
+            "frameRate": {"n": 30000, "d": 1001},
+            "resolution": {"w": 1920, "h": 1080}
+        });
+        assert_json_error(value);
+        let written =
+            serde_json::to_value(serde_json::from_str::<ProjectFile>(EXAMPLE).unwrap()).unwrap();
+        assert!(written.get("renderSettings").is_none());
     }
 
     #[test]
@@ -965,8 +1359,9 @@ mod tests {
         let project = load(&path).unwrap();
         assert_eq!(project.segments[1].name.as_deref(), Some("Intro 😀"));
         assert_eq!(project.segments[0].name, None);
-        save(&path, &project).unwrap();
-        assert_eq!(load(&path).unwrap(), project);
+        let written = save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), written);
+        assert_eq!(written.segments, project.segments);
 
         // The reader refuses a name that is not valid.
         value["segments"][1]["name"] = serde_json::json!(" Intro");
@@ -1014,8 +1409,8 @@ mod tests {
         let project = load(&path).unwrap();
         assert_eq!(project.sources[0].audio_stream_index, None);
         assert_eq!(project.sources[1].audio_stream_index, Some(3));
-        save(&path, &project).unwrap();
-        assert_eq!(load(&path).unwrap(), project);
+        let written = save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), written);
         let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(written["sources"][1]["audioStreamIndex"], 3);
         assert!(written["sources"][0].get("audioStreamIndex").is_none());
@@ -1041,6 +1436,578 @@ mod tests {
             value["sources"][0]["audioStreamIndex"] = bad;
             assert_json_error(value.clone());
         }
+    }
+
+    /// A fingerprint of the text form, for the tests below.
+    fn fingerprint(start: &str, hash: &str) -> SourceFingerprint {
+        SourceFingerprint {
+            start: start.to_owned(),
+            fnv1a64: hash.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_keeps_each_bound_of_its_form() {
+        const HASH: &str = "9f3c5a7714e0b2d1";
+        let size = 1_048_576 + 65_536;
+        // The last 64 KiB in front of the size, and one byte in front of it.
+        assert_eq!(
+            parse_fingerprint(&fingerprint("1048576", HASH), size),
+            Some((1_048_576, 0x9f3c_5a77_14e0_b2d1))
+        );
+        assert_eq!(parse_fingerprint(&fingerprint("1048575", HASH), size), None);
+        assert_eq!(
+            parse_fingerprint(&fingerprint(&(size - 1).to_string(), HASH), size),
+            Some((size - 1, 0x9f3c_5a77_14e0_b2d1))
+        );
+        // The start must be smaller than the size.
+        assert_eq!(
+            parse_fingerprint(&fingerprint(&size.to_string(), HASH), size),
+            None
+        );
+        assert_eq!(
+            parse_fingerprint(&fingerprint("0", HASH), 1),
+            Some((0, 0x9f3c_5a77_14e0_b2d1))
+        );
+        assert_eq!(parse_fingerprint(&fingerprint("0", HASH), 0), None);
+        assert_eq!(
+            parse_fingerprint(&fingerprint("0", HASH), 65_536),
+            Some((0, 0x9f3c_5a77_14e0_b2d1))
+        );
+        assert_eq!(parse_fingerprint(&fingerprint("0", HASH), 65_537), None);
+        // The start is a canonical decimal string of a u64.
+        for start in [
+            "",
+            "01",
+            "00",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1.0",
+            "1e3",
+            "x",
+            "18446744073709551616",
+        ] {
+            assert_eq!(
+                parse_fingerprint(&fingerprint(start, HASH), u64::MAX),
+                None,
+                "{start:?}"
+            );
+        }
+        assert_eq!(
+            parse_fingerprint(&fingerprint("18446744073709551614", HASH), u64::MAX),
+            Some((u64::MAX - 1, 0x9f3c_5a77_14e0_b2d1))
+        );
+        // The hash is exactly 16 lowercase hexadecimal digits.
+        for hash in [
+            "",
+            "9f3c5a7714e0b2d",
+            "9f3c5a7714e0b2d10",
+            "9F3C5A7714E0B2D1",
+            "9f3c5a7714e0b2dg",
+            "+f3c5a7714e0b2d1",
+            " f3c5a7714e0b2d1",
+        ] {
+            assert_eq!(
+                parse_fingerprint(&fingerprint("1", hash), 100),
+                None,
+                "{hash:?}"
+            );
+        }
+        assert_eq!(
+            parse_fingerprint(&fingerprint("1", "0000000000000000"), 100),
+            Some((1, 0))
+        );
+        assert_eq!(
+            parse_fingerprint(&fingerprint("1", "ffffffffffffffff"), 100),
+            Some((1, u64::MAX))
+        );
+        // The text form of the parts is the form that the parse reads.
+        let text = SourceFingerprint::from_parts(7, 0xab);
+        assert_eq!(text, fingerprint("7", "00000000000000ab"));
+        assert_eq!(parse_fingerprint(&text, 8), Some((7, 0xab)));
+    }
+
+    #[test]
+    fn loads_and_saves_a_fingerprint_and_refuses_a_bad_one_both_ways() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("fingerprint.qcproj");
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        // The size of the first source is 1234.
+        value["sources"][0]["fingerprint"] =
+            serde_json::json!({ "start": "13", "fnv1a64": "9f3c5a7714e0b2d1" });
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let project = load(&path).unwrap();
+        assert_eq!(
+            project.sources[0].fingerprint,
+            Some(fingerprint("13", "9f3c5a7714e0b2d1"))
+        );
+        assert_eq!(project.sources[1].fingerprint, None);
+        let written = save(&path, &project).unwrap();
+        assert_eq!(load(&path).unwrap(), written);
+        let read: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            read["sources"][0]["fingerprint"],
+            serde_json::json!({ "start": "13", "fnv1a64": "9f3c5a7714e0b2d1" })
+        );
+        assert!(read["sources"][1].get("fingerprint").is_none());
+
+        // The loader refuses a start that is not smaller than the size.
+        value["sources"][0]["fingerprint"]["start"] = serde_json::json!("1234");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(ProjectFileError::Validation(
+                ProjectValidationError::InvalidFingerprint { index: 0 }
+            ))
+        ));
+        // The writer refuses a bad fingerprint too, and leaves the file as it was.
+        let before = fs::read(&path).unwrap();
+        let mut bad = project.clone();
+        bad.sources[1].fingerprint = Some(fingerprint("0", "9F3C5A7714E0B2D1"));
+        assert!(matches!(
+            save(&path, &bad),
+            Err(ProjectFileError::Validation(
+                ProjectValidationError::InvalidFingerprint { index: 1 }
+            ))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn refuses_a_fingerprint_that_is_null_or_not_of_its_shape() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        for bad in [
+            serde_json::Value::Null,
+            serde_json::json!("13:9f3c5a7714e0b2d1"),
+            serde_json::json!({ "start": 13, "fnv1a64": "9f3c5a7714e0b2d1" }),
+            serde_json::json!({ "start": "13" }),
+            serde_json::json!({ "start": "13", "fnv1a64": "9f3c5a7714e0b2d1", "size": 1 }),
+            // The derived reader of serde takes a sequence for a struct; this one does not.
+            serde_json::json!(["13", "9f3c5a7714e0b2d1"]),
+        ] {
+            value["sources"][0]["fingerprint"] = bad;
+            assert_json_error(value.clone());
+        }
+        assert!(
+            serde_json::from_value::<SourceFingerprint>(serde_json::json!([
+                "13",
+                "9f3c5a7714e0b2d1"
+            ]))
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<SourceFingerprint>(serde_json::json!({
+                "start": "13",
+                "fnv1a64": "9f3c5a7714e0b2d1"
+            }))
+            .unwrap(),
+            fingerprint("13", "9f3c5a7714e0b2d1")
+        );
+    }
+
+    #[test]
+    fn validates_the_form_of_a_rel_path() {
+        for valid in [
+            "a.mp4",
+            "clips/a.mp4",
+            "../a.mp4",
+            "../../x/y/a.mp4",
+            "a b/ç.mkv",
+            "a..b",
+            "...",
+            ".hidden",
+        ] {
+            assert!(is_valid_rel_path(valid), "{valid:?}");
+        }
+        for invalid in [
+            "",
+            "/a.mp4",
+            "a//b.mp4",
+            "a/",
+            "./a.mp4",
+            "a/./b.mp4",
+            ".",
+            "a/.",
+            "/",
+            // Only leading `..` parts, and then one or more names.
+            "..",
+            "../..",
+            "a/..",
+            "a/../b.mp4",
+            "link/../take.mp4",
+            "../a/../b.mp4",
+            // A drive form in the first part, on every host.
+            "C:/clips/a.mp4",
+            "c:a.mp4",
+            "Z:",
+            "a\0b.mp4",
+        ] {
+            assert!(!is_valid_rel_path(invalid), "{invalid:?}");
+        }
+        #[cfg(windows)]
+        for invalid in ["C:a.mp4", "a\\b.mp4", "\\a.mp4", "//server/share/a.mp4"] {
+            assert!(!is_valid_rel_path(invalid), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn the_loader_refuses_a_rel_path_that_is_null_or_not_relative() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("relative.qcproj");
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        for bad in ["/clips/a.mp4", "", "a/./b.mp4", "a//b.mp4"] {
+            value["sources"][1]["relPath"] = serde_json::json!(bad);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    load(&path),
+                    Err(ProjectFileError::Validation(
+                        ProjectValidationError::InvalidRelPath { index: 1 }
+                    ))
+                ),
+                "{bad:?}"
+            );
+        }
+        value["sources"][1]["relPath"] = serde_json::Value::Null;
+        assert_json_error(value.clone());
+        // An entry with no relative path loads.
+        value["sources"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("relPath");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(load(&path).unwrap().sources[1].rel_path, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn makes_the_relative_path_from_the_directory_to_the_source() {
+        let base = Path::new("/Users/x/projects/cut");
+        for (source, expected) in [
+            ("/Users/x/projects/cut/a.mp4", Some("a.mp4")),
+            (
+                "/Users/x/projects/cut/clips/day 1/a.mp4",
+                Some("clips/day 1/a.mp4"),
+            ),
+            ("/Users/x/projects/a.mp4", Some("../a.mp4")),
+            (
+                "/Users/x/videos/live/a.flv",
+                Some("../../videos/live/a.flv"),
+            ),
+            ("/a.mp4", Some("../../../../a.mp4")),
+            // The directory itself is not a file.
+            ("/Users/x/projects/cut", None),
+            // A path with no name after the `..` parts, and a `..` after a name.
+            ("/Users/x/projects", None),
+            ("/Users/x/projects/cut/a/../b.mp4", None),
+            ("clips/a.mp4", None),
+        ] {
+            assert_eq!(
+                relative_path(base, Path::new(source)).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            relative_path(Path::new("/"), Path::new("/a.mp4")).as_deref(),
+            Some("a.mp4")
+        );
+        assert_eq!(relative_path(Path::new("cut"), Path::new("/a.mp4")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn makes_the_relative_path_on_one_drive_or_share_only() {
+        let base = Path::new(r"\\?\C:\Users\x\cut");
+        for (source, expected) in [
+            (r"\\?\C:\Users\x\cut\a.mp4", Some("a.mp4")),
+            (r"\\?\C:\Users\x\cut\clips\a.mp4", Some("clips/a.mp4")),
+            (r"\\?\C:\Users\x\videos\a.mp4", Some("../videos/a.mp4")),
+            // A verbatim drive and a plain drive of the same letter are one root.
+            (r"c:\Users\x\a.mp4", Some("../a.mp4")),
+            // Another drive and a share have another root.
+            (r"\\?\D:\Users\x\cut\a.mp4", None),
+            (r"\\?\UNC\server\share\a.mp4", None),
+            (r"\\server\share\a.mp4", None),
+        ] {
+            assert_eq!(
+                relative_path(base, Path::new(source)).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+        let share = Path::new(r"\\?\UNC\Server\Share\cut");
+        assert_eq!(
+            relative_path(share, Path::new(r"\\server\share\v\a.mp4")).as_deref(),
+            Some("../v/a.mp4")
+        );
+        assert_eq!(
+            relative_path(share, Path::new(r"\\server\other\a.mp4")),
+            None
+        );
+    }
+
+    #[test]
+    fn roots_compare_with_ascii_case_folding_only() {
+        assert!(same_root(&RootKey::Plain, &RootKey::Plain));
+        assert!(same_root(&RootKey::Disk(b'c'), &RootKey::Disk(b'C')));
+        assert!(!same_root(&RootKey::Disk(b'C'), &RootKey::Disk(b'D')));
+        assert!(same_root(
+            &RootKey::Share("Server", "Share"),
+            &RootKey::Share("SERVER", "share")
+        ));
+        // Names that differ outside ASCII are two roots, and the entry gets no relPath.
+        assert!(!same_root(
+            &RootKey::Share("server", "Ärzte"),
+            &RootKey::Share("server", "ärzte")
+        ));
+        assert!(!same_root(
+            &RootKey::Share("Ünit", "share"),
+            &RootKey::Share("ünit", "share")
+        ));
+        assert!(!same_root(&RootKey::Plain, &RootKey::Disk(b'C')));
+        assert!(!same_root(
+            &RootKey::Other(r"\\?\Volume{1}"),
+            &RootKey::Other(r"\\?\volume{1}")
+        ));
+    }
+
+    #[test]
+    fn the_size_of_a_project_file_has_a_limit_both_ways() {
+        assert_eq!(PROJECT_FILE_MAX_BYTES, 32 * 1024 * 1024);
+        let directory = TestDirectory::new();
+        let path = directory.path.join("limit.qcproj");
+        fs::write(&path, EXAMPLE).unwrap();
+        let size = EXAMPLE.len() as u64;
+        assert!(load_within(&path, size).is_ok());
+        assert!(matches!(
+            load_within(&path, size - 1),
+            Err(ProjectFileError::TooLarge { limit }) if limit == size - 1
+        ));
+        // A file far over the limit is refused before the JSON reader sees it.
+        fs::write(&path, vec![b'x'; 10_000]).unwrap();
+        assert!(matches!(
+            load_within(&path, 100),
+            Err(ProjectFileError::TooLarge { limit: 100 })
+        ));
+
+        // The save refuses a document over the limit before the write.
+        let project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        let written = save_within(&path, &project, PROJECT_FILE_MAX_BYTES).unwrap();
+        let length = fs::read(&path).unwrap().len() as u64;
+        assert!(save_within(&path, &project, length).is_ok());
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            save_within(&path, &project, length - 1),
+            Err(ProjectFileError::TooLarge { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(load(&path).unwrap(), written);
+    }
+
+    #[test]
+    fn the_path_of_a_source_is_not_empty_and_has_no_nul() {
+        let directory = TestDirectory::new();
+        let path = directory.path.join("paths.qcproj");
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        for bad in ["", "/clips/a\0.mp4"] {
+            value["sources"][1]["path"] = serde_json::json!(bad);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    load(&path),
+                    Err(ProjectFileError::Validation(
+                        ProjectValidationError::InvalidSourcePath { index: 1 }
+                    ))
+                ),
+                "{bad:?}"
+            );
+            let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+            project.sources[0].path = bad.to_owned();
+            assert!(
+                matches!(
+                    save(directory.path.join("save.qcproj"), &project),
+                    Err(ProjectFileError::Validation(
+                        ProjectValidationError::InvalidSourcePath { index: 0 }
+                    ))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The cases of `src/features/project/pathTextCases.json`, which the vitest of
+    /// `validateProjectDocument` runs too: Rust never answers `load_project` with a path text that
+    /// the page refuses, and the page refuses each one that Rust refuses.
+    #[test]
+    fn path_texts_agree_with_the_shared_cases_of_the_frontend() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/features/project/pathTextCases.json"
+        ))
+        .expect("the shared cases are JSON");
+        let directory = TestDirectory::new();
+        let path = directory.path.join("cases.qcproj");
+        let rel_cases = table["relPath"].as_array().expect("relPath cases");
+        let path_cases = table["path"].as_array().expect("path cases");
+        assert!(rel_cases.len() >= 20 && path_cases.len() >= 4);
+        for case in rel_cases {
+            let text = case["text"].as_str().unwrap();
+            let valid = case["valid"].as_bool().unwrap();
+            assert_eq!(is_valid_rel_path(text), valid, "relPath {text:?}");
+            let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+            value["sources"][0]["relPath"] = serde_json::json!(text);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let loaded = load(&path);
+            if valid {
+                assert!(loaded.is_ok(), "relPath {text:?}");
+            } else {
+                assert!(
+                    matches!(
+                        loaded,
+                        Err(ProjectFileError::Validation(
+                            ProjectValidationError::InvalidRelPath { index: 0 }
+                        ))
+                    ),
+                    "relPath {text:?}"
+                );
+            }
+        }
+        for case in path_cases {
+            let text = case["text"].as_str().unwrap();
+            let valid = case["valid"].as_bool().unwrap();
+            assert_eq!(is_valid_source_path(text), valid, "path {text:?}");
+            let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+            value["sources"][0]["path"] = serde_json::json!(text);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert_eq!(load(&path).is_ok(), valid, "path {text:?}");
+        }
+    }
+
+    #[test]
+    fn the_save_writes_the_relative_path_of_each_source_itself() {
+        let directory = TestDirectory::new();
+        let root = fs::canonicalize(&directory.path).unwrap();
+        let projects = root.join("projects");
+        fs::create_dir(&projects).unwrap();
+        let path = projects.join("cut.qcproj");
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        // The source files do not have to exist.
+        project.sources[0].path = projects
+            .join("clips")
+            .join("a.mp4")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        project.sources[1].path = root
+            .join("videos")
+            .join("b.mkv")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        project.sources[0].rel_path = Some("ignored.mp4".to_owned());
+        project.sources[1].rel_path = None;
+        let written = save(&path, &project).unwrap();
+        assert_eq!(written.sources[0].rel_path.as_deref(), Some("clips/a.mp4"));
+        assert_eq!(
+            written.sources[1].rel_path.as_deref(),
+            Some("../videos/b.mkv")
+        );
+        assert_eq!(load(&path).unwrap(), written);
+        // The same file in the directory of the project.
+        project.sources[0].path = projects.join("a.mp4").to_str().unwrap().to_owned();
+        let written = save(&path, &project).unwrap();
+        assert_eq!(written.sources[0].rel_path.as_deref(), Some("a.mp4"));
+        // A path that is not absolute gets none, and the caller's value does not stay.
+        project.sources[0].path = "clips/a.mp4".to_owned();
+        let written = save(&path, &project).unwrap();
+        assert_eq!(written.sources[0].rel_path, None);
+        let read: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(read["sources"][0].get("relPath").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_save_measures_from_the_canonical_directory_of_the_destination() {
+        // A link to the directory: the relative path starts at the directory that it names.
+        let directory = TestDirectory::new();
+        let root = fs::canonicalize(&directory.path).unwrap();
+        let real = root.join("real").join("deep");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].path = root.join("a.mp4").to_str().unwrap().to_owned();
+        let written = save(root.join("link").join("cut.qcproj"), &project).unwrap();
+        assert_eq!(written.sources[0].rel_path.as_deref(), Some("../../a.mp4"));
+    }
+
+    #[test]
+    fn the_candidates_are_the_relative_path_and_then_the_path_once_each() {
+        let mut source = serde_json::from_str::<ProjectFile>(EXAMPLE)
+            .unwrap()
+            .sources[0]
+            .clone();
+        let directory = std::env::temp_dir().join("projects").join("cut");
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        source.path = text(std::env::temp_dir().join("old").join("a.mp4"));
+
+        source.rel_path = Some("clips/a.mp4".to_owned());
+        assert_eq!(
+            candidate_paths(&directory, &source),
+            vec![
+                text(directory.join("clips").join("a.mp4")),
+                source.path.clone()
+            ]
+        );
+        // `..` takes the last component off, by the text of the path.
+        source.rel_path = Some("../../old/a.mp4".to_owned());
+        assert_eq!(
+            candidate_paths(&directory, &source),
+            vec![source.path.clone()]
+        );
+        source.rel_path = Some("../a.mp4".to_owned());
+        assert_eq!(
+            candidate_paths(&directory, &source),
+            vec![
+                text(std::env::temp_dir().join("projects").join("a.mp4")),
+                source.path.clone()
+            ]
+        );
+        // With no relative path, the path alone.
+        source.rel_path = None;
+        assert_eq!(
+            candidate_paths(&directory, &source),
+            vec![source.path.clone()]
+        );
+    }
+
+    #[test]
+    fn a_saved_project_finds_its_sources_at_the_relative_path_after_a_move() {
+        let directory = TestDirectory::new();
+        let root = fs::canonicalize(&directory.path).unwrap();
+        let old = root.join("old");
+        fs::create_dir_all(old.join("clips")).unwrap();
+        let mut project: ProjectFile = serde_json::from_str(EXAMPLE).unwrap();
+        project.sources[0].path = old.join("clips").join("a.mp4").to_str().unwrap().to_owned();
+        project.sources[1].path = root.join("b.mkv").to_str().unwrap().to_owned();
+        let written = save(old.join("cut.qcproj"), &project).unwrap();
+        // The folder of the project moves with its clips.
+        let new = root.join("new");
+        fs::rename(&old, &new).unwrap();
+        let loaded = load(new.join("cut.qcproj")).unwrap();
+        assert_eq!(loaded, written);
+        assert_eq!(
+            candidate_paths(&new, &loaded.sources[0]),
+            vec![
+                new.join("clips").join("a.mp4").to_str().unwrap().to_owned(),
+                loaded.sources[0].path.clone()
+            ]
+        );
+        assert_eq!(
+            candidate_paths(&new, &loaded.sources[1]),
+            vec![loaded.sources[1].path.clone()]
+        );
     }
 
     fn assert_json_error(value: serde_json::Value) {

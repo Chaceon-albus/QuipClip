@@ -1,0 +1,7 @@
+/**
+ * Project file feature module exports for QuipClip (ADR 072).
+ */
+
+export * from "./types";
+export * from "./validation";
+export * from "./client";

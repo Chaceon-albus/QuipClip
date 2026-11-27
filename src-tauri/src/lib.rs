@@ -1127,6 +1127,10 @@ mod tests {
         "reveal_export_output",
         "import_media",
         "read_source_revision",
+        // The project file (`features/project/client.ts`, ADR 072). No other window holds
+        // them.
+        "load_project",
+        "save_project",
         "confirm_quit",
         "set_window_border_theme",
         "load_settings",
@@ -1176,9 +1180,9 @@ mod tests {
         "cancel_ffmpeg_install",
     ];
 
-    /// Registered commands that no window may call: no frontend code calls them. Version 1
-    /// keeps no project file (ADR 010).
-    const UNGRANTED_COMMANDS: &[&str] = &["load_project", "save_project"];
+    /// Registered commands that no window may call, because no frontend code calls them. None
+    /// exists now: ADR 072 gave `load_project` and `save_project` to the main window.
+    const UNGRANTED_COMMANDS: &[&str] = &[];
 
     #[test]
     fn every_registered_command_is_in_the_app_manifest() {
@@ -1212,6 +1216,11 @@ mod tests {
             assert!(!MAIN_WINDOW_COMMANDS.contains(command), "{command}");
             assert!(!SETTINGS_WINDOW_COMMANDS.contains(command), "{command}");
         }
+        // Only the main window reads and writes a project file (ADR 072).
+        for command in ["load_project", "save_project"] {
+            assert!(MAIN_WINDOW_COMMANDS.contains(&command), "{command}");
+            assert!(!SETTINGS_WINDOW_COMMANDS.contains(&command), "{command}");
+        }
     }
 
     #[test]
@@ -1238,6 +1247,17 @@ mod tests {
             capability_permissions(include_str!("../capabilities/default.json")),
             expected
         );
+        // The capability that holds the project file permissions applies to the main window
+        // only (ADR 072).
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(capability["windows"], serde_json::json!(["main"]));
+        for permission in ["allow-load-project", "allow-save-project"] {
+            assert!(
+                expected.iter().any(|held| held == permission),
+                "{permission}"
+            );
+        }
     }
 
     #[test]

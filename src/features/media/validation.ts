@@ -9,7 +9,7 @@ import {
   isValidApproximateDuration,
   validateApproximateDuration,
 } from "@/lib/time";
-import type { Rational } from "@/types/project";
+import { isSourceFingerprint, type Rational } from "@/types/project";
 import type { MediaSourceRevisionDescriptor } from "./sourceIdentity";
 import {
   BACKEND_IMPORT_MEDIA_ERROR_CODES,
@@ -405,8 +405,26 @@ export function validateImportMediaResult(value: unknown): ImportMediaResult {
     );
   }
 
-  return {
-    ...(value as Omit<ImportMediaResult, "probe">),
+  // The backend writes the field only for an import that kept a fingerprint (ADR 072), so a
+  // present `null` is refused, as is a fingerprint that does not fit the size of the revision.
+  // Only an FLV keeps a fingerprint (ADR 058), so the probe must name `flv`.
+  if (
+    "fingerprint" in r &&
+    (!isSourceFingerprint(r.fingerprint, r.size) ||
+      !normalizedProbe.formatNames.includes("flv"))
+  ) {
+    throw new TypeError(
+      "Invalid media import result: fingerprint is invalid or malformed",
+    );
+  }
+
+  const result: ImportMediaResult = {
+    ...(value as ImportMediaResult),
     probe: normalizedProbe,
   };
+  // A copy, so the result holds no object of the payload.
+  if (isSourceFingerprint(r.fingerprint, r.size)) {
+    result.fingerprint = { start: r.fingerprint.start, fnv1a64: r.fingerprint.fnv1a64 };
+  }
+  return result;
 }
