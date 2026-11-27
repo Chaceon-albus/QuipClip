@@ -30,8 +30,13 @@ import { isInTitleBar } from "@/lib/titleBar";
 export interface TitleBarModalInput {
   /** The export dialog is open (`useExportPanelStore`). */
   readonly exportDialogOpen: boolean;
-  /** The quit prompt or the replace prompt is open (`QuitGuardDialog`, ADR 027). */
+  /**
+   * The quit prompt, the clear prompt or the save prompt is open (`QuitGuardDialog`, ADR 027,
+   * ADR 072).
+   */
   readonly quitPromptOpen: boolean;
+  /** The dialog of a save that failed is open (`ProjectSaveErrorDialog`, ADR 072). */
+  readonly saveErrorOpen: boolean;
 }
 
 /** What the title bar changes while a modal dialog is open. */
@@ -48,8 +53,9 @@ export interface TitleBarModalView {
 export function presentTitleBarModal({
   exportDialogOpen,
   quitPromptOpen,
+  saveErrorOpen,
 }: TitleBarModalInput): TitleBarModalView {
-  if (exportDialogOpen || quitPromptOpen) {
+  if (exportDialogOpen || quitPromptOpen || saveErrorOpen) {
     return {
       modalOpen: true,
       barClass: "pointer-events-auto",

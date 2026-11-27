@@ -1,32 +1,53 @@
 import { describe, expect, it } from "vitest";
 import { EXPORT_STATUSES, isExportRunLive, type ExportStatus } from "@/features/export";
+import type { SequenceSource } from "@/features/timeline/sequence";
+import { createTimelineStore } from "@/features/timeline/store";
+import type { TimelineState } from "@/features/timeline/types";
 import { createI18nInstance } from "@/i18n";
-import type { Pts, Segment } from "@/types/project";
+import type { Pts, TickCount } from "@/types/project";
 import {
-  countOpenSourceSegments,
   countQueuedExports,
   decideClear,
   decideQuit,
+  isLossListed,
   presentClearPrompt,
   presentQuitPrompt,
+  type ProjectWorkInput,
   type QuitGuardInput,
+  type QuitLoss,
+  timelineWorkOf,
   type TimelineWorkInput,
 } from "./quitGuard";
 
-const OPEN_SOURCE = "s-open";
-const OTHER_SOURCE = "s-other";
-
-function createSegment(id: string, sourceId: string): Segment {
-  return { id, sourceId, inPts: "0" as Pts, outPts: "1000" as Pts };
-}
-
 function createTimeline(overrides: Partial<TimelineWorkInput> = {}): TimelineWorkInput {
-  return { sourceId: OPEN_SOURCE, segments: [], pendingInPts: null, ...overrides };
+  return { segmentCount: 0, hasPendingIn: false, ...overrides };
 }
+
+/** A project with no changes to save: no file and no segment, or a saved file. */
+const SAVED_PROJECT: ProjectWorkInput = {
+  hasChangesToSave: false,
+  isModifiedFile: false,
+  fileName: null,
+};
+
+/** A project with no file whose sequence has segments (the test of ADR 027). */
+const UNSAVED_SEGMENTS: ProjectWorkInput = {
+  hasChangesToSave: true,
+  isModifiedFile: false,
+  fileName: null,
+};
+
+/** A project with a file that is modified (ADR 072). */
+const MODIFIED_FILE: ProjectWorkInput = {
+  hasChangesToSave: true,
+  isModifiedFile: true,
+  fileName: "interview.qcproj",
+};
 
 function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   return {
     timeline: createTimeline(),
+    project: SAVED_PROJECT,
     exportStatus: "idle",
     exportTracking: false,
     unsavedPresetName: null,
@@ -35,32 +56,104 @@ function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   };
 }
 
-const NOTHING_LOST = {
-  segments: 0,
+const NOTHING_LOST: QuitLoss = {
+  project: null,
   pendingIn: false,
   exportActive: false,
   queuedExports: 0,
   unsavedPreset: null,
 };
 
-describe("countOpenSourceSegments", () => {
-  it("counts only the segments of the open source", () => {
-    const timeline = createTimeline({
-      segments: [
-        createSegment("a", OPEN_SOURCE),
-        createSegment("b", OTHER_SOURCE),
-        createSegment("c", OPEN_SOURCE),
+describe("timelineWorkOf", () => {
+  const SOURCE: SequenceSource = {
+    id: "a",
+    videoTimeBase: { n: 1, d: 1000 },
+    videoStartPts: "0" as Pts,
+    videoEndPts: "10000" as Pts,
+    videoDurationTicks: "10000" as TickCount,
+    approximateDurationSeconds: 10,
+  };
+
+  /** The state of a timeline store with one clip and two live segments. */
+  function storedTimeline(): TimelineState {
+    const store = createTimelineStore({ generateId: () => "g" });
+    store.getState().loadSequence(
+      [{ id: "c1", sourceId: "a" }],
+      [SOURCE],
+      [
+        {
+          id: "s1",
+          inClipId: "c1",
+          inPts: "1000" as Pts,
+          outClipId: "c1",
+          outPts: "2000" as Pts,
+        },
+        {
+          id: "s2",
+          inClipId: "c1",
+          inPts: "3000" as Pts,
+          outClipId: "c1",
+          outPts: "4000" as Pts,
+        },
       ],
-    });
-    expect(countOpenSourceSegments(timeline)).toBe(2);
+    );
+    return store.getState();
+  }
+
+  it("counts the live segments and reads the stored pending In", () => {
+    const state = storedTimeline();
+    expect(timelineWorkOf(state)).toEqual({ segmentCount: 2, hasPendingIn: false });
+    const pending: TimelineState = {
+      ...state,
+      sequenceSegments: [],
+      pendingIn: { clipId: "c1", pts: "500" as Pts },
+    };
+    expect(timelineWorkOf(pending)).toEqual({ segmentCount: 0, hasPendingIn: true });
   });
 
-  it("counts nothing when no source is open", () => {
-    const timeline = createTimeline({
+  it("does not count a segment whose clip is not on the sequence", () => {
+    const state = storedTimeline();
+    const foreign: TimelineState = {
+      ...state,
+      sequenceSegments: [
+        ...state.sequenceSegments,
+        {
+          id: "s3",
+          inClipId: "gone",
+          inPts: "1000" as Pts,
+          outClipId: "gone",
+          outPts: "2000" as Pts,
+        },
+      ],
+    };
+    expect(timelineWorkOf(foreign).segmentCount).toBe(2);
+  });
+
+  it("reads the stored marks, so a mark with no projection still asks", () => {
+    // The sequence cannot project its marks, as with no virtual axis: no projected segment, no
+    // projected pending In and no virtual source. The stored marks are still work.
+    const state = storedTimeline();
+    const unprojected: TimelineState = {
+      ...state,
+      pendingIn: { clipId: "c1", pts: "500" as Pts },
+      virtual: null,
       sourceId: null,
-      segments: [createSegment("a", OPEN_SOURCE)],
+      segments: [],
+      pendingInPts: null,
+    };
+    const timeline = timelineWorkOf(unprojected);
+    expect(timeline).toEqual({ segmentCount: 2, hasPendingIn: true });
+
+    // A live segment with no projected entry asks before Clear Timeline.
+    expect(decideClear(createInput({ timeline }))).toEqual({
+      form: "plain",
+      segments: 2,
+      pendingIn: true,
     });
-    expect(countOpenSourceSegments(timeline)).toBe(0);
+    // A stored pending In with no projected PTS asks before a quit.
+    expect(
+      decideQuit(createInput({ timeline: { segmentCount: 0, hasPendingIn: true } })),
+    ).toEqual({ ask: true, loss: { ...NOTHING_LOST, pendingIn: true } });
   });
 });
 
@@ -69,34 +162,35 @@ describe("decideQuit", () => {
     expect(decideQuit(createInput())).toEqual({ ask: false, loss: NOTHING_LOST });
   });
 
-  it("continues at once with no source open, even with segments of another source", () => {
+  it("asks when the project has changes to save, and names its file or no file (ADR 072)", () => {
+    expect(decideQuit(createInput({ project: UNSAVED_SEGMENTS }))).toEqual({
+      ask: true,
+      loss: { ...NOTHING_LOST, project: { fileName: null } },
+    });
+    expect(decideQuit(createInput({ project: MODIFIED_FILE }))).toEqual({
+      ask: true,
+      loss: { ...NOTHING_LOST, project: { fileName: "interview.qcproj" } },
+    });
+  });
+
+  it("asks nothing about the segments of a saved project that is not modified (ADR 072)", () => {
+    // The segments are in the file, so the quit loses none of them.
     const decision = decideQuit(
       createInput({
-        timeline: createTimeline({
-          sourceId: null,
-          segments: [createSegment("a", OTHER_SOURCE)],
-          // The timeline clears it without a source. A stale value must not count.
-          pendingInPts: "500" as Pts,
-        }),
+        timeline: createTimeline({ segmentCount: 1 }),
+        project: {
+          hasChangesToSave: false,
+          isModifiedFile: false,
+          fileName: "cut.qcproj",
+        },
       }),
     );
     expect(decision).toEqual({ ask: false, loss: NOTHING_LOST });
   });
 
-  it("asks when the open source has segments", () => {
+  it("asks when the timeline stores a pending In point", () => {
     const decision = decideQuit(
-      createInput({
-        timeline: createTimeline({
-          segments: [createSegment("a", OPEN_SOURCE), createSegment("b", OTHER_SOURCE)],
-        }),
-      }),
-    );
-    expect(decision).toEqual({ ask: true, loss: { ...NOTHING_LOST, segments: 1 } });
-  });
-
-  it("asks when the open source has a pending In point", () => {
-    const decision = decideQuit(
-      createInput({ timeline: createTimeline({ pendingInPts: "500" as Pts }) }),
+      createInput({ timeline: createTimeline({ hasPendingIn: true }) }),
     );
     expect(decision).toEqual({ ask: true, loss: { ...NOTHING_LOST, pendingIn: true } });
   });
@@ -153,10 +247,8 @@ describe("decideQuit", () => {
 
   it("reports every loss together", () => {
     const decision = decideQuit({
-      timeline: createTimeline({
-        segments: [createSegment("a", OPEN_SOURCE), createSegment("b", OPEN_SOURCE)],
-        pendingInPts: "2000" as Pts,
-      }),
+      timeline: createTimeline({ segmentCount: 2, hasPendingIn: true }),
+      project: MODIFIED_FILE,
       exportStatus: "running",
       exportTracking: true,
       unsavedPresetName: "Archive",
@@ -165,7 +257,7 @@ describe("decideQuit", () => {
     expect(decision).toEqual({
       ask: true,
       loss: {
-        segments: 2,
+        project: { fileName: "interview.qcproj" },
         pendingIn: true,
         exportActive: true,
         queuedExports: 2,
@@ -175,42 +267,114 @@ describe("decideQuit", () => {
   });
 });
 
-describe("decideClear", () => {
-  const WITH_SEGMENTS = createTimeline({
-    segments: [createSegment("a", OPEN_SOURCE), createSegment("b", OPEN_SOURCE)],
+describe("isLossListed", () => {
+  const ALL: QuitLoss = {
+    project: { fileName: "interview.qcproj" },
+    pendingIn: true,
+    exportActive: true,
+    queuedExports: 2,
+    unsavedPreset: "Archive",
+  };
+
+  it("covers each loss that the dialog listed, and nothing", () => {
+    expect(isLossListed(NOTHING_LOST, NOTHING_LOST)).toBe(true);
+    expect(isLossListed(ALL, ALL)).toBe(true);
+    expect(isLossListed(NOTHING_LOST, ALL)).toBe(true);
   });
 
-  it("asks when the sequence has segments, and names a pending In point", () => {
+  it("covers the project when the dialog listed the project, whatever its file", () => {
+    expect(
+      isLossListed({ ...NOTHING_LOST, project: { fileName: null } }, NOTHING_LOST),
+    ).toBe(false);
+    expect(
+      isLossListed(
+        { ...NOTHING_LOST, project: { fileName: "other.qcproj" } },
+        { ...NOTHING_LOST, project: { fileName: null } },
+      ),
+    ).toBe(true);
+  });
+
+  it("covers the pending In point and the live export only when the dialog listed them", () => {
+    expect(isLossListed({ ...NOTHING_LOST, pendingIn: true }, NOTHING_LOST)).toBe(
+      false,
+    );
+    expect(isLossListed({ ...NOTHING_LOST, exportActive: true }, NOTHING_LOST)).toBe(
+      false,
+    );
+  });
+
+  it("covers the queued exports when their number is not larger", () => {
+    const listed = { ...NOTHING_LOST, queuedExports: 2 };
+    expect(isLossListed({ ...NOTHING_LOST, queuedExports: 1 }, listed)).toBe(true);
+    expect(isLossListed({ ...NOTHING_LOST, queuedExports: 2 }, listed)).toBe(true);
+    expect(isLossListed({ ...NOTHING_LOST, queuedExports: 3 }, listed)).toBe(false);
+  });
+
+  it("covers the preset draft when it has none or the listed name", () => {
+    const listed = { ...NOTHING_LOST, unsavedPreset: "Archive" };
+    expect(isLossListed({ ...NOTHING_LOST, unsavedPreset: "Archive" }, listed)).toBe(
+      true,
+    );
+    expect(isLossListed({ ...NOTHING_LOST, unsavedPreset: "Web" }, listed)).toBe(false);
+    expect(isLossListed({ ...NOTHING_LOST, unsavedPreset: "" }, NOTHING_LOST)).toBe(
+      false,
+    );
+  });
+});
+
+describe("decideClear", () => {
+  const WITH_SEGMENTS = createTimeline({ segmentCount: 2 });
+
+  it("asks with the plain form when the sequence has segments, and names a pending In point", () => {
     expect(decideClear(createInput({ timeline: WITH_SEGMENTS }))).toEqual({
-      ask: true,
+      form: "plain",
       segments: 2,
       pendingIn: false,
     });
     expect(
-      decideClear(
-        createInput({ timeline: { ...WITH_SEGMENTS, pendingInPts: "500" as Pts } }),
-      ),
-    ).toEqual({ ask: true, segments: 2, pendingIn: true });
+      decideClear(createInput({ timeline: { ...WITH_SEGMENTS, hasPendingIn: true } })),
+    ).toEqual({ form: "plain", segments: 2, pendingIn: true });
+    // A project with no file and segments has changes to save, and the plain form asks.
+    expect(
+      decideClear(createInput({ timeline: WITH_SEGMENTS, project: UNSAVED_SEGMENTS })),
+    ).toEqual({ form: "plain", segments: 2, pendingIn: false });
   });
 
-  it("clears at once with no segment, also with a pending In point alone", () => {
-    expect(decideClear(createInput())).toEqual({
-      ask: false,
-      segments: 0,
-      pendingIn: false,
-    });
+  it("asks with the save form when the project has a file and is modified (ADR 072)", () => {
     expect(
-      decideClear(
-        createInput({ timeline: createTimeline({ pendingInPts: "500" as Pts }) }),
-      ),
-    ).toEqual({ ask: false, segments: 0, pendingIn: true });
+      decideClear(createInput({ timeline: WITH_SEGMENTS, project: MODIFIED_FILE })),
+    ).toEqual({ form: "save", fileName: "interview.qcproj", pendingIn: false });
+    // Also with no segment: the clear closes the project, and Undo does not give the file back.
     expect(
       decideClear(
         createInput({
-          timeline: createTimeline({ segments: [createSegment("a", OTHER_SOURCE)] }),
+          timeline: createTimeline({ hasPendingIn: true }),
+          project: MODIFIED_FILE,
         }),
-      ).ask,
-    ).toBe(false);
+      ),
+    ).toEqual({ form: "save", fileName: "interview.qcproj", pendingIn: true });
+  });
+
+  it("asks with the plain form for a saved project that is not modified", () => {
+    expect(
+      decideClear(
+        createInput({
+          timeline: WITH_SEGMENTS,
+          project: {
+            hasChangesToSave: false,
+            isModifiedFile: false,
+            fileName: "cut.qcproj",
+          },
+        }),
+      ),
+    ).toEqual({ form: "plain", segments: 2, pendingIn: false });
+  });
+
+  it("clears at once with no segment, also with a pending In point alone", () => {
+    expect(decideClear(createInput())).toEqual({ form: "none" });
+    expect(
+      decideClear(createInput({ timeline: createTimeline({ hasPendingIn: true }) })),
+    ).toEqual({ form: "none" });
   });
 });
 
@@ -236,7 +400,7 @@ describe("countQueuedExports", () => {
 describe("presentQuitPrompt", () => {
   it("lists every line that applies, in a fixed order", () => {
     const view = presentQuitPrompt({
-      segments: 3,
+      project: null,
       pendingIn: true,
       exportActive: true,
       queuedExports: 2,
@@ -245,7 +409,6 @@ describe("presentQuitPrompt", () => {
     expect(view).toEqual({
       title: { key: "quitGuard.quit.title" },
       lines: [
-        { key: "quitGuard.loss.segments", values: { count: 3 } },
         { key: "quitGuard.loss.pendingIn" },
         { key: "quitGuard.loss.export" },
         { key: "quitGuard.loss.queued", values: { count: 2 } },
@@ -253,7 +416,36 @@ describe("presentQuitPrompt", () => {
       ],
       confirm: { key: "quitGuard.quit.confirm" },
       destructive: true,
+      discard: null,
     });
+  });
+
+  it("is the save prompt when the project has changes to save (ADR 072)", () => {
+    expect(
+      presentQuitPrompt({
+        project: { fileName: "interview.qcproj" },
+        pendingIn: true,
+        exportActive: true,
+        queuedExports: 2,
+        unsavedPreset: "Archive",
+      }),
+    ).toEqual({
+      title: { key: "quitGuard.quit.saveTitle" },
+      lines: [
+        { key: "quitGuard.project.file", values: { name: "interview.qcproj" } },
+        { key: "quitGuard.loss.pendingIn" },
+        { key: "quitGuard.loss.export" },
+        { key: "quitGuard.loss.queued", values: { count: 2 } },
+        { key: "quitGuard.loss.preset", values: { name: "Archive" } },
+      ],
+      confirm: { key: "quitGuard.save" },
+      // Save keeps the work, so it is not a destructive button.
+      destructive: false,
+      discard: { key: "quitGuard.dontSave" },
+    });
+    expect(
+      presentQuitPrompt({ ...NOTHING_LOST, project: { fileName: null } }).lines,
+    ).toEqual([{ key: "quitGuard.project.noFile" }]);
   });
 
   it("lists only the lines that apply", () => {
@@ -318,17 +510,54 @@ describe("presentQuitPrompt", () => {
 
 describe("presentClearPrompt", () => {
   it("says that Undo brings the segments back, with a destructive confirm", () => {
-    expect(presentClearPrompt({ segments: 2, pendingIn: false })).toEqual({
+    expect(
+      presentClearPrompt({ form: "plain", segments: 2, pendingIn: false }),
+    ).toEqual({
       title: { key: "quitGuard.clear.title" },
       lines: [{ key: "quitGuard.clear.segments", values: { count: 2 } }],
       confirm: { key: "quitGuard.clear.confirm" },
       destructive: true,
+      discard: null,
     });
   });
 
   it("names the pending In point too", () => {
-    expect(presentClearPrompt({ segments: 1, pendingIn: true }).lines).toEqual([
+    expect(
+      presentClearPrompt({ form: "plain", segments: 1, pendingIn: true }).lines,
+    ).toEqual([
       { key: "quitGuard.clear.segments", values: { count: 1 } },
+      { key: "quitGuard.clear.pendingIn" },
+    ]);
+  });
+
+  it("is the save prompt for a project with a file that is modified (ADR 072)", () => {
+    expect(
+      presentClearPrompt({
+        form: "save",
+        fileName: "interview.qcproj",
+        pendingIn: false,
+      }),
+    ).toEqual({
+      title: { key: "quitGuard.clear.saveTitle" },
+      lines: [
+        { key: "quitGuard.project.file", values: { name: "interview.qcproj" } },
+        { key: "quitGuard.clear.projectCloses" },
+        { key: "quitGuard.clear.undoKeepsNoFile" },
+      ],
+      confirm: { key: "quitGuard.save" },
+      destructive: false,
+      discard: { key: "quitGuard.dontSave" },
+    });
+    expect(
+      presentClearPrompt({
+        form: "save",
+        fileName: "interview.qcproj",
+        pendingIn: true,
+      }).lines,
+    ).toEqual([
+      { key: "quitGuard.project.file", values: { name: "interview.qcproj" } },
+      { key: "quitGuard.clear.projectCloses" },
+      { key: "quitGuard.clear.undoKeepsNoFile" },
       { key: "quitGuard.clear.pendingIn" },
     ]);
   });
@@ -343,12 +572,6 @@ describe("quit guard catalog messages", () => {
     ) => string;
 
     expect(t("quitGuard.quit.title")).toBe("Quit QuipClip?");
-    expect(t("quitGuard.loss.segments", { count: 1 })).toBe(
-      "1 marked segment will be lost.",
-    );
-    expect(t("quitGuard.loss.segments", { count: 4 })).toBe(
-      "4 marked segments will be lost.",
-    );
     expect(t("quitGuard.loss.pendingIn")).toBe("The pending In point will be lost.");
     expect(t("quitGuard.loss.export")).toBe("The export will stop.");
     expect(t("quitGuard.loss.preset", { name: "Archive" })).toBe(
@@ -364,6 +587,25 @@ describe("quit guard catalog messages", () => {
     expect(t("quitGuard.clear.segments", { count: 3 })).toBe(
       "The 3 marked segments leave the timeline. Undo brings them back.",
     );
+    // The save prompt (ADR 072).
+    expect(t("quitGuard.quit.saveTitle")).toBe("Save the project before you quit?");
+    expect(t("quitGuard.clear.saveTitle")).toBe(
+      "Save the project before you clear the timeline?",
+    );
+    expect(t("quitGuard.project.file", { name: "interview.qcproj" })).toBe(
+      "“interview.qcproj” has changes that are not saved.",
+    );
+    expect(t("quitGuard.project.noFile")).toBe(
+      "The project has no file, so its segments are not saved.",
+    );
+    expect(t("quitGuard.clear.projectCloses")).toBe(
+      "Clear Timeline closes the project.",
+    );
+    expect(t("quitGuard.clear.undoKeepsNoFile")).toBe(
+      "Undo brings the videos and the segments back, but not the project file.",
+    );
+    expect(t("quitGuard.save")).toBe("Save");
+    expect(t("quitGuard.dontSave")).toBe("Don’t Save");
   });
 
   it("renders the Simplified Chinese prompt with its one plural form", async () => {
@@ -377,12 +619,6 @@ describe("quit guard catalog messages", () => {
     ) => string;
 
     expect(t("quitGuard.quit.title")).toBe("退出 QuipClip？");
-    expect(t("quitGuard.loss.segments", { count: 1 })).toBe(
-      "已标记的 1 个片段将丢失。",
-    );
-    expect(t("quitGuard.loss.segments", { count: 4 })).toBe(
-      "已标记的 4 个片段将丢失。",
-    );
     expect(t("quitGuard.loss.preset", { name: "Archive" })).toBe(
       "对“Archive”的未保存更改将丢失。",
     );
@@ -391,5 +627,30 @@ describe("quit guard catalog messages", () => {
       "已标记的 1 个片段将从时间轴上移除。撤销可以恢复。",
     );
     expect(t("quitGuard.quit.confirm")).toBe("退出");
+    // The save prompt (ADR 072). "Project" is 项目.
+    expect(t("quitGuard.quit.saveTitle")).toBe("是否在退出前保存项目？");
+    expect(t("quitGuard.clear.saveTitle")).toBe("是否在清空时间轴前保存项目？");
+    expect(t("quitGuard.project.file", { name: "interview.qcproj" })).toBe(
+      "“interview.qcproj”有未保存的更改。",
+    );
+    expect(t("quitGuard.project.noFile")).toBe("项目没有文件，因此其片段尚未保存。");
+    expect(t("quitGuard.clear.projectCloses")).toBe("清空时间轴会关闭项目。");
+    expect(t("quitGuard.clear.undoKeepsNoFile")).toBe(
+      "撤销可以恢复视频和片段，但不能恢复项目文件。",
+    );
+    expect(t("quitGuard.save")).toBe("保存");
+    expect(t("quitGuard.dontSave")).toBe("不保存");
+  });
+
+  it("has no line of the segments of a quit after ADR 072", async () => {
+    // The project line replaces it. Neither catalog keeps the messages.
+    for (const language of ["en", "zh-CN"] as const) {
+      const i18n = await createI18nInstance({
+        initialPreference: language,
+        storage: null,
+      });
+      expect(i18n.exists("quitGuard.loss.segments", { count: 1 })).toBe(false);
+      expect(i18n.exists("quitGuard.loss.segments", { count: 2 })).toBe(false);
+    }
   });
 });

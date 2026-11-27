@@ -6,6 +6,7 @@ import {
   canFitTimeline,
   canOpenExportOrder,
   canRedoEdit,
+  canSaveProject,
   canSelectAllSegments,
   canStepFrames,
   canTogglePlayback,
@@ -18,6 +19,12 @@ import {
 const BOOLEANS = [false, true] as const;
 
 describe("actionConditions", () => {
+  it("saves a project only while the sequence has a clip (ADR 072)", () => {
+    expect(canSaveProject(0)).toBe(false);
+    expect(canSaveProject(1)).toBe(true);
+    expect(canSaveProject(12)).toBe(true);
+  });
+
   it("opens Export Order only for two or more segments of the export (ADR 066)", () => {
     expect(canOpenExportOrder(0)).toBe(false);
     expect(canOpenExportOrder(1)).toBe(false);

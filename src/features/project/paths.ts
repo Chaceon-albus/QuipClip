@@ -47,6 +47,28 @@ export function siblingPath(path: string, name: string): string | null {
   return index < 0 ? null : `${path.slice(0, index + 1)}${name}`;
 }
 
+/**
+ * The path of the file `name` in `directory`, or `name` alone for no directory. The save dialog of
+ * a project proposes this path (ADR 072, Save As). A directory that ends in a separator, as a
+ * root, gets no second one. Otherwise the separator is the last one that a directory in a Windows
+ * form uses, or `\` when it has none, and `/` for each other directory.
+ */
+export function pathInDirectory(directory: string | null, name: string): string {
+  if (directory === null || directory === "") {
+    return name;
+  }
+  if (!isWindowsPath(directory)) {
+    return directory.endsWith("/") ? `${directory}${name}` : `${directory}/${name}`;
+  }
+  const last = directory[directory.length - 1];
+  if (last === "/" || last === "\\") {
+    return `${directory}${name}`;
+  }
+  const separator =
+    directory.lastIndexOf("/") > directory.lastIndexOf("\\") ? "/" : "\\";
+  return `${directory}${separator}${name}`;
+}
+
 /** `text` with each ASCII capital letter in lower case, and each other character as it is. */
 function asciiLowerCase(text: string): string {
   return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());

@@ -4,7 +4,11 @@ import { exportPanelStore } from "@/features/export";
 import { openMediaFileDialog } from "@/features/media";
 import type { UnlistenFn } from "@/lib/ipc";
 import { nativeContextMenuState } from "./nativeContextMenuState";
+import { openExportSaveDialog } from "@/features/export/dialog";
+import { openPngSaveDialog } from "@/features/frameExport/store";
+import { openProjectSaveDialog } from "@/features/project/saveAction";
 import {
+  isNativeMenuFileDialogOpen,
   runNativeMenuAction,
   startNativeMenuActionListener,
   type NativeMenuSubscribe,
@@ -162,5 +166,75 @@ describe("runNativeMenuAction", () => {
     await running;
     runNativeMenuAction("openMedia");
     expect(tauriOpen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("isNativeMenuFileDialogOpen", () => {
+  /** A dialog of the system that stays open until the test answers it. */
+  function heldDialog() {
+    let answer: (path: string | null) => void = () => undefined;
+    const promise = new Promise<string | null>((resolve) => {
+      answer = resolve;
+    });
+    return { dialog: vi.fn(() => promise), answer };
+  }
+
+  it("sees each file dialog of the system that the main window opens", async () => {
+    const opens: [
+      string,
+      (dialog: () => Promise<string | null>) => Promise<unknown>,
+    ][] = [
+      [
+        "Open Media",
+        (dialog) =>
+          openMediaFileDialog({
+            filterName: "Video Files",
+            openDialog: dialog as never,
+            importPath: () => Promise.resolve(),
+          }),
+      ],
+      [
+        "the save dialog of a project",
+        (dialog) =>
+          openProjectSaveDialog({
+            defaultName: "cut.qcproj",
+            defaultDirectory: "/p",
+            filterName: "QuipClip Projects",
+            saveDialog: dialog,
+          }),
+      ],
+      [
+        "the save dialog of an export",
+        (dialog) =>
+          openExportSaveDialog({
+            extension: "mp4",
+            filterName: "Video Files",
+            saveDialog: dialog,
+            reportError: () => undefined,
+          }),
+      ],
+      [
+        "the save dialog of Export Frame",
+        (dialog) =>
+          openPngSaveDialog({
+            defaultName: "frame.png",
+            filterName: "PNG Images",
+            saveDialog: dialog,
+          }),
+      ],
+    ];
+    for (const [name, open] of opens) {
+      expect(isNativeMenuFileDialogOpen(), name).toBe(false);
+      const held = heldDialog();
+      const running = open(held.dialog);
+      expect(held.dialog, name).toHaveBeenCalledTimes(1);
+      expect(isNativeMenuFileDialogOpen(), name).toBe(true);
+      // An item of the macOS menu does nothing while the dialog shows.
+      runNativeMenuAction("openMedia");
+      expect(tauriOpen, name).not.toHaveBeenCalled();
+      held.answer(null);
+      await running;
+      expect(isNativeMenuFileDialogOpen(), name).toBe(false);
+    }
   });
 });

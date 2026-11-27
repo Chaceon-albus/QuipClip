@@ -4,6 +4,7 @@ import {
   fileNameOfPath,
   hasProjectExtension,
   isWindowsPath,
+  pathInDirectory,
   projectFileNameFor,
   siblingPath,
 } from "./paths";
@@ -79,5 +80,21 @@ describe("project paths", () => {
     expect(projectFileNameFor("live.2026.flv")).toBe("live.2026.qcproj");
     expect(projectFileNameFor("noext")).toBe("noext.qcproj");
     expect(projectFileNameFor(".hidden")).toBe(".hidden.qcproj");
+  });
+
+  it("puts a name in a directory with the separator of that directory", () => {
+    expect(pathInDirectory("/media", "cut.qcproj")).toBe("/media/cut.qcproj");
+    expect(pathInDirectory("/", "cut.qcproj")).toBe("/cut.qcproj");
+    expect(pathInDirectory("C:\\media", "cut.qcproj")).toBe("C:\\media\\cut.qcproj");
+    expect(pathInDirectory("C:\\", "cut.qcproj")).toBe("C:\\cut.qcproj");
+    expect(pathInDirectory("c:/media", "cut.qcproj")).toBe("c:/media/cut.qcproj");
+    expect(pathInDirectory("\\\\server\\share", "cut.qcproj")).toBe(
+      "\\\\server\\share\\cut.qcproj",
+    );
+    // On macOS a backslash is a character of a name, not a separator.
+    expect(pathInDirectory("/old/Tape\\", "cut.qcproj")).toBe("/old/Tape\\/cut.qcproj");
+    // With no directory, the dialog proposes the name in a directory of the system.
+    expect(pathInDirectory(null, "cut.qcproj")).toBe("cut.qcproj");
+    expect(pathInDirectory("", "cut.qcproj")).toBe("cut.qcproj");
   });
 });

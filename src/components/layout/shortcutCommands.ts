@@ -47,6 +47,7 @@ import {
   canFitTimeline,
   canOpenExportOrder,
   canRedoEdit,
+  canSaveProject,
   canSelectAllSegments,
   canStepFrames,
   canTogglePlayback,
@@ -176,7 +177,8 @@ export interface ShortcutSnapshot {
  * would move the selection away from the segment that the trim selected (ADR 045). Rename
  * Segment, Export Order and Export Selected Segments would open a modal dialog while the drag
  * holds the pointer (ADR 065, ADR 066, ADR 067). Export Frame does nothing during a trim
- * (ADR 069).
+ * (ADR 069). Save and Save As do nothing during a trim, as Rename (ADR 072): a save during the
+ * drag would write a segment that the trim still changes, and Save As opens a modal dialog.
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
   [
@@ -184,6 +186,8 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
     "markOut",
     "deleteSegment",
     "renameSegment",
+    "saveProject",
+    "saveProjectAs",
     "exportOrder",
     "exportSelectedSegments",
     "exportFrame",
@@ -198,11 +202,13 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
  * becomes a trim. Rename Segment, Export Order and Export Selected Segments open a modal dialog,
  * and a move of the held pointer behind it would start a trim while the dialog is open (ADR 065,
  * ADR 066, ADR 067). Export Frame opens the save dialog of the system, which is modal in the same
- * way (ADR 069).
+ * way (ADR 069). Save and Save As can open that dialog too, and they act as Rename (ADR 072).
  */
 export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
   new Set<ShortcutAction>([
     "renameSegment",
+    "saveProject",
+    "saveProjectAs",
     "exportOrder",
     "exportSelectedSegments",
     "exportFrame",
@@ -277,6 +283,8 @@ export type ShortcutCommand =
   | { readonly kind: "undo" }
   | { readonly kind: "redo" }
   | { readonly kind: "openMedia" }
+  /** Save (`save`) or Save As (`saveAs`) of the project (ADR 072). */
+  | { readonly kind: "saveProject"; readonly mode: "save" | "saveAs" }
   | { readonly kind: "export" }
   | {
       readonly kind: "exportSelectedSegments";
@@ -1029,6 +1037,14 @@ export function planShortcutCommand(
       // The Open Media item of the title bar menu has no condition.
       return { kind: "openMedia" };
 
+    case "saveProject":
+    case "saveProjectAs":
+      // ADR 072. A sequence with a clip, with the trim locks above. A save reads no frame and no
+      // time, so it does not read the preview.
+      return canSaveProject(timeline.clips.length)
+        ? { kind: "saveProject", mode: action === "saveProject" ? "save" : "saveAs" }
+        : null;
+
     case "export":
       return canExportMedia(hasMedia) ? { kind: "export" } : null;
 
@@ -1100,4 +1116,31 @@ export function planControlCommand(
   snapshot: ShortcutSnapshot,
 ): ShortcutCommand | null {
   return isOverlayOpen ? null : planShortcutCommand(action, snapshot);
+}
+
+/**
+ * Returns the store call of an item of a menu of the page, such as Save in the File menu of the
+ * title bar (ADR 072), or null when it runs nothing. The menu reads this when the user selects
+ * the item.
+ *
+ * It is the plan of the key (`planShortcutCommand`), with its conditions and its trim locks
+ * (`TRIM_LOCKED_ACTIONS`, `EDGE_PRESS_LOCKED_ACTIONS`). It has no test for an open overlay,
+ * because the open menu is itself an overlay of the page (`planControlCommand`).
+ */
+export function planMenuItemCommand(
+  action: ShortcutAction,
+  snapshot: ShortcutSnapshot,
+): ShortcutCommand | null {
+  return planShortcutCommand(action, snapshot);
+}
+
+/**
+ * True when an item of a menu of the page can run now: its plan (`planMenuItemCommand`) is not
+ * null. The menu shows an item disabled while this is false, so a trim lock shows too.
+ */
+export function isMenuItemAvailable(
+  action: ShortcutAction,
+  snapshot: ShortcutSnapshot,
+): boolean {
+  return planMenuItemCommand(action, snapshot) !== null;
 }

@@ -254,13 +254,19 @@ describe("the export action keys", () => {
     }
   });
 
-  it("drop the project items of the File menu", () => {
+  it("list the items of the File menu, with Save and Save As after the Open item (ADR 072)", () => {
     for (const catalog of [en, zhCN]) {
       expect(Object.keys(catalog.titleBar.menu)).toEqual([
         "file",
         "openMedia",
+        "save",
+        "saveAs",
         "export",
       ]);
     }
+    expect(en.titleBar.menu.save).toBe("Save");
+    expect(en.titleBar.menu.saveAs).toBe("Save As…");
+    expect(zhCN.titleBar.menu.save).toBe("保存");
+    expect(zhCN.titleBar.menu.saveAs).toBe("另存为…");
   });
 });

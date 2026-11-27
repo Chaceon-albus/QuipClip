@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isInTitleBar, TITLE_BAR_MARKER, TITLE_BAR_SELECTOR } from "./titleBar";
+import {
+  isInTitleBar,
+  TITLE_BAR_FILE_MENU_MARKER,
+  TITLE_BAR_FILE_MENU_SELECTOR,
+  TITLE_BAR_MARKER,
+  TITLE_BAR_SELECTOR,
+} from "./titleBar";
 
 /** An element whose nearest title bar ancestor is `bar`, or that has none. */
 function inside(bar: object | null) {
@@ -19,6 +25,17 @@ describe("TITLE_BAR_SELECTOR", () => {
     // different attributes, no press would count as a press on the bar.
     expect(Object.keys(TITLE_BAR_MARKER)).toEqual(["data-title-bar"]);
     expect(TITLE_BAR_SELECTOR).toBe(`[${Object.keys(TITLE_BAR_MARKER)[0]}]`);
+  });
+});
+
+describe("TITLE_BAR_FILE_MENU_SELECTOR", () => {
+  it("selects the attribute of the marker of the File menu trigger", () => {
+    expect(Object.keys(TITLE_BAR_FILE_MENU_MARKER)).toEqual([
+      "data-title-bar-file-menu",
+    ]);
+    expect(TITLE_BAR_FILE_MENU_SELECTOR).toBe(
+      `[${Object.keys(TITLE_BAR_FILE_MENU_MARKER)[0]}]`,
+    );
   });
 });
 

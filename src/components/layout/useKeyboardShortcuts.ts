@@ -5,6 +5,7 @@ import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { createSegmentListScope, exportPanelStore } from "@/features/export";
 import { frameExportController } from "@/features/frameExport";
 import { mediaStore, openMediaFileDialog } from "@/features/media";
+import { runSaveProjectAction } from "@/features/project/saveAction";
 import { openSettingsWindow } from "@/features/settings/settingsWindowClient";
 import { timelineStore, timelineViewportStore } from "@/features/timeline";
 import { i18n } from "@/i18n";
@@ -130,6 +131,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
         filterName: i18n.t("dialog.videoFilter"),
         importPath: quitGuard.requestOpen,
       });
+      return;
+    case "saveProject":
+      // Save or Save As (ADR 072). The action shows the error of a save that failed.
+      void runSaveProjectAction(command.mode);
       return;
     case "export":
       // The call of the Export button of the title bar.

@@ -12,25 +12,21 @@ import { quitGuard, type QuitGuardPrompt } from "./quitGuardController";
 function presentPrompt(prompt: QuitGuardPrompt): QuitGuardPromptView {
   return prompt.kind === "quit"
     ? presentQuitPrompt(prompt.loss)
-    : presentClearPrompt(prompt);
+    : presentClearPrompt(prompt.change);
 }
 
 const handleConfirm = () => {
   quitGuard.confirm();
 };
 
-const handleOpenChange = (open: boolean) => {
-  if (!open) {
-    // Radix closes the dialog after the confirm button runs `handleConfirm`, and the prompt
-    // is already gone then, so this cancels only a Cancel, an Escape, or another dismissal.
-    quitGuard.cancel();
-  }
+const handleDiscard = () => {
+  quitGuard.discard();
 };
 
 /**
- * The one dialog of the quit guard: "Quit QuipClip?" before a quit that loses work, and
- * "Replace the open video?" before another video hides the segments of the open one
- * (ADR 027). Mount it once, in the application shell.
+ * The one dialog of the quit guard: "Quit QuipClip?" before a quit that loses work (ADR 027),
+ * the dialog before Clear Timeline (ADR 052), and the save prompt of both (ADR 072), with Save,
+ * Don't Save and Cancel. Mount it once, in the application shell.
  *
  * Cancel takes the focus when the dialog opens, so Enter never confirms by accident. The
  * dialog opens above any other dialog, such as the export dialog, and Cancel returns to that
@@ -53,6 +49,17 @@ export function QuitGuardDialog() {
   }
   const view = shownPrompt === null ? null : presentPrompt(shownPrompt);
 
+  const handleOpenChange = (open: boolean) => {
+    if (!open && prompt !== null) {
+      // Radix closes the dialog after a button runs its handler. The prompt of this render is
+      // gone then, or a new prompt took its place, so this cancels only a Cancel, an Escape, or
+      // another dismissal of the prompt that this render shows.
+      quitGuard.cancel(prompt);
+    }
+  };
+
+  const discard = view?.discard ?? null;
+
   return (
     <ConfirmDialog
       open={prompt !== null}
@@ -71,6 +78,13 @@ export function QuitGuardDialog() {
       cancelLabel={t("common.cancel")}
       destructive={view?.destructive ?? false}
       onConfirm={handleConfirm}
+      discard={
+        discard === null
+          ? undefined
+          : { label: translate(discard.key), onSelect: handleDiscard }
+      }
+      // A new prompt in the open dialog gives the focus to Cancel again.
+      questionKey={shownPrompt}
     />
   );
 }

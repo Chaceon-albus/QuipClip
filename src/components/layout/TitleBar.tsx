@@ -1,4 +1,12 @@
-import { useCallback, useId, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useCallback,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -20,7 +28,10 @@ import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipConte
 import { useOpenMediaAction } from "@/components/common/useOpenMediaAction";
 import { useShortcutLabels } from "@/components/common/useShortcutLabels";
 import { ExportDialog } from "@/components/export/ExportDialog";
+import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { useExportPanelStore, useExportStore } from "@/features/export";
+import { useProjectTitle, type ProjectTitle } from "@/features/project/projectTitle";
+import { useProjectSaveErrorStore } from "@/features/project/saveErrorStore";
 import { useAttachedMediaStore } from "@/features/sequence/attachedMedia";
 import { useSequenceMediaStore } from "@/features/sequence/media";
 import { resolveTimecodeDisplay } from "@/features/playback";
@@ -33,13 +44,20 @@ import {
 } from "@/features/timeline";
 import { splitFileName } from "@/lib/fileName";
 import { isMacOS } from "@/lib/platform";
-import { TITLE_BAR_MARKER } from "@/lib/titleBar";
+import { TITLE_BAR_FILE_MENU_MARKER, TITLE_BAR_MARKER } from "@/lib/titleBar";
 import { cn } from "@/lib/utils";
 import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
 import { openExportFlow } from "./exportFlowController";
 import { quitGuard } from "./quitGuardController";
+import type { ShortcutAction } from "./shortcutBindings";
+import {
+  isMenuItemAvailable,
+  planMenuItemCommand,
+  type ShortcutSnapshot,
+} from "./shortcutCommands";
 import { resolveTitleBarPadding } from "./titleBarLayout";
 import { keepsFocusOnPress, presentTitleBarModal } from "./titleBarModal";
+import { readShortcutSnapshot, runShortcutCommand } from "./useKeyboardShortcuts";
 import { useWindowState } from "./useWindowState";
 import { CloseGlyph, MaximizeGlyph, MinimizeGlyph, RestoreGlyph } from "./WindowGlyphs";
 import { resolveMaximizeControl } from "./windowStateSync";
@@ -119,13 +137,45 @@ export function TitleBar() {
   const exportDialogOpen = useExportPanelStore((state) => state.open);
   const setExportDialogOpen = useExportPanelStore((state) => state.setOpen);
   const quitPromptOpen = useStore(quitGuard.store, (state) => state.prompt !== null);
+  const saveErrorOpen = useProjectSaveErrorStore((state) => state.error !== null);
   // While a dialog of this window is open, the bar takes the pointer for the window drag and
   // the window buttons, and the File menu and Export do not (`titleBarModal.ts`).
-  const modal = presentTitleBarModal({ exportDialogOpen, quitPromptOpen });
-  // The key names come from the binding table (ADR 026).
+  const modal = presentTitleBarModal({
+    exportDialogOpen,
+    quitPromptOpen,
+    saveErrorOpen,
+  });
+  // The key names come from the binding table (ADR 026). Save As has no key (ADR 072).
   const shortcutOf = useShortcutLabels();
   const openMediaShortcut = shortcutOf("openMedia");
+  const saveShortcut = shortcutOf("saveProject");
   const exportShortcut = shortcutOf("export");
+  // Save and Save As run under the conditions of their keys (ADR 072): a clip on the sequence,
+  // no trim that drags and no armed edge press (`isMenuItemAvailable`). The bar follows each of
+  // those facts, so the disabled state of the items changes while the menu is open. The other
+  // facts of the snapshot are read when the bar renders.
+  const clips = useTimelineStore((state) => state.clips);
+  const isTrimDragging = useSyncExternalStore(
+    segmentTrimSession.subscribe,
+    segmentTrimSession.isDragging,
+  );
+  const isTrimArmed = useSyncExternalStore(
+    segmentTrimSession.subscribe,
+    segmentTrimSession.isPressArmed,
+  );
+  const menuSnapshot = (): ShortcutSnapshot => {
+    const snapshot = readShortcutSnapshot();
+    return {
+      ...snapshot,
+      timeline: { ...snapshot.timeline, clips },
+      isTrimDragging,
+      isTrimArmed,
+    };
+  };
+  const canSave = isMenuItemAvailable("saveProject", menuSnapshot());
+  const canSaveAs = isMenuItemAvailable("saveProjectAs", menuSnapshot());
+  // The name of the project file and its mark for changes that are not saved (ADR 072).
+  const projectTitle = useProjectTitle();
 
   // The duration in the tooltip uses the timecode format of the open source (ADR 028).
   const timecodePreference = useTimecodePreference((state) => state.format);
@@ -186,6 +236,24 @@ export function TitleBar() {
       filterName: t("dialog.videoFilter"),
       audioFilterName: t("dialog.audioFilter"),
     });
+  };
+
+  // The item runs the plan of its key when the user selects it, with the trim locks, and with
+  // no test for an open overlay, because the menu is one (`planMenuItemCommand`). The state is
+  // read again at the selection, so a lock that started after the render still holds.
+  const runMenuAction = (action: ShortcutAction) => {
+    const command = planMenuItemCommand(action, readShortcutSnapshot());
+    if (command !== null) {
+      runShortcutCommand(command);
+    }
+  };
+
+  const handleSave = () => {
+    runMenuAction("saveProject");
+  };
+
+  const handleSaveAs = () => {
+    runMenuAction("saveProjectAs");
   };
 
   const handleMinimize = () => {
@@ -260,6 +328,9 @@ export function TitleBar() {
             {/* The label and the chevron dim with the title while the window is inactive.
                 Hover and the open menu keep the accent colours of the chrome variant. */}
             <Button
+              // The dialog of a save that failed gives the focus back here when the item that
+              // opened it is gone (`ProjectSaveErrorDialog`).
+              {...TITLE_BAR_FILE_MENU_MARKER}
               variant="chrome"
               size="xs"
               className={cn(
@@ -286,8 +357,22 @@ export function TitleBar() {
                 </DropdownMenuShortcut>
               )}
             </DropdownMenuItem>
-            {/* The interface does not open or save a project yet, so the menu lists no
-                project items. */}
+            {/* Save and Save As of the project (ADR 072). Save As has no key. */}
+            <DropdownMenuItem
+              disabled={!canSave}
+              onClick={handleSave}
+              aria-keyshortcuts={saveShortcut?.aria}
+            >
+              {t("titleBar.menu.save")}
+              {saveShortcut && (
+                <DropdownMenuShortcut aria-hidden="true">
+                  {saveShortcut.keys}
+                </DropdownMenuShortcut>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={!canSaveAs} onClick={handleSaveAs}>
+              {t("titleBar.menu.saveAs")}
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               disabled={exportAction.disabled}
@@ -305,7 +390,8 @@ export function TitleBar() {
         </DropdownMenu>
       </div>
 
-      {/* Centre: the open file and its segment count. With no media, macOS shows the
+      {/* Centre: the name of the project file when the project has one (ADR 072), the open
+          file and its segment count. With no media and no project file, macOS shows the
           application name here, because its left zone does not (ADR 020). Every other
           platform shows the name in the left zone, so the centre stays empty. */}
       {/* While a dialog is open, the file title takes no pointer either: its path tooltip would
@@ -318,6 +404,9 @@ export function TitleBar() {
           modal.appControlClass,
         )}
       >
+        {projectTitle !== null && (
+          <TitleBarProject project={projectTitle} separated={media !== null} />
+        )}
         {media ? (
           <TitleBarFile
             fileName={media.fileName}
@@ -325,7 +414,7 @@ export function TitleBar() {
             segmentCount={segmentCount}
           />
         ) : (
-          isMac && <span>{t("app.name")}</span>
+          isMac && projectTitle === null && <span>{t("app.name")}</span>
         )}
       </div>
 
@@ -422,6 +511,55 @@ function labelTextOf(label: ExportActionLabel, t: TFunction): string {
     default:
       return t(label.key);
   }
+}
+
+interface TitleBarProjectProps {
+  readonly project: ProjectTitle;
+  /** True when the name of the video follows, so a separator shows after the project name. */
+  readonly separated: boolean;
+}
+
+/**
+ * The name of the project file in the centre zone, in front of the name of the video (ADR 072).
+ *
+ * A modified project has a dot in front of the name. The dot is hidden from assistive
+ * technology, and a catalog message that says that the project has changes that are not saved
+ * takes the place of the name and the dot. The stem truncates and the extension does not, as for
+ * the video. The name is not a control, as the file title is not: it takes no focus and no click,
+ * so a press on it still drags the window (ADR 020).
+ */
+function TitleBarProject({ project, separated }: TitleBarProjectProps) {
+  const { t } = useTranslation();
+  const { stem, extension } = splitFileName(project.fileName);
+  return (
+    <div className="flex min-w-0 shrink items-center gap-1.5">
+      <span
+        aria-hidden={project.modified ? "true" : undefined}
+        className={cn(
+          "flex min-w-0 font-medium text-chrome-foreground",
+          INACTIVE_TITLE_TEXT_CLASS,
+        )}
+      >
+        {project.modified && <span className="shrink-0 pr-1">•</span>}
+        <span className="truncate">{stem}</span>
+        <span
+          className={cn("shrink-0 text-muted-foreground", INACTIVE_MUTED_TEXT_CLASS)}
+        >
+          {extension}
+        </span>
+      </span>
+      {project.modified && (
+        <span className="sr-only">
+          {t("titleBar.project.modified", { name: project.fileName })}
+        </span>
+      )}
+      {separated && (
+        <span aria-hidden="true" className="shrink-0 pr-1.5">
+          —
+        </span>
+      )}
+    </div>
+  );
 }
 
 interface TitleBarFileProps {

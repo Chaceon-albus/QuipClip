@@ -6,6 +6,7 @@
  */
 
 import { save as tauriSave } from "@tauri-apps/plugin-dialog";
+import { trackSystemFileDialog } from "@/lib/systemFileDialog";
 import { exportStore } from "./store";
 import { ExportError } from "./types";
 
@@ -63,16 +64,19 @@ export async function openExportSaveDialog(
 
   let selected: unknown;
   try {
-    selected = await saveDialogFn({
-      ...(options.title ? { title: options.title } : {}),
-      ...(options.defaultName ? { defaultPath: options.defaultName } : {}),
-      filters: [
-        {
-          name: options.filterName,
-          extensions: [extension],
-        },
-      ],
-    });
+    // The menu items of macOS do nothing while the dialog shows (`isSystemFileDialogOpen`).
+    selected = await trackSystemFileDialog(() =>
+      saveDialogFn({
+        ...(options.title ? { title: options.title } : {}),
+        ...(options.defaultName ? { defaultPath: options.defaultName } : {}),
+        filters: [
+          {
+            name: options.filterName,
+            extensions: [extension],
+          },
+        ],
+      }),
+    );
   } catch {
     reportErrorFn(
       new ExportError({

@@ -230,6 +230,13 @@ describe("shortcutBindings", () => {
         action: "exportOrder",
         repeat: "taken",
       },
+      // ADR 072. A held key saves once.
+      {
+        name: "primary+S",
+        press: (platform) => press({ key: "s", code: "KeyS", ...primary(platform) }),
+        action: "saveProject",
+        repeat: "taken",
+      },
       // ADR 069. Shift makes the browser report the capital letter.
       {
         name: "primary+Shift+S",
@@ -393,8 +400,12 @@ describe("shortcutBindings", () => {
       }
     });
 
-    it("names Export Selected Segments as the one action with no binding (ADR 067)", () => {
-      expect(UNBOUND_SHORTCUT_ACTIONS).toStrictEqual(["exportSelectedSegments"]);
+    it("names Save As and Export Selected Segments as the actions with no binding (ADR 067)", () => {
+      // ADR 072: primary with Shift and S stays Export Frame (ADR 069), so Save As has no key.
+      expect(UNBOUND_SHORTCUT_ACTIONS).toStrictEqual([
+        "saveProjectAs",
+        "exportSelectedSegments",
+      ]);
       for (const action of UNBOUND_SHORTCUT_ACTIONS) {
         expect(SHORTCUT_ACTIONS).toContain(action);
         expect(SHORTCUT_BINDINGS.some((binding) => binding.action === action)).toBe(
@@ -844,7 +855,7 @@ describe("shortcutBindings", () => {
       ).toBeNull();
     });
 
-    it("binds primary+Shift+S to Export Frame, and leaves primary+S free (ADR 069)", () => {
+    it("binds primary+Shift+S to Export Frame and primary+S to Save (ADR 069, ADR 072)", () => {
       for (const platform of PLATFORMS) {
         expect(
           actionOf(
@@ -852,10 +863,10 @@ describe("shortcutBindings", () => {
             platform,
           ),
         ).toBe("exportFrame");
-        // `primary` with S alone stays free for a later Save of the project.
+        // `primary` with S alone is Save of the project. The modifier match is exact.
         expect(
           actionOf(press({ key: "s", code: "KeyS", ...primary(platform) }), platform),
-        ).toBeNull();
+        ).toBe("saveProject");
         expect(
           actionOf(press({ key: "S", code: "KeyS", shiftKey: true }), platform),
         ).not.toBe("exportFrame");

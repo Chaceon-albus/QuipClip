@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { DropOverlay } from "@/components/layout/DropOverlay";
 import { startExportAttentionSync } from "@/components/layout/exportAttentionSync";
+import { ProjectSaveErrorDialog } from "@/components/layout/ProjectSaveErrorDialog";
 import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TimelineArea } from "@/components/layout/TimelineArea";
@@ -28,8 +29,8 @@ export function AppShell() {
   // The web view opens its context menu only in a text field. A development build keeps it
   // everywhere except on the preview media.
   useContextMenuPolicy();
-  // The Open Media and Export items of the macOS menu run the commands of their keys, under
-  // the same conditions.
+  // The Open Media, Save, Save As, Export and Export Frame items of the macOS menu run the
+  // commands of their keys, under the same conditions.
   useNativeMenuActions();
   // Every close request and every held-back exit request runs the quit decision (ADR 027).
   useQuitGuard();
@@ -47,7 +48,8 @@ export function AppShell() {
   useEffect(() => startTaskbarProgressSync(), []);
   // Bounce the Dock icon or flash the task bar button when an export ends in the background.
   useEffect(() => startExportAttentionSync(), []);
-  // Name the open file in the native window title, which the system shows outside the window.
+  // Name the open file, or the project file (ADR 072), in the native window title, which the
+  // system shows outside the window.
   useEffect(() => startWindowTitleSync(), []);
 
   const runtimeBrowserDurationSeconds = useSequencePlaybackStore(
@@ -92,6 +94,10 @@ export function AppShell() {
          * already open, so it draws above the export dialog.
          */}
         <QuitGuardDialog />
+        {/* The one mount of the dialog of a save that failed (ADR 072). The Save action and the
+            save prompt of the quit guard report the error through its store. It opens after the
+            quit guard dialog, so it draws above it. */}
+        <ProjectSaveErrorDialog />
       </div>
     </TooltipProvider>
   );

@@ -289,6 +289,14 @@ const ROWS: readonly Row[] = [
     ariaMacos: "Meta+O",
     ariaWindows: "Control+O",
   },
+  // ADR 072.
+  {
+    id: "saveProject:primary:S",
+    macos: "⌘S",
+    windows: "Ctrl+S",
+    ariaMacos: "Meta+S",
+    ariaWindows: "Control+S",
+  },
   {
     id: "export:primary:E",
     macos: "⌘E",

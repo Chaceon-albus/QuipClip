@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { playbackStore, type PlaybackStoreState } from "@/features/playback";
+import { projectSaveErrorStore } from "@/features/project/saveErrorStore";
 import type { Pts } from "@/types/project";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
@@ -129,5 +130,21 @@ describe("runShortcutCommand", () => {
     expect(playSegment).toHaveBeenCalledExactlyOnceWith("50", "100");
     runShortcutCommand({ kind: "pause" });
     expect(pause).toHaveBeenCalledOnce();
+  });
+});
+
+// The Save command runs the Save action of the page, which shows the error of a failed save
+// (ADR 072). The production sequence has no clip, so the save step fails at once with `noClip`
+// and opens no dialog. The key and the menus never plan the command then (`canSaveProject`).
+describe("runShortcutCommand for Save", () => {
+  afterEach(() => {
+    projectSaveErrorStore.getState().dismiss();
+  });
+
+  it("runs the save step and reports its error to the save error dialog", async () => {
+    runShortcutCommand({ kind: "saveProject", mode: "save" });
+    await vi.waitFor(() => {
+      expect(projectSaveErrorStore.getState().error).toEqual({ kind: "noClip" });
+    });
   });
 });

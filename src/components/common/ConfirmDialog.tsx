@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertDialog as AlertDialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
@@ -7,8 +7,12 @@ import { DialogActions } from "./DialogActions";
 import {
   DESTRUCTIVE_CONFIRM_CLASS,
   createConfirmFocusReturn,
-  type FocusCandidate,
 } from "./confirmDialogModel";
+import {
+  ENCLOSING_DIALOG_SELECTOR,
+  toDeferredFocusCandidate,
+  toFocusCandidate,
+} from "./focusCandidate";
 
 export interface ConfirmDialogProps {
   open: boolean;
@@ -30,6 +34,19 @@ export interface ConfirmDialogProps {
    */
   alternative?: { label: ReactNode; disabled?: boolean; onSelect: () => void };
   /**
+   * A button that throws away work, such as "Don't Save" beside Save (ADR 072). The button
+   * closes the dialog, as the confirm button does, and the focus then returns as after a cancel.
+   * `DialogActions` places it as a discard (ADR 031). Cancel keeps the default focus.
+   */
+  discard?: { label: ReactNode; onSelect: () => void };
+  /**
+   * Names the question that the dialog asks. When the value changes while the dialog is open,
+   * Cancel takes the focus again, as at the open: a new question in the same dialog, such as a
+   * quit prompt that shows again with a new list, never keeps the focus on the button that
+   * answered the last one. Absent means one question per open.
+   */
+  questionKey?: unknown;
+  /**
    * Names the element that takes the focus when the dialog closes after a confirm, in place of
    * the element that opened it, such as the list row that takes the selection after a delete.
    * The dialog calls it when it closes, not when it opens. When it is absent or returns an
@@ -45,48 +62,6 @@ export interface ConfirmDialogProps {
   fallbackFocus?: () => HTMLElement | null;
 }
 
-// The modal layers that can hold an opener. The fallback focus target is the one around it.
-const ENCLOSING_DIALOG_SELECTOR = '[role="dialog"],[role="alertdialog"]';
-
-function toFocusCandidate(element: Element | null): FocusCandidate | null {
-  if (!(element instanceof HTMLElement)) {
-    return null;
-  }
-  // Getters, because the rule reads both values when the dialog closes, not when it opens.
-  return {
-    get isConnected() {
-      return element.isConnected;
-    },
-    get isDisabled() {
-      return element.matches(":disabled");
-    },
-    get isDocumentBody() {
-      return element === element.ownerDocument.body;
-    },
-    focus: () => {
-      element.focus();
-    },
-  };
-}
-
-/**
- * Wraps a function that names an element, so that the focus rule reads the element when the
- * dialog closes. The element can change while the dialog is open.
- */
-function toDeferredFocusCandidate(resolve: () => HTMLElement | null): FocusCandidate {
-  return {
-    get isConnected() {
-      return toFocusCandidate(resolve())?.isConnected ?? false;
-    },
-    get isDisabled() {
-      return toFocusCandidate(resolve())?.isDisabled ?? true;
-    },
-    focus: () => {
-      resolve()?.focus();
-    },
-  };
-}
-
 /**
  * A modal confirmation built on the Radix alert dialog, drawn like `DialogContent`.
  *
@@ -94,7 +69,8 @@ function toDeferredFocusCandidate(resolve: () => HTMLElement | null): FocusCandi
  * destructive action by accident. Escape closes only this dialog when it opens on top of
  * another one, because Radix dismisses only the highest layer. The footer follows the order of
  * the platform (`DialogActions`): the confirm button is rightmost on macOS, with Cancel at its
- * left, and first on Windows, with Cancel at its right.
+ * left, and first on Windows, with Cancel at its right. A discard button stands apart at the far
+ * left on macOS, and directly after the confirm button on Windows.
  *
  * The dialog has no trigger, so it owns the focus return. See `createConfirmFocusReturn`.
  */
@@ -109,10 +85,25 @@ export function ConfirmDialog({
   confirmDisabled = false,
   onConfirm,
   alternative,
+  discard,
+  questionKey,
   confirmFocus,
   fallbackFocus,
 }: ConfirmDialogProps) {
   const [focusReturn] = useState(createConfirmFocusReturn);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const lastQuestionRef = useRef(questionKey);
+
+  useEffect(() => {
+    if (lastQuestionRef.current === questionKey) {
+      return;
+    }
+    lastQuestionRef.current = questionKey;
+    // At an open, Radix has moved the focus to Cancel already, and this call keeps it there.
+    if (open) {
+      cancelRef.current?.focus();
+    }
+  }, [open, questionKey]);
 
   return (
     <AlertDialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -156,7 +147,9 @@ export function ConfirmDialog({
             <DialogActions
               cancel={
                 <AlertDialogPrimitive.Cancel asChild>
-                  <Button variant="outline">{cancelLabel}</Button>
+                  <Button ref={cancelRef} variant="outline">
+                    {cancelLabel}
+                  </Button>
                 </AlertDialogPrimitive.Cancel>
               }
               primary={
@@ -177,13 +170,30 @@ export function ConfirmDialog({
                   </Button>
                 </AlertDialogPrimitive.Action>
               }
-              extras={
-                alternative === undefined
+              extras={[
+                ...(discard === undefined
+                  ? []
+                  : [
+                      {
+                        key: "discard",
+                        role: "discard" as const,
+                        node: (
+                          // An action of Radix, so the dialog closes after the click. The
+                          // focus then returns as after a cancel.
+                          <AlertDialogPrimitive.Action asChild>
+                            <Button variant="ghost" onClick={discard.onSelect}>
+                              {discard.label}
+                            </Button>
+                          </AlertDialogPrimitive.Action>
+                        ),
+                      },
+                    ]),
+                ...(alternative === undefined
                   ? []
                   : [
                       {
                         key: "alternative",
-                        role: "alternative",
+                        role: "alternative" as const,
                         node: (
                           <AlertDialogPrimitive.Action asChild>
                             <Button
@@ -196,8 +206,8 @@ export function ConfirmDialog({
                           </AlertDialogPrimitive.Action>
                         ),
                       },
-                    ]
-              }
+                    ]),
+              ]}
             />
           </DialogFooter>
         </AlertDialogPrimitive.Content>

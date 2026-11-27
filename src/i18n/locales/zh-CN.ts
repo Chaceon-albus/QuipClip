@@ -21,10 +21,15 @@ export const zhCN: TranslationCatalog = {
     menu: {
       file: "文件",
       openMedia: "打开媒体…",
+      save: "保存",
+      saveAs: "另存为…",
       export: "导出…",
     },
     action: {
       export: "导出",
+    },
+    project: {
+      modified: "{{name}}，有未保存的更改",
     },
     exportTooltip: {
       openVideoFirst: "请先打开一个视频",
@@ -41,6 +46,7 @@ export const zhCN: TranslationCatalog = {
     videoFilter: "视频文件",
     audioFilter: "音频文件",
     pngFilter: "PNG 图像",
+    projectFilter: "QuipClip 项目",
   },
   preview: {
     empty: {
@@ -163,6 +169,7 @@ export const zhCN: TranslationCatalog = {
   quitGuard: {
     quit: {
       title: "退出 QuipClip？",
+      saveTitle: "是否在退出前保存项目？",
       confirm: "退出",
     },
     clear: {
@@ -171,10 +178,17 @@ export const zhCN: TranslationCatalog = {
       segments_other: "已标记的 {{count}} 个片段将从时间轴上移除。撤销可以恢复。",
       pendingIn: "待定的入点也将一并移除。",
       confirm: "清空",
+      saveTitle: "是否在清空时间轴前保存项目？",
+      projectCloses: "清空时间轴会关闭项目。",
+      undoKeepsNoFile: "撤销可以恢复视频和片段，但不能恢复项目文件。",
     },
+    project: {
+      file: "“{{name}}”有未保存的更改。",
+      noFile: "项目没有文件，因此其片段尚未保存。",
+    },
+    save: "保存",
+    dontSave: "不保存",
     loss: {
-      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
-      segments_other: "已标记的 {{count}} 个片段将丢失。",
       pendingIn: "待定的入点将丢失。",
       export: "导出将停止。",
       // Chinese selects the `other` plural category for every count, so it has no `_one` form.
@@ -1060,5 +1074,35 @@ export const zhCN: TranslationCatalog = {
     dialogFailed: "无法打开保存对话框。",
     invalidResponse: "帧导出返回了无法识别的结果。",
     unknown: "导出帧时发生未知错误。",
+  },
+  projectSaveError: {
+    title: "无法保存项目",
+    details: {
+      show: "显示详细信息",
+      hide: "隐藏详细信息",
+    },
+    noClip: "时间轴上没有视频，因此没有可保存的内容。",
+    dialogFailed: "无法打开保存对话框。",
+    invalidName: "项目文件的名称必须以 .qcproj 结尾。",
+    missingSource: "缺少时间轴上某个视频文件的信息，因此未保存项目。",
+    documentRefused: "项目文件无法记录当前形式的时间轴，因此未保存项目。",
+    clipExtentUnknown:
+      "无法从文件中读取“{{fileName}}”的时长。只有当时间轴上仅有这一段视频时，项目文件才能记录它，因此未保存项目。",
+    write: {
+      invalidPath: "项目文件的路径无效。",
+      pathNotFound: "目标文件夹不存在。",
+      pathNotFile: "所选路径不是常规文件。",
+      pathNotUnicode: "项目文件的路径包含无效的 Unicode 字符。",
+      permissionDenied: "没有写入项目文件的权限。",
+      readFailed: "无法读取项目文件。",
+      writeFailed: "无法写入项目文件。",
+      invalidJson: "无法将项目写成项目文件的格式。",
+      invalidProject: "项目包含项目文件无法保存的值，因此未保存项目。",
+      unsafeProjectValue: "项目中的某个值超出安全限制。",
+      futureSchemaVersion: "此版本的 QuipClip 不写入这种项目文件格式。",
+      tooLarge: "项目文件将超过 32 MiB，因此未保存项目。",
+      commandExecutionFailed: "无法运行保存项目的命令。",
+      unknown: "保存项目时发生未知错误。",
+    },
   },
 };

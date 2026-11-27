@@ -4,6 +4,7 @@
  */
 
 import { save as tauriSave } from "@tauri-apps/plugin-dialog";
+import { trackSystemFileDialog } from "@/lib/systemFileDialog";
 import { useStore } from "zustand";
 import { i18n } from "@/i18n";
 import { exportFrame } from "./client";
@@ -31,10 +32,13 @@ export async function openPngSaveDialog(
   options: PngSaveDialogOptions,
 ): Promise<string | null> {
   const saveDialog = options.saveDialog ?? tauriSave;
-  const selected = await saveDialog({
-    defaultPath: options.defaultName,
-    filters: [{ name: options.filterName, extensions: ["png"] }],
-  });
+  // The menu items of macOS do nothing while the dialog shows (`isSystemFileDialogOpen`).
+  const selected = await trackSystemFileDialog(() =>
+    saveDialog({
+      defaultPath: options.defaultName,
+      filters: [{ name: options.filterName, extensions: ["png"] }],
+    }),
+  );
   return typeof selected === "string" && selected.trim().length > 0 ? selected : null;
 }
 

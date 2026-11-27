@@ -168,6 +168,16 @@ export function canExportMedia(hasMedia: boolean): boolean {
 }
 
 /**
+ * Save and Save As need a sequence with one or more clips (ADR 072). So no save writes a document
+ * with no clip. They read no preview: a save writes the content of the project, not a frame.
+ *
+ * @param clipCount The number of the clips of the sequence.
+ */
+export function canSaveProject(clipCount: number): boolean {
+  return clipCount >= 1;
+}
+
+/**
  * Export Selected Segments (ADR 067) needs what Export needs, one or more selected segments
  * (ADR 045), and no import that runs. An import that ends can insert a clip and split a segment
  * (ADR 052), which would change what the list of the action names.

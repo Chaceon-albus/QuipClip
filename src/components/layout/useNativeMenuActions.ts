@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { isMediaFileDialogOpen } from "@/features/media";
+import { isSystemFileDialogOpen } from "@/lib/systemFileDialog";
 import { BACKEND_EVENTS, listenWindowEvent, type UnlistenFn } from "@/lib/ipc";
 import { isPageOverlayOpen } from "./nativeContextMenuState";
 import { planNativeMenuCommand } from "./nativeMenuActions";
@@ -61,6 +61,16 @@ export function startNativeMenuActionListener(
 }
 
 /**
+ * True while a file dialog of the system that the main window opened is open: the Open Media
+ * dialog, the save dialog of a project, the save dialog of an export, or the save dialog of
+ * Export Frame (`isSystemFileDialogOpen`). A menu item does nothing then: it would queue a second
+ * dialog behind the first one, or change the state under an open save dialog.
+ */
+export function isNativeMenuFileDialogOpen(): boolean {
+  return isSystemFileDialogOpen();
+}
+
+/**
  * Runs the command of one menu event, with the conditions of the window keyboard layer
  * (`planNativeMenuCommand`). The state is read when the event arrives.
  */
@@ -71,7 +81,7 @@ export function runNativeMenuAction(payload: unknown): void {
       // The test of the window keyboard layer. A native context menu, such as the menu of a
       // timeline segment, counts as an open menu.
       isOverlayOpen: isPageOverlayOpen(),
-      isFileDialogOpen: isMediaFileDialogOpen(),
+      isFileDialogOpen: isNativeMenuFileDialogOpen(),
     },
     readShortcutSnapshot(),
   );
@@ -81,8 +91,8 @@ export function runNativeMenuAction(payload: unknown): void {
 }
 
 /**
- * Runs the command items of the macOS application menu that send their action: Open Media,
- * Export and Export Frame. The Settings item opens the Settings window in Rust. Mount it once, in the
+ * Runs the command items of the macOS application menu that send their action: Open Media, Save,
+ * Save As, Export and Export Frame. The Settings item opens the Settings window in Rust. Mount it once, in the
  * application shell.
  *
  * Only the macOS menu sends these events. On Windows the subscription exists and receives

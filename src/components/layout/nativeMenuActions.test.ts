@@ -10,6 +10,7 @@ import {
   planNativeMenuCommand,
   type NativeMenuContext,
 } from "./nativeMenuActions";
+import { UNBOUND_SHORTCUT_ACTIONS, type ShortcutAction } from "./shortcutBindings";
 import { shortcutFor } from "./shortcutLabels";
 import {
   planShortcutCommand,
@@ -65,6 +66,9 @@ function createSnapshot(
   };
 }
 
+/** The actions with no key (ADR 067). */
+const UNBOUND = new Set<ShortcutAction>(UNBOUND_SHORTCUT_ACTIONS);
+
 const FREE: NativeMenuContext = { isOverlayOpen: false, isFileDialogOpen: false };
 
 /** The snapshots that the equality test runs every action against. */
@@ -83,11 +87,12 @@ const SNAPSHOTS: readonly [string, ShortcutSnapshot][] = [
 /**
  * The command items that `src-tauri/src/menu.rs` declares. `action` is the action of the key
  * table that the item stands for. `sent` is true for an item that sends that action to the
- * frontend, and false for the Settings item, which Rust answers itself.
+ * frontend, and false for the Settings item, which Rust answers itself. `accelerator` is null
+ * for an item with no key (ADR 067).
  */
 function readRustCommandItems(): {
   label: string;
-  accelerator: string;
+  accelerator: string | null;
   action: string;
   sent: boolean;
 }[] {
@@ -96,10 +101,10 @@ function readRustCommandItems(): {
     "utf8",
   );
   const pattern =
-    /CommandItem \{\s*id: "[^"]+",\s*label: "([^"]+)",\s*accelerator: "([^"]+)",\s*action: MenuAction::(?:Frontend\("([^"]+)"\)|(OpenSettingsWindow)),\s*\}/g;
+    /CommandItem \{\s*id: "[^"]+",\s*label: "([^"]+)",\s*accelerator: (?:Some\("([^"]+)"\)|None),\s*action: MenuAction::(?:Frontend\("([^"]+)"\)|(OpenSettingsWindow)),\s*\}/g;
   return Array.from(source.matchAll(pattern), (match) => ({
     label: match[1],
-    accelerator: match[2],
+    accelerator: match[2] ?? null,
     action: match[3] ?? "openSettings",
     sent: match[4] === undefined,
   }));
@@ -108,6 +113,8 @@ function readRustCommandItems(): {
 describe("parseNativeMenuAction", () => {
   it("accepts the action of each command item that sends one", () => {
     expect(parseNativeMenuAction("openMedia")).toBe("openMedia");
+    expect(parseNativeMenuAction("saveProject")).toBe("saveProject");
+    expect(parseNativeMenuAction("saveProjectAs")).toBe("saveProjectAs");
     expect(parseNativeMenuAction("export")).toBe("export");
     expect(parseNativeMenuAction("exportFrame")).toBe("exportFrame");
   });
@@ -142,6 +149,32 @@ describe("planNativeMenuCommand", () => {
     expect(planNativeMenuCommand("export", FREE, createSnapshot(null))).toBeNull();
   });
 
+  it("saves only while the sequence has a clip, as the Save key does (ADR 072)", () => {
+    const empty = createSnapshot();
+    const withClip: ShortcutSnapshot = {
+      ...empty,
+      timeline: { ...empty.timeline, clips: [{ id: "c1", sourceId: "source-1" }] },
+    };
+    expect(planNativeMenuCommand("saveProject", FREE, withClip)).toEqual({
+      kind: "saveProject",
+      mode: "save",
+    });
+    expect(planNativeMenuCommand("saveProjectAs", FREE, withClip)).toEqual({
+      kind: "saveProject",
+      mode: "saveAs",
+    });
+    expect(planNativeMenuCommand("saveProject", FREE, empty)).toBeNull();
+    expect(planNativeMenuCommand("saveProjectAs", FREE, empty)).toBeNull();
+    // The save dialog of a project is modal to the window, as the Open Media dialog is.
+    expect(
+      planNativeMenuCommand(
+        "saveProjectAs",
+        { isOverlayOpen: false, isFileDialogOpen: true },
+        withClip,
+      ),
+    ).toBeNull();
+  });
+
   it("plans the command of the key for every action and every state", () => {
     for (const action of NATIVE_MENU_ACTIONS) {
       for (const [, snapshot] of SNAPSHOTS) {
@@ -159,8 +192,8 @@ describe("planNativeMenuCommand", () => {
     }
   });
 
-  it("does nothing while the native Open Media dialog is open", () => {
-    // A second Open Media would queue a second dialog behind the first one.
+  it("does nothing while the native Open Media dialog or the project save dialog is open", () => {
+    // A second Open Media, or a second Save As, would queue a second dialog behind the first.
     const context: NativeMenuContext = { isOverlayOpen: false, isFileDialogOpen: true };
     for (const action of NATIVE_MENU_ACTIONS) {
       expect(planNativeMenuCommand(action, context, createSnapshot())).toBeNull();
@@ -226,6 +259,12 @@ describe("the command items of the Rust menu", () => {
       const action = item.sent ? parseNativeMenuAction(item.action) : "openSettings";
       expect(action).not.toBeNull();
       const binding = action === null ? null : shortcutFor(action, "macos");
+      // An action with no key has an item with no accelerator (ADR 067, Save As of ADR 072).
+      if (action !== null && UNBOUND.has(action)) {
+        expect(binding).toBeNull();
+        expect(item.accelerator).toBeNull();
+        continue;
+      }
       expect(binding).not.toBeNull();
       if (binding === null) {
         continue;
@@ -252,6 +291,8 @@ describe("the command items of the Rust menu", () => {
       readRustCommandItems().map((item) => [item.action, item.label]),
     );
     expect(labels.get("openMedia")).toBe(en.titleBar.menu.openMedia);
+    expect(labels.get("saveProject")).toBe(en.titleBar.menu.save);
+    expect(labels.get("saveProjectAs")).toBe(en.titleBar.menu.saveAs);
     expect(labels.get("export")).toBe(en.titleBar.menu.export);
     // The title bar has no Export Frame item. The label is the name of the action in the
     // transport bar, with the ellipsis of an item that opens a dialog (ADR 069).

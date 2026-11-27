@@ -12,7 +12,11 @@ function target(bar: object | null) {
 describe("presentTitleBarModal", () => {
   it("changes nothing while no dialog is open", () => {
     expect(
-      presentTitleBarModal({ exportDialogOpen: false, quitPromptOpen: false }),
+      presentTitleBarModal({
+        exportDialogOpen: false,
+        quitPromptOpen: false,
+        saveErrorOpen: false,
+      }),
     ).toEqual({ modalOpen: false, barClass: "", appControlClass: "" });
   });
 
@@ -24,16 +28,20 @@ describe("presentTitleBarModal", () => {
       barClass: "pointer-events-auto",
       appControlClass: "pointer-events-none",
     };
-    expect(
-      presentTitleBarModal({ exportDialogOpen: true, quitPromptOpen: false }),
-    ).toEqual(open);
-    expect(
-      presentTitleBarModal({ exportDialogOpen: false, quitPromptOpen: true }),
-    ).toEqual(open);
-    // The quit prompt opens above the export dialog.
-    expect(
-      presentTitleBarModal({ exportDialogOpen: true, quitPromptOpen: true }),
-    ).toEqual(open);
+    for (const exportDialogOpen of [false, true]) {
+      for (const quitPromptOpen of [false, true]) {
+        for (const saveErrorOpen of [false, true]) {
+          if (!exportDialogOpen && !quitPromptOpen && !saveErrorOpen) {
+            continue;
+          }
+          // The quit prompt opens above the export dialog, and the dialog of a save that failed
+          // can open above both (ADR 072).
+          expect(
+            presentTitleBarModal({ exportDialogOpen, quitPromptOpen, saveErrorOpen }),
+          ).toEqual(open);
+        }
+      }
+    }
   });
 });
 
@@ -41,8 +49,13 @@ describe("keepsFocusOnPress", () => {
   const closed = presentTitleBarModal({
     exportDialogOpen: false,
     quitPromptOpen: false,
+    saveErrorOpen: false,
   });
-  const open = presentTitleBarModal({ exportDialogOpen: true, quitPromptOpen: false });
+  const open = presentTitleBarModal({
+    exportDialogOpen: true,
+    quitPromptOpen: false,
+    saveErrorOpen: false,
+  });
 
   it("keeps the focus in the dialog for a press in the bar while a dialog is open", () => {
     expect(keepsFocusOnPress(open, target({}))).toBe(true);

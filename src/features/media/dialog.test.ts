@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   hasVideoFileExtension,
-  isMediaFileDialogOpen,
   openMediaFileDialog,
   VIDEO_FILE_EXTENSIONS,
 } from "./dialog";
 import { ImportMediaError, type ImportMediaResult } from "./types";
+import { isSystemFileDialogOpen } from "@/lib/systemFileDialog";
 import type { FrameCount, Pts, TickCount } from "@/types/project";
 
 function createFakeMediaResult(fileName: string): ImportMediaResult {
@@ -266,7 +266,7 @@ describe("Media Dialog Orchestration", () => {
     });
   });
 
-  describe("isMediaFileDialogOpen", () => {
+  describe("the shared count of the file dialogs of the system", () => {
     /** A dialog that stays open until the test settles it. */
     function pendingDialog() {
       let resolve!: (value: string | null) => void;
@@ -279,7 +279,7 @@ describe("Media Dialog Orchestration", () => {
     }
 
     it("is false while no dialog is open", () => {
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
 
     it("is true while the dialog is open, and false after a choice", async () => {
@@ -291,18 +291,18 @@ describe("Media Dialog Orchestration", () => {
         importPath,
       });
 
-      expect(isMediaFileDialogOpen()).toBe(true);
+      expect(isSystemFileDialogOpen()).toBe(true);
       dialog.resolve("/media/clip.mp4");
       await running;
       expect(importPath).toHaveBeenCalledTimes(1);
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
 
     it("is false while the chosen file imports", async () => {
       // The dialog is closed when the import starts, so the menu may act again then.
       let openDuringImport: boolean | null = null;
       const importPath = vi.fn((): Promise<null> => {
-        openDuringImport = isMediaFileDialogOpen();
+        openDuringImport = isSystemFileDialogOpen();
         return Promise.resolve(null);
       });
       await openMediaFileDialog({
@@ -321,7 +321,7 @@ describe("Media Dialog Orchestration", () => {
       });
       dialog.resolve(null);
       await running;
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
 
     it("is false after the dialog fails", async () => {
@@ -331,10 +331,10 @@ describe("Media Dialog Orchestration", () => {
         openDialog: dialog.openDialog,
         reportError: vi.fn(),
       });
-      expect(isMediaFileDialogOpen()).toBe(true);
+      expect(isSystemFileDialogOpen()).toBe(true);
       dialog.reject(new Error("dialog refused"));
       await running;
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
 
     it("is false after the opener throws before it returns a promise", async () => {
@@ -346,7 +346,7 @@ describe("Media Dialog Orchestration", () => {
         openDialog,
         reportError: vi.fn(),
       });
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
 
     it("stays true until the last of two open dialogs closes", async () => {
@@ -363,10 +363,10 @@ describe("Media Dialog Orchestration", () => {
 
       first.resolve(null);
       await firstRun;
-      expect(isMediaFileDialogOpen()).toBe(true);
+      expect(isSystemFileDialogOpen()).toBe(true);
       second.resolve(null);
       await secondRun;
-      expect(isMediaFileDialogOpen()).toBe(false);
+      expect(isSystemFileDialogOpen()).toBe(false);
     });
   });
 });

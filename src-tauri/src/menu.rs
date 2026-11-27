@@ -10,16 +10,17 @@
 //! `ExitRequested`, so the quit goes through the gate in `commands::quit` and the dialog of
 //! the frontend. The application submenu also gets Show All, which the default menu omits and
 //! the standard macOS application menu has. And the menu holds the commands of the
-//! application: Settings in the application submenu, and Open Media, Export and Export Frame in
-//! the File submenu.
+//! application: Settings in the application submenu, and Open Media, Save, Save As, Export and
+//! Export Frame in the File submenu.
 //!
 //! # The command items
 //!
-//! A command item is an ordinary item. Open Media, Export and Export Frame bring the main window forward
-//! and send it [`MENU_ACTION_EVENT`] with the name of their action, and Rust decides nothing
-//! else. The frontend runs that action with the conditions of the window keyboard layer (ADR
-//! 026), and it does nothing while a dialog or a menu of the page is open. The items stay
-//! enabled, as the Quit item does, because only the frontend knows whether the action can run.
+//! A command item is an ordinary item. Open Media, Save, Save As, Export and Export Frame bring
+//! the main window forward and send it [`MENU_ACTION_EVENT`] with the name of their action, and
+//! Rust decides nothing else. The frontend runs that action with the conditions of the window
+//! keyboard layer (ADR 026), and it does nothing while a dialog or a menu of the page is open.
+//! The items stay enabled, as the Quit item does, because only the frontend knows whether the
+//! action can run.
 //! The main window comes forward first, because the items also work while the Settings window
 //! has the focus, and the action runs in the main window.
 //!
@@ -27,7 +28,8 @@
 //! (`commands::settings_window`). That window is independent of the main window, so a dialog
 //! of the main window does not stop it from opening, and the item needs no frontend.
 //!
-//! Each item carries the accelerator of its row in the key table of ADR 026. The key press
+//! Each item carries the accelerator of its row in the key table of ADR 026, and an item whose
+//! action has no row there (ADR 067), such as Save As, has no accelerator. The key press
 //! goes to the page first. `WKWebView` takes every key equivalent while it is the first
 //! responder, and it sends the key press to the page. It gives the key press back to AppKit,
 //! and so to this menu, only when the page did not cancel it. The keyboard layer cancels every
@@ -80,8 +82,9 @@ struct CommandItem {
     /// The label. It is the label of the same action in the File menu of the title bar, in
     /// English.
     label: &'static str,
-    /// The accelerator. It is the key of the same action in the key table of ADR 026.
-    accelerator: &'static str,
+    /// The accelerator. It is the key of the same action in the key table of ADR 026, or `None`
+    /// for an action with no key (ADR 067).
+    accelerator: Option<&'static str>,
     action: MenuAction,
 }
 
@@ -89,7 +92,7 @@ struct CommandItem {
 const SETTINGS_ITEM: CommandItem = CommandItem {
     id: "quipclip.settings",
     label: "Settings…",
-    accelerator: "CmdOrCtrl+,",
+    accelerator: Some("CmdOrCtrl+,"),
     action: MenuAction::OpenSettingsWindow,
 };
 
@@ -97,15 +100,33 @@ const SETTINGS_ITEM: CommandItem = CommandItem {
 const OPEN_MEDIA_ITEM: CommandItem = CommandItem {
     id: "quipclip.open-media",
     label: "Open Media…",
-    accelerator: "CmdOrCtrl+O",
+    accelerator: Some("CmdOrCtrl+O"),
     action: MenuAction::Frontend("openMedia"),
+};
+
+/// Save, in the File submenu (ADR 072). It writes the file of the project, or opens the save
+/// dialog for a project with no file.
+const SAVE_ITEM: CommandItem = CommandItem {
+    id: "quipclip.save",
+    label: "Save",
+    accelerator: Some("CmdOrCtrl+S"),
+    action: MenuAction::Frontend("saveProject"),
+};
+
+/// Save As, in the File submenu (ADR 072). It has no key, because `CmdOrCtrl+Shift+S` is Export
+/// Frame (ADR 069).
+const SAVE_AS_ITEM: CommandItem = CommandItem {
+    id: "quipclip.save-as",
+    label: "Save As…",
+    accelerator: None,
+    action: MenuAction::Frontend("saveProjectAs"),
 };
 
 /// Export, in the File submenu.
 const EXPORT_ITEM: CommandItem = CommandItem {
     id: "quipclip.export",
     label: "Export…",
-    accelerator: "CmdOrCtrl+E",
+    accelerator: Some("CmdOrCtrl+E"),
     action: MenuAction::Frontend("export"),
 };
 
@@ -115,14 +136,16 @@ const EXPORT_ITEM: CommandItem = CommandItem {
 const EXPORT_FRAME_ITEM: CommandItem = CommandItem {
     id: "quipclip.export-frame",
     label: "Export Frame…",
-    accelerator: "CmdOrCtrl+Shift+S",
+    accelerator: Some("CmdOrCtrl+Shift+S"),
     action: MenuAction::Frontend("exportFrame"),
 };
 
 /// Every command item. [`menu_action_for`] reads this list.
-const COMMAND_ITEMS: [&CommandItem; 4] = [
+const COMMAND_ITEMS: [&CommandItem; 6] = [
     &SETTINGS_ITEM,
     &OPEN_MEDIA_ITEM,
+    &SAVE_ITEM,
+    &SAVE_AS_ITEM,
     &EXPORT_ITEM,
     &EXPORT_FRAME_ITEM,
 ];
@@ -132,17 +155,16 @@ fn command_menu_item<R: Runtime>(
     handle: &AppHandle<R>,
     item: &CommandItem,
 ) -> tauri::Result<MenuItem<R>> {
-    MenuItem::with_id(handle, item.id, item.label, true, Some(item.accelerator))
+    MenuItem::with_id(handle, item.id, item.label, true, item.accelerator)
 }
 
 /// Builds the application menu. It is the menu that `tauri::menu::Menu::default` builds on
 /// macOS, with the Quit item replaced, Show All added, and the command items added.
 ///
 /// The application submenu has the standard macOS order: About, Settings, Services, the Hide
-/// and Show items, and Quit. The File submenu has Open Media, Export, Export Frame, and Close
-/// Window. Close
-/// Window is the predefined item of the default File submenu. It raises the close request of
-/// the window, so the quit decision of ADR 027 still runs.
+/// and Show items, and Quit. The File submenu has Open Media, Save, Save As, Export, Export
+/// Frame, and Close Window. Close Window is the predefined item of the default File submenu. It
+/// raises the close request of the window, so the quit decision of ADR 027 still runs.
 ///
 /// The Window and Help submenus keep the identifiers of the default menu. Tauri registers the
 /// submenus with those identifiers as the Window menu and the Help menu of the application,
@@ -199,6 +221,8 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         true,
         &[
             &command_menu_item(handle, &OPEN_MEDIA_ITEM)?,
+            &command_menu_item(handle, &SAVE_ITEM)?,
+            &command_menu_item(handle, &SAVE_AS_ITEM)?,
             &command_menu_item(handle, &EXPORT_ITEM)?,
             &command_menu_item(handle, &EXPORT_FRAME_ITEM)?,
             &PredefinedMenuItem::separator(handle)?,
@@ -330,6 +354,14 @@ mod tests {
             Some(MenuAction::Frontend("openMedia"))
         );
         assert_eq!(
+            menu_action_for(SAVE_ITEM.id),
+            Some(MenuAction::Frontend("saveProject"))
+        );
+        assert_eq!(
+            menu_action_for(SAVE_AS_ITEM.id),
+            Some(MenuAction::Frontend("saveProjectAs"))
+        );
+        assert_eq!(
             menu_action_for(EXPORT_ITEM.id),
             Some(MenuAction::Frontend("export"))
         );
@@ -363,32 +395,42 @@ mod tests {
     fn the_command_items_are_distinct() {
         for (index, item) in COMMAND_ITEMS.iter().enumerate() {
             assert_ne!(item.id, QUIT_MENU_ITEM_ID);
-            assert_ne!(item.accelerator, QUIT_ACCELERATOR);
+            assert_ne!(item.accelerator, Some(QUIT_ACCELERATOR));
             for other in &COMMAND_ITEMS[index + 1..] {
                 assert_ne!(item.id, other.id);
                 assert_ne!(item.action, other.action);
-                assert_ne!(item.accelerator, other.accelerator);
+                // Two items with no key do not share one.
+                if item.accelerator.is_some() {
+                    assert_ne!(item.accelerator, other.accelerator);
+                }
             }
         }
     }
 
     #[test]
     fn the_accelerators_are_the_keys_of_adr_026() {
-        // `primary` is Cmd on macOS, and `CmdOrCtrl` names it. The key table binds O, E and
+        // `primary` is Cmd on macOS, and `CmdOrCtrl` names it. The key table binds O, S, E and
         // the comma with `primary` and with no other modifier.
-        assert_eq!(OPEN_MEDIA_ITEM.accelerator, "CmdOrCtrl+O");
-        assert_eq!(EXPORT_ITEM.accelerator, "CmdOrCtrl+E");
-        assert_eq!(SETTINGS_ITEM.accelerator, "CmdOrCtrl+,");
+        assert_eq!(OPEN_MEDIA_ITEM.accelerator, Some("CmdOrCtrl+O"));
+        assert_eq!(SAVE_ITEM.accelerator, Some("CmdOrCtrl+S"));
+        assert_eq!(EXPORT_ITEM.accelerator, Some("CmdOrCtrl+E"));
+        assert_eq!(SETTINGS_ITEM.accelerator, Some("CmdOrCtrl+,"));
         // ADR 069 binds S with `primary` and Shift.
-        assert_eq!(EXPORT_FRAME_ITEM.accelerator, "CmdOrCtrl+Shift+S");
+        assert_eq!(EXPORT_FRAME_ITEM.accelerator, Some("CmdOrCtrl+Shift+S"));
+        // ADR 072: Save As has no key.
+        assert_eq!(SAVE_AS_ITEM.accelerator, None);
     }
 
     #[test]
     fn the_labels_are_the_labels_of_the_title_bar_menu() {
-        // `titleBar.menu.openMedia` and `titleBar.menu.export` in `src/i18n/locales/en.ts`.
-        // The settings item has no title bar entry, and its label is the standard one. Each
-        // label ends in the ellipsis character (U+2026), because each item opens a window.
+        // `titleBar.menu.openMedia`, `titleBar.menu.save`, `titleBar.menu.saveAs` and
+        // `titleBar.menu.export` in `src/i18n/locales/en.ts`. The settings item has no title bar
+        // entry, and its label is the standard one. Each label of an item that always opens a
+        // window or a dialog ends in the ellipsis character (U+2026). Save opens the save dialog
+        // only for a project with no file, so it has none.
         assert_eq!(OPEN_MEDIA_ITEM.label, "Open Media…");
+        assert_eq!(SAVE_ITEM.label, "Save");
+        assert_eq!(SAVE_AS_ITEM.label, "Save As…");
         assert_eq!(EXPORT_ITEM.label, "Export…");
         assert_eq!(SETTINGS_ITEM.label, "Settings…");
         // `transport.action.exportFrame`, the name of the action in the transport bar.

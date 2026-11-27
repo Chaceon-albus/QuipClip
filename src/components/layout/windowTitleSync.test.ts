@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMediaStore, type ImportMediaResult } from "@/features/media";
+import type { ProjectTitle, ProjectTitleSource } from "@/features/project/projectTitle";
 import type { FrameCount, Pts, TickCount } from "@/types/project";
 import baseConfig from "../../../src-tauri/tauri.conf.json";
 import macosConfig from "../../../src-tauri/tauri.macos.conf.json";
@@ -61,6 +62,20 @@ describe("resolveWindowTitle", () => {
     expect(resolveWindowTitle("holiday.final.mp4")).toBe(
       "holiday.final.mp4 — QuipClip",
     );
+  });
+
+  it("names the project file in place of the video, with a dot when modified (ADR 072)", () => {
+    expect(
+      resolveWindowTitle("clip.mp4", { fileName: "cut.qcproj", modified: false }),
+    ).toBe("cut.qcproj — QuipClip");
+    expect(
+      resolveWindowTitle("clip.mp4", { fileName: "cut.qcproj", modified: true }),
+    ).toBe("• cut.qcproj — QuipClip");
+    expect(resolveWindowTitle(null, { fileName: "cut.qcproj", modified: true })).toBe(
+      "• cut.qcproj — QuipClip",
+    );
+    // A project with no file keeps the title as before.
+    expect(resolveWindowTitle("clip.mp4", null)).toBe("clip.mp4 — QuipClip");
   });
 
   // A platform file replaces the whole `windows` array of the base file (ADR 020), so each
@@ -203,6 +218,63 @@ describe("startWindowTitleSync", () => {
     store.setState({ status: "ready", media: createMedia("a.mp4") });
     await flushPromises();
     expect(setTitle).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows the title state of the project, with one call in flight (ADR 072)", async () => {
+    const store = createMediaStore(
+      {},
+      { status: "ready", media: createMedia("clip.mp4") },
+    );
+    let title: ProjectTitle | null = null;
+    const listeners = new Set<() => void>();
+    const project: ProjectTitleSource = {
+      read: () => title,
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    };
+    const change = (next: ProjectTitle | null) => {
+      title = next;
+      for (const listener of listeners) {
+        listener();
+      }
+    };
+    let release: () => void = () => {};
+    const setTitle = vi.fn<(title: string) => Promise<void>>(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const stop = startWindowTitleSync({ store, project, setTitle, enabled: true });
+    expect(callsOf(setTitle)).toEqual(["clip.mp4 — QuipClip"]);
+
+    // A save, then an edit, while the first call is in flight: only the latest is sent.
+    change({ fileName: "cut.qcproj", modified: false });
+    change({ fileName: "cut.qcproj", modified: true });
+    expect(setTitle).toHaveBeenCalledTimes(1);
+    release();
+    await flushPromises();
+    expect(callsOf(setTitle)).toEqual([
+      "clip.mp4 — QuipClip",
+      "• cut.qcproj — QuipClip",
+    ]);
+
+    // The project closes, and the title names the video again.
+    change(null);
+    release();
+    await flushPromises();
+    expect(callsOf(setTitle)).toEqual([
+      "clip.mp4 — QuipClip",
+      "• cut.qcproj — QuipClip",
+      "clip.mp4 — QuipClip",
+    ]);
+
+    stop();
+    expect(listeners.size).toBe(0);
   });
 
   it("does nothing outside the application shell", async () => {

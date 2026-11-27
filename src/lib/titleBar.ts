@@ -13,6 +13,15 @@ export const TITLE_BAR_MARKER = { "data-title-bar": "" } as const;
 /** The selector of the element that carries `TITLE_BAR_MARKER`. */
 export const TITLE_BAR_SELECTOR = "[data-title-bar]";
 
+/**
+ * The props that mark the trigger of the File menu of the title bar. A dialog that the menu
+ * opened gives the focus back to the trigger when the item that it came from is gone.
+ */
+export const TITLE_BAR_FILE_MENU_MARKER = { "data-title-bar-file-menu": "" } as const;
+
+/** The selector of the element that carries `TITLE_BAR_FILE_MENU_MARKER`. */
+export const TITLE_BAR_FILE_MENU_SELECTOR = "[data-title-bar-file-menu]";
+
 /** The member of an event target that `isInTitleBar` reads. `Element` satisfies it. */
 export interface TitleBarAncestorProbe {
   closest(selector: string): unknown;

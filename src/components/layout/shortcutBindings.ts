@@ -55,6 +55,8 @@ export const SHORTCUT_ACTIONS = [
   "undo",
   "redo",
   "openMedia",
+  "saveProject",
+  "saveProjectAs",
   "export",
   "exportSelectedSegments",
   "exportFrame",
@@ -72,9 +74,12 @@ export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
  * table, as for every other action. Every action that this list does not name has a binding on
  * each platform.
  *
+ * - `saveProjectAs`: Save As…, an item of the File menus (ADR 072). `primary` with Shift and S
+ *   is Export Frame (ADR 069).
  * - `exportSelectedSegments`: Export Selected Segments, an item of the menu of a segment.
  */
 export const UNBOUND_SHORTCUT_ACTIONS = [
+  "saveProjectAs",
   "exportSelectedSegments",
 ] as const satisfies readonly ShortcutAction[];
 
@@ -461,6 +466,8 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     repeat: "acts",
   },
   { key: letter("O"), modifiers: ["primary"], action: "openMedia", repeat: "taken" },
+  // ADR 072. A held key saves once: the repeats are taken and do nothing.
+  { key: letter("S"), modifiers: ["primary"], action: "saveProject", repeat: "taken" },
   { key: letter("E"), modifiers: ["primary"], action: "export", repeat: "taken" },
   // ADR 066. The modifier match is exact, so this row and primary+E (export) never match the same
   // key press. The layer does nothing while a dialog is open, so the key does not act in the
@@ -471,7 +478,8 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "exportOrder",
     repeat: "taken",
   },
-  // ADR 069. `primary` with S alone stays free for a later Save of the project.
+  // ADR 069. The modifier match is exact, so this row and primary+S (saveProject, ADR 072) never
+  // match the same key press.
   {
     key: letter("S"),
     modifiers: ["primary", "shift"],

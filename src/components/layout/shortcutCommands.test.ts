@@ -23,7 +23,9 @@ import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
   EXTENT_END_SEEK_OPTIONS,
   LARGE_FRAME_STEP,
+  isMenuItemAvailable,
   planControlCommand,
+  planMenuItemCommand,
   planShortcutCommand,
   EDGE_PRESS_LOCKED_ACTIONS,
   TRIM_LOCKED_ACTIONS,
@@ -1875,9 +1877,12 @@ describe("planShortcutCommand", () => {
         planShortcutCommand("renameSegment", { ...current, isTrimArmed: true }),
       ).toBeNull();
       // Export Order and Export Selected Segments open a modal dialog too (ADR 066, ADR 067),
-      // and Export Frame the save dialog of the system (ADR 069).
+      // and Export Frame the save dialog of the system (ADR 069). Save and Save As act as
+      // Rename (ADR 072).
       expect([...EDGE_PRESS_LOCKED_ACTIONS]).toStrictEqual([
         "renameSegment",
+        "saveProject",
+        "saveProjectAs",
         "exportOrder",
         "exportSelectedSegments",
         "exportFrame",
@@ -2053,6 +2058,92 @@ describe("planShortcutCommand", () => {
       ).toBeNull();
       expect(TRIM_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
       expect(EDGE_PRESS_LOCKED_ACTIONS.has("exportOrder")).toBe(true);
+    });
+  });
+
+  describe("Save and Save As (ADR 072)", () => {
+    const withClip = createSnapshot({
+      timeline: { clips: [{ id: "c1", sourceId: SOURCE_ID }] },
+    });
+
+    it("saves while the sequence has a clip, with the mode of the action", () => {
+      expect(planShortcutCommand("saveProject", withClip)).toEqual({
+        kind: "saveProject",
+        mode: "save",
+      });
+      expect(planShortcutCommand("saveProjectAs", withClip)).toEqual({
+        kind: "saveProject",
+        mode: "saveAs",
+      });
+    });
+
+    it("does nothing while the sequence has no clip", () => {
+      const empty = createSnapshot({
+        probe: null,
+        playback: { isAttached: false, isReady: false, presentedFrame: null },
+        timeline: { clips: [], sourceId: null },
+      });
+      expect(planShortcutCommand("saveProject", empty)).toBeNull();
+      expect(planShortcutCommand("saveProjectAs", empty)).toBeNull();
+    });
+
+    it("reads no preview: it saves while the next clip loads", () => {
+      const loading = createSnapshot({
+        playback: { isAttached: false, isReady: false, presentedFrame: null },
+        timeline: { clips: [{ id: "c1", sourceId: SOURCE_ID }] },
+      });
+      expect(planShortcutCommand("saveProject", loading)).toEqual({
+        kind: "saveProject",
+        mode: "save",
+      });
+    });
+
+    it("does nothing while a trim drags or an edge press is armed, as Rename", () => {
+      for (const action of ["saveProject", "saveProjectAs"] as const) {
+        expect(
+          planShortcutCommand(action, { ...withClip, isTrimDragging: true }),
+        ).toBeNull();
+        expect(
+          planShortcutCommand(action, { ...withClip, isTrimArmed: true }),
+        ).toBeNull();
+        expect(TRIM_LOCKED_ACTIONS.has(action)).toBe(true);
+        expect(EDGE_PRESS_LOCKED_ACTIONS.has(action)).toBe(true);
+      }
+    });
+
+    it("runs from the File menu of the title bar under the trim locks of the key", () => {
+      // The menu is an overlay itself, so the item has no test for an open overlay.
+      expect(planControlCommand("saveProject", true, withClip)).toBeNull();
+      expect(planMenuItemCommand("saveProject", withClip)).toEqual({
+        kind: "saveProject",
+        mode: "save",
+      });
+      expect(planMenuItemCommand("saveProjectAs", withClip)).toEqual({
+        kind: "saveProject",
+        mode: "saveAs",
+      });
+      for (const action of ["saveProject", "saveProjectAs"] as const) {
+        expect(
+          planMenuItemCommand(action, { ...withClip, isTrimDragging: true }),
+        ).toBeNull();
+        expect(
+          planMenuItemCommand(action, { ...withClip, isTrimArmed: true }),
+        ).toBeNull();
+        expect(planMenuItemCommand(action, createSnapshot())).toBeNull();
+      }
+    });
+
+    it("shows the items disabled under the trim locks and with no clip", () => {
+      for (const action of ["saveProject", "saveProjectAs"] as const) {
+        expect(isMenuItemAvailable(action, withClip)).toBe(true);
+        expect(isMenuItemAvailable(action, { ...withClip, isTrimDragging: true })).toBe(
+          false,
+        );
+        expect(isMenuItemAvailable(action, { ...withClip, isTrimArmed: true })).toBe(
+          false,
+        );
+        expect(isMenuItemAvailable(action, createSnapshot())).toBe(false);
+      }
     });
   });
 
@@ -2394,9 +2485,11 @@ describe("planShortcutCommand", () => {
       // The frame on screen (PTS 90000) lies inside the segment, so each action can act. A
       // second segment gives Export Order an order to change (ADR 066).
       // Export Frame reads the state of its own plan (ADR 069).
+      // A clip on the sequence gives Save and Save As a project to write (ADR 072).
       const editable: ShortcutSnapshot = {
         ...createSnapshot({
           timeline: {
+            clips: [{ id: "c1", sourceId: SOURCE_ID }],
             segments: [segment("a", "0", "180000"), segment("b", "270000", "360000")],
             currentSegmentId: "a",
             canUndo: true,
@@ -2421,6 +2514,8 @@ describe("planShortcutCommand", () => {
           "markOut",
           "redo",
           "renameSegment",
+          "saveProject",
+          "saveProjectAs",
           "selectAllSegments",
           "undo",
         ].sort(),

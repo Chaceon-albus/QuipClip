@@ -18,10 +18,21 @@ export const en = {
     menu: {
       file: "File",
       openMedia: "Open Media…",
+      // Save and Save As save the project (ADR 072). Save As has the ellipsis, because it always
+      // opens the save dialog.
+      save: "Save",
+      saveAs: "Save As…",
       export: "Export…",
     },
     action: {
       export: "Export",
+    },
+    // The name of the project file in the centre of the title bar (ADR 072). A modified project
+    // shows a dot in front of the name, which assistive technology does not read. This message
+    // is the text that it reads in place of the name and the dot. {{name}} is the name of the
+    // project file, such as "interview.qcproj".
+    project: {
+      modified: "{{name}}, with changes that are not saved",
     },
     // The tooltip of the Export button. openVideoFirst and markSegmentFirst are a second,
     // muted line under "Export". {{duration}} is the total duration of the segments, as a
@@ -44,6 +55,8 @@ export const en = {
     // The file filter of the save dialog of Export Frame, which saves one frame as a PNG image
     // (ADR 069).
     pngFilter: "PNG Images",
+    // The file filter of the save dialog of a project file (ADR 072).
+    projectFilter: "QuipClip Projects",
   },
   preview: {
     empty: {
@@ -240,11 +253,17 @@ export const en = {
     othersIgnored: "QuipClip adds the video files and ignores the other files.",
   },
   // The confirmations before a quit (ADR 027) and before Clear Timeline (ADR 052). Each message
-  // below `loss`, `clear.segments` and `clear.pendingIn` is one line of a list in the dialog,
-  // which shows only the lines that apply. Undo brings back what Clear Timeline removes.
+  // below `project`, `loss`, `clear.segments`, `clear.projectCloses`, `clear.undoKeepsNoFile`
+  // and `clear.pendingIn` is one line of a list in the dialog, which shows only the lines that apply. Undo brings back
+  // what Clear Timeline removes.
+  //
+  // When the project has changes that are not saved, each dialog is the save prompt of ADR 072:
+  // it has `saveTitle`, a first line from `project`, and the buttons `save`, `dontSave` and
+  // Cancel. "Don't Save" closes the application or clears the timeline without a save.
   quitGuard: {
     quit: {
       title: "Quit QuipClip?",
+      saveTitle: "Save the project before you quit?",
       confirm: "Quit",
     },
     // Clear Timeline removes every clip and every segment as one edit (ADR 052).
@@ -255,10 +274,22 @@ export const en = {
         "The {{count}} marked segments leave the timeline. Undo brings them back.",
       pendingIn: "The pending In point leaves the timeline too.",
       confirm: "Clear",
+      saveTitle: "Save the project before you clear the timeline?",
+      // Clear Timeline empties the sequence, and so it closes the project (ADR 072). Two lines
+      // of the save prompt.
+      projectCloses: "Clear Timeline closes the project.",
+      undoKeepsNoFile:
+        "Undo brings the videos and the segments back, but not the project file.",
     },
+    // {{name}} is the name of the project file, such as "interview.qcproj". `noFile` is for a
+    // project that was never saved.
+    project: {
+      file: "“{{name}}” has changes that are not saved.",
+      noFile: "The project has no file, so its segments are not saved.",
+    },
+    save: "Save",
+    dontSave: "Don’t Save",
     loss: {
-      segments_one: "{{count}} marked segment will be lost.",
-      segments_other: "{{count}} marked segments will be lost.",
       pendingIn: "The pending In point will be lost.",
       export: "The export will stop.",
       // The exports that wait in the queue. The exit drops them before they start (ADR 049).
@@ -1458,5 +1489,53 @@ export const en = {
     invalidResponse:
       "The export of the frame gave a result that QuipClip does not recognize.",
     unknown: "An unknown error occurred while QuipClip exported the frame.",
+  },
+  // The dialog of a save of the project that failed (ADR 072). The keys below `title` are the
+  // kinds of `ProjectSaveError`, and `clipExtentUnknown` is the one problem of the document that
+  // has its own message. The keys of `write` are the codes of `ProjectCommandError` of the
+  // command that writes the file. The diagnostic text of the system shows in the details of the
+  // dialog, untranslated. `details.show` and `details.hide` label its disclosure. They match
+  // `export.details`.
+  projectSaveError: {
+    title: "QuipClip could not save the project",
+    details: {
+      show: "Show Details",
+      hide: "Hide Details",
+    },
+    noClip: "The timeline has no video, so there is nothing to save.",
+    dialogFailed: "QuipClip could not open the save dialog.",
+    invalidName: "The name of a project file must end in .qcproj.",
+    missingSource:
+      "QuipClip has no information about a video file of the timeline, so it did not save the project.",
+    documentRefused:
+      "A project file cannot hold the timeline in its current form, so QuipClip did not save the project.",
+    // {{fileName}} is the name of the video file, such as "clip.mp4". The file gave no length,
+    // and a project file does not keep the length that the preview found, so it holds such a
+    // video only when it is alone on the timeline (ADR 052).
+    clipExtentUnknown:
+      "QuipClip could not read the length of “{{fileName}}” from the file. A project file can hold such a video only when it is alone on the timeline, so QuipClip did not save the project.",
+    write: {
+      invalidPath: "The path of the project file is invalid.",
+      pathNotFound: "The destination folder does not exist.",
+      pathNotFile: "The selected path is not a regular file.",
+      pathNotUnicode:
+        "The path of the project file contains invalid Unicode characters.",
+      permissionDenied: "QuipClip does not have permission to write the project file.",
+      readFailed: "QuipClip could not read the project file.",
+      writeFailed: "QuipClip could not write the project file.",
+      invalidJson:
+        "QuipClip could not write the project in the format of a project file.",
+      invalidProject:
+        "The project has a value that a project file cannot hold, so QuipClip did not save it.",
+      unsafeProjectValue: "A value of the project exceeds safe limits.",
+      futureSchemaVersion:
+        "The project file format is not one that this version of QuipClip writes.",
+      // 32 MiB is PROJECT_FILE_MAX_BYTES of the Rust project module.
+      tooLarge:
+        "The project file would be larger than 32 MiB, so QuipClip did not save it.",
+      commandExecutionFailed:
+        "QuipClip could not run the command that saves the project.",
+      unknown: "An unknown error occurred while QuipClip saved the project.",
+    },
   },
 } as const;

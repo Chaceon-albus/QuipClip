@@ -2,10 +2,9 @@
  * The command items of the macOS application menu, and the rule that decides what each one
  * does.
  *
- * `src-tauri/src/menu.rs` builds four command items: Settings, Open Media, Export and Export
- * Frame. A click on Open Media, Export or Export Frame, or its key equivalent, sends
- * `BACKEND_EVENTS.MENU_ACTION` to the
- * main window with the name of its action. The name is an action of the key table (ADR 026),
+ * `src-tauri/src/menu.rs` builds six command items: Settings, Open Media, Save, Save As, Export
+ * and Export Frame. A click on each item but Settings, or its key equivalent, sends
+ * `BACKEND_EVENTS.MENU_ACTION` to the main window with the name of its action. The name is an action of the key table (ADR 026),
  * and this module plans the same command for it as the window keyboard layer plans for the
  * key, from the same predicates in `actionConditions.ts`. The Settings item sends no event:
  * Rust opens the Settings window itself.
@@ -29,8 +28,9 @@
  *
  * An item does nothing while a dialog, a menu or a list box of the page is open. The layer
  * does nothing then too, and a click on the File menu of the title bar cannot happen, because
- * the dialog is modal. An item also does nothing while the native Open Media dialog is open.
- * That dialog is modal to the window, so the page gets no key press and no click, but the
+ * the dialog is modal. An item also does nothing while a file dialog of the system is open: the
+ * Open Media dialog, or the save dialog of a project, of an export or of Export Frame. Each of
+ * those dialogs is modal to the window, so the page gets no key press and no click, but the
  * application menu still works.
  *
  * An item does not read the focus. The layer leaves a key press to a focused text field or
@@ -50,6 +50,8 @@ import {
 /** The action names that the command items of the macOS menu send. */
 export const NATIVE_MENU_ACTIONS = [
   "openMedia",
+  "saveProject",
+  "saveProjectAs",
   "export",
   "exportFrame",
 ] as const satisfies readonly ShortcutAction[];
@@ -63,7 +65,11 @@ export interface NativeMenuContext {
    * (`MODAL_LAYER_SELECTOR`), or a native context menu of the page (`nativeContextMenuState`).
    */
   readonly isOverlayOpen: boolean;
-  /** True while the native Open Media dialog is open (`isMediaFileDialogOpen`). */
+  /**
+   * True while a file dialog of the system that the main window opened is open
+   * (`isNativeMenuFileDialogOpen`): the Open Media dialog, or the save dialog of a project, of an
+   * export or of Export Frame.
+   */
   readonly isFileDialogOpen: boolean;
 }
 
