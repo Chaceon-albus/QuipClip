@@ -776,16 +776,21 @@ The project file is `.qcproj`, which is versioned JSON. See ADR 010. The documen
 absolute and relative source paths, and it stores the clips of the sequence. Runtime proxy
 and browser state do not enter the file.
 
-Version 1 writes no project file. The user imports the sources in each session, so the
-segments last for one session, and the export presets live in the settings file instead. Rust
-keeps `load_project` and `save_project` registered, and nothing calls them.
+A save is an action of the user (ADR 072). Save is on `Cmd+S` or `Ctrl+S`. Save As… has no
+key. The export presets are in the settings file, and not in the project. One Open action
+takes videos and project files. The open of a project checks each source that a clip names. It
+compares each candidate file with the revision that the project saved, and it then imports the
+file again. An FLV that grew passes when its saved part did not change (ADR 058), and it opens
+as that part. For each other file that changed, or that QuipClip does not find, the user
+locates the file, or the open stops. A project has a file only while the sequence has a clip.
+QuipClip asks before a quit, an open of a project or Clear Timeline drops the changes to save
+that ADR 072 defines. An exit that cannot ask (ADR 027) still loses them.
 
-ADR 072 changes this, and its code is not in yet. A save is an action of the user, with Save
-on `Cmd+S` or `Ctrl+S` and Save As…. One Open action takes videos and project files. The open
-of a project imports each source again and compares it with the revision that the project
-saved. An FLV that grew opens as the part that the project saved. For each other file that
-changed or is absent, the user locates the file, or the open stops. A project has a file only
-while the sequence has a clip, and QuipClip asks before it drops changes that are not saved.
+The page parts of the project are in `src/features/project/`: the document builder and the
+content value (`document.ts`), the project of the session (`store.ts`), the save step
+(`saveStep.ts`) and the open step (`openStep.ts`). The quit guard
+(`src/components/layout/quitGuardController.ts`) runs the save prompt for a quit, for Clear
+Timeline and for an open, and it owns the open step of the page.
 
 ADR 073 adds the recovery, and its code is not in yet. The page writes a recovery file into
 the application data directory 1 second after a change, while the project has changes to

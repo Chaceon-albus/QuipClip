@@ -27,6 +27,7 @@ QuipClip can do these things:
 - Choose the audio track of a video file that has two or more. This does not apply to an FLV
   file.
 - Save one frame as a PNG image.
+- Save your work as a project file, and open it again.
 - Export the segments with a preset. The output can hold the video and the audio, the
   video only, or the audio only. An export of one segment can copy the source audio.
 - Add an export to a queue while another export runs.
@@ -38,8 +39,6 @@ QuipClip can do these things:
 
 QuipClip cannot do these things yet:
 
-- Save a project file. QuipClip keeps the segments only until you quit. It asks before a
-  quit that would lose segments.
 - Preview AVI or WMV files, or a video in a codec that the system web view cannot decode.
   On Windows, install the HEVC Video Extensions from the Microsoft Store to preview HEVC.
 
@@ -169,6 +168,35 @@ select a track in the **Audio Track** submenu. The export, the loudness measurem
 waveform use that track. When the preview of the file can play a different track, the submenu
 shows a note. An FLV file has no such submenu.
 
+To save your work, press `Cmd+S`, or select **File** > **Save**. When the project has no file,
+**Save** asks for a file name. **Save As…** asks for a file name each time. A project file has
+the extension `.qcproj`. It holds the paths of the videos on the timeline, the segments with
+their names and their export order, and the audio track that you chose for a video. It does not
+hold the videos, so keep the video files. It holds only complete segments: an In point with no
+Out point is not saved. **Save** replaces the project file, also when a second copy of QuipClip
+saved the same file in the meantime.
+
+The title bar shows the name of the project file, with a dot before the name when the project
+has changes that are not saved. QuipClip asks before you quit, open a project, or clear the
+timeline when a project file has changes that are not saved, or when the timeline has segments
+and the project has no file. It cannot ask when the Dock of macOS, a logout, or the end of a
+Windows session ends QuipClip.
+
+To open a project, press `Cmd+O` and select the project file, or drop the file on the window.
+The project replaces the timeline. If you select or drop a project file together with a video
+or a second project file, QuipClip opens none of them. QuipClip looks for each video at its
+saved path, and at the place that it had relative to the project file. It checks each video
+against the facts that the project file holds: the size, the modification time, and the timing
+of the video. If QuipClip does not find a video, or the file changed, a dialog lists it. Click
+**Locate…** to select the file. When QuipClip has each video, click **Open**. QuipClip does not
+open a project with a video file that changed, because the segments could then show different
+frames. A video file whose size or modification time changed counts as changed, also when its
+content is the same. An FLV file that a recorder wrote further still opens, with the length
+that the project file holds.
+
+If you remove all the videos from the timeline, the project closes. After that, **Save** asks
+for a file name again.
+
 One export joins at most 256 parts and uses at most 85 source files. A segment that crosses
 the end of a video on the timeline gives one part for each video.
 
@@ -193,12 +221,13 @@ is the macOS key. On Windows, use `Ctrl`.
 | `Cmd+A`              | Select all segments                                                              |
 | `F2`                 | Rename the selected segment                                                      |
 | `Cmd+Shift+E`        | Change the export order                                                          |
+| `Cmd+S`              | Save the project                                                                 |
 | `Cmd+Shift+S`        | Save one frame as a PNG image                                                    |
 | `Cmd+Z`              | Undo                                                                             |
 | `Cmd+Shift+Z`        | Redo. On Windows, `Ctrl+Y` also redoes                                           |
 | `=` `-`              | Zoom the timeline in or out                                                      |
 | `\` or `Shift+Z`     | Zoom the timeline to fit                                                         |
-| `Cmd+O` `Cmd+E`      | Open a video, export                                                             |
+| `Cmd+O` `Cmd+E`      | Open a video or a project, export                                                |
 | `Cmd+,`              | Open Settings                                                                    |
 
 ## How it works

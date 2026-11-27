@@ -462,6 +462,15 @@ belongs to a project with no file.
 - A sequence in which a clip has its length only from the web view, next to another clip,
   cannot be saved.
 - A quit with a saved project that is not modified asks nothing about its segments.
+- (Changed on 2026-11-27.) A quit, the open of a project and Clear Timeline wait for a save
+  step that runs, with no dialog for the wait. A request to quit stops an open that waits. A
+  write that the system holds, as on a network drive that does not answer, can hold these
+  actions until the write ends.
+- (Changed on 2026-11-27.) From the moment the quit guard gets the path of a project file
+  until that open ends, Clear Timeline and each other Open request do nothing. The open first
+  waits for a trim that the user released and that did not commit yet. It stops with no change
+  when a drag trims a segment edge, or a press on an edge is armed, at the moment of its test
+  for another dialog.
 - After the sequence was empty, the project has no file. `Cmd+S` then asks for a new file when
   a clip is on the sequence again, also after an Undo. Save is not available while the
   sequence is empty, so no save writes a document with no clip.
