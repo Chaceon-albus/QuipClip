@@ -613,6 +613,33 @@ describe("Media Store", () => {
     });
   });
 
+  describe("replaceSources (ADR 072)", () => {
+    it("holds exactly the given sources, with the media of the first clip", async () => {
+      const late = createDeferred<ImportMediaResult>();
+      const store = createMediaStore({ importMedia: () => late.promise });
+      const pending = store.getState().importPath("/media/late.mp4");
+      const first = createFakeMediaResult("first-of-open.mp4");
+      store.getState().replaceSources({ s1: first }, first);
+      expect(store.getState()).toMatchObject({
+        status: "ready",
+        media: first,
+        sources: { s1: first },
+        error: null,
+      });
+      // An import from before the open changes nothing when it ends.
+      late.resolve(createFakeMediaResult("late.mp4"));
+      await expect(pending).resolves.toBeNull();
+      expect(store.getState().sources).toEqual({ s1: first });
+
+      store.getState().replaceSources({}, null);
+      expect(store.getState()).toMatchObject({
+        status: "idle",
+        media: null,
+        sources: {},
+      });
+    });
+  });
+
   describe("Default Store Singleton", () => {
     it("provides a default singleton store instance in idle state", () => {
       const state = mediaStore.getState();

@@ -280,6 +280,17 @@ export type MediaActions = {
    */
   importPath: (path: string) => Promise<ImportMediaResult | null>;
   /**
+   * Replaces every source of the session at once, for the open of a project (ADR 072, "What the
+   * open changes"): `sources` are the sources of the document, by generated source ID, and `media`
+   * is the media of the first clip, or null for a document with no clip. The status becomes
+   * `ready` with media and `idle` without, the error goes, and an import that is in flight
+   * changes nothing when it ends.
+   */
+  replaceSources: (
+    sources: Readonly<Record<string, ImportMediaResult>>,
+    media: ImportMediaResult | null,
+  ) => void;
+  /**
    * Reports an import or dialog error to the store while preserving any currently loaded media.
    */
   reportError: (error: unknown) => void;

@@ -57,6 +57,12 @@ export interface AudioStreamChangeInput {
    * the next one.
    */
   readonly held: HeldAudioStream | null;
+  /**
+   * True when the sequence has a generation that the pane did not render yet, as in step 8 of the
+   * open of a project (ADR 072). The preview then builds new elements for the new sequence, and
+   * each one reads the effective stream when it attaches: the choice of the document.
+   */
+  readonly isNewSequence: boolean;
 }
 
 /**
@@ -72,6 +78,11 @@ export interface AudioStreamChangeInput {
  *   reads. Two quick changes therefore end on the last one: each change compares the last
  *   override with the stream that runs.
  *
+ * A change that comes with a new sequence does nothing either (ADR 072). The open of a project
+ * changes the overrides in the same step as the sequence, and the elements of the new sequence are
+ * new attachments: a reload of the old element would keep its position, and the new element would
+ * take it. The failure panel goes for a new sequence too, so no retry is needed.
+ *
  * While the failure panel of a MediaSource source shows, no reader holds a stream, so the change
  * itself decides: a new effective stream of that source retries the preview once. A change that
  * leaves the effective stream of the source as it was, such as an override of another source or
@@ -82,6 +93,9 @@ export interface AudioStreamChangeInput {
 export function audioStreamChangeEffect(
   input: AudioStreamChangeInput,
 ): AudioStreamChangeEffect {
+  if (input.isNewSequence) {
+    return "none";
+  }
   if (input.path === "mediaSource" && input.showsFailure) {
     return input.previousStreamIndex === input.effectiveStreamIndex
       ? "none"

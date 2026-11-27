@@ -57,6 +57,17 @@ export function createMediaStore(
       });
     },
 
+    replaceSources: (sources, media) => {
+      // An import that is still in flight belongs to the session before the open.
+      latestRequestId++;
+      set({
+        status: media === null ? "idle" : "ready",
+        media,
+        sources,
+        error: null,
+      });
+    },
+
     reportError: (error: unknown) => {
       // Invalidate in-flight requests so late completions do not overwrite the error state
       latestRequestId++;

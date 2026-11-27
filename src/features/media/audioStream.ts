@@ -28,6 +28,23 @@ export function overrideOfStream(stream: ListedAudioStream): AudioStreamOverride
   };
 }
 
+/**
+ * The audio stream with the absolute index `index` that the user can choose for a source of
+ * `probe` (ADR 070), or null. The user chooses in the "Audio Track" submenu, which exists only for
+ * a source that is not an FLV and has two or more audio streams. The open of a project refuses an
+ * entry whose `audioStreamIndex` gives null here (ADR 072).
+ */
+export function choosableAudioStreamOf(
+  probe: Pick<MediaProbe, "audioStreams" | "formatNames">,
+  index: number,
+): ListedAudioStream | null {
+  const streams = probe.audioStreams ?? [];
+  if (isFlvProbe(probe) || streams.length < 2) {
+    return null;
+  }
+  return streams.find((stream) => stream.index === index) ?? null;
+}
+
 /** The facts of a probe that decide the effective audio stream of a source. */
 export type AudioStreamSource = Pick<MediaProbe, "audio" | "formatNames">;
 

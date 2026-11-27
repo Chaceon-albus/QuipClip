@@ -32,6 +32,11 @@ export function generateClipId(): string {
  * the media store, and the next files still import. A source with no extent next to another clip
  * cannot join the sequence (ADR 052), and reports `sourceExtentUnknown`.
  *
+ * The request runs as one turn in the line of the imports (`runInImportLine`). When the sequence
+ * got a new generation while the request waited, as after the open of a project, the clips go at
+ * the end, whatever `index` was (ADR 072, "One Open action"): the junction named a place in the
+ * sequence before.
+ *
  * @returns The clips that joined the sequence, in sequence order.
  */
 export function importClips(
@@ -39,9 +44,26 @@ export function importClips(
   index: number | null = null,
   dependencies: ImportClipsDependencies = {},
 ): Promise<Clip[]> {
+  const timeline = dependencies.timeline ?? timelineStore;
+  const requested = timeline.getState().generation;
   // One import at a time: the media store keeps only the latest request, so a second request
   // that started during the first one would drop the file of the first one with no error.
-  const run = queue.then(() => importClipsNow(paths, index, dependencies));
+  return runInImportLine(() =>
+    importClipsNow(
+      paths,
+      timeline.getState().generation === requested ? index : null,
+      dependencies,
+    ),
+  );
+}
+
+/**
+ * Runs `task` as one turn in the line of the imports (ADR 052, ADR 072). The turn starts when each
+ * earlier turn ended, and each later turn, such as a later import, waits for the end of this one.
+ * A task that fails ends its turn too, and its promise rejects with the failure.
+ */
+export function runInImportLine<T>(task: () => Promise<T>): Promise<T> {
+  const run = queue.then(task);
   queue = run.catch(() => undefined);
   return run;
 }

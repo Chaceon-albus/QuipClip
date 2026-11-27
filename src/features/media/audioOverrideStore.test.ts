@@ -19,6 +19,17 @@ function listed(index: number, channels: number | null = 2): ListedAudioStream {
 const MKV = { formatNames: ["matroska", "webm"] };
 
 describe("the audio stream overrides (ADR 070)", () => {
+  it("replaces every override at once for the open of a project (ADR 072)", () => {
+    const store = createAudioOverrideStore();
+    store.getState().choose("a", MKV, listed(2));
+    const given = { b: { index: 3, codec: "opus", sampleRate: 48000, channels: 2 } };
+    store.getState().replaceOverrides(given);
+    expect(store.getState().overrides).toEqual(given);
+    expect(store.getState().overrides.b).not.toBe(given.b);
+    store.getState().replaceOverrides({});
+    expect(store.getState().overrides).toEqual({});
+  });
+
   it("keeps one override for each source id, with the facts of the import", () => {
     const store = createAudioOverrideStore();
     store.getState().choose("a", MKV, listed(2, 1));

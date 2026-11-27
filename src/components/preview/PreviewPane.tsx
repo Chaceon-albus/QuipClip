@@ -560,6 +560,13 @@ export function PreviewPane() {
   // The generation part of the element key that the pane last rendered (ADR 072).
   const [previousSequenceGeneration, setPreviousSequenceGeneration] =
     useState(sequenceGeneration);
+  // The same generation after the commit, for the listener of the audio-stream overrides, which
+  // outlives the render that started it. An override that changes with a new sequence belongs to
+  // the elements that the next commit builds.
+  const committedSequenceGenerationRef = useRef(sequenceGeneration);
+  useLayoutEffect(() => {
+    committedSequenceGenerationRef.current = sequenceGeneration;
+  }, [sequenceGeneration]);
   // What made the web view fail to play the source, or null while it plays: the element
   // fired `error`, or the picture check found no picture. The pane then shows the
   // decode-failure panel in place of the element.
@@ -1020,6 +1027,10 @@ export function PreviewPane() {
             path.kind === "mediaSource"
               ? (mediaSourceOwnerRef.current?.held() ?? null)
               : (nativeCueOwnerRef.current?.held() ?? null),
+          // Step 8 of an open changes the overrides after the new sequence (ADR 072).
+          isNewSequence:
+            previewSequenceGeneration(timelineStore.getState()) !==
+            committedSequenceGenerationRef.current,
         });
         // A cue to replace needs nothing here: the effect of the cue above depends on the stream
         // index, so the render that this change starts replaces the cue.

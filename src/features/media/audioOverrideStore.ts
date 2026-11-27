@@ -32,6 +32,12 @@ export interface AudioOverrideActions {
   ) => void;
   /** Drops the override of each source that is not in `sourceIds`. */
   retain: (sourceIds: Iterable<string>) => void;
+  /**
+   * Replaces every override at once, for the open of a project (ADR 072): the overrides are then
+   * exactly `overrides`, and the override of each other source goes. The caller gives only the
+   * overrides that `choosableAudioStreamOf` accepts.
+   */
+  replaceOverrides: (overrides: Readonly<Record<string, AudioStreamOverride>>) => void;
 }
 
 export type AudioOverrideStoreState = AudioOverrideState & AudioOverrideActions;
@@ -62,6 +68,19 @@ export function createAudioOverrideStore(): AudioOverrideStore {
         return;
       }
       set((state) => ({ overrides: { ...state.overrides, [sourceId]: next } }));
+    },
+
+    replaceOverrides: (overrides) => {
+      const next: Record<string, AudioStreamOverride> = {};
+      for (const [id, override] of Object.entries(overrides)) {
+        next[id] = {
+          index: override.index,
+          codec: override.codec,
+          sampleRate: override.sampleRate,
+          channels: override.channels,
+        };
+      }
+      set({ overrides: next });
     },
 
     retain: (sourceIds) => {

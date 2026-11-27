@@ -1289,6 +1289,16 @@ export async function runExportFlow(
 }
 
 /**
+ * Makes the OPEN step of `runExportFlow` that waits stale (ADR 072, open step 2). That step then
+ * opens no modal, reports no error and publishes no scope when it settles, and a new step can
+ * start at once. The open of a project calls it before it changes the session. Does nothing when
+ * no step waits.
+ */
+export function staleExportOpenStep(): void {
+  openStep = null;
+}
+
+/**
  * Convenience helper to run the export flow START step with a chosen preset, the streams that
  * the export writes, and how it writes the audio.
  */

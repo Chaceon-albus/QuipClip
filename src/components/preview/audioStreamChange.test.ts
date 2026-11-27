@@ -12,12 +12,25 @@ const ATTACHED: AudioStreamChangeInput = {
   effectiveStreamIndex: 2,
   showsFailure: false,
   held: { sourceRevisionKey: "/media/two-tracks.mkv:10:1", audioStreamIndex: 1 },
+  isNewSequence: false,
 };
 
 /** The same source while the failure panel shows: no element, so no reader. */
 const FAILED: AudioStreamChangeInput = { ...ATTACHED, showsFailure: true, held: null };
 
 describe("audioStreamChangeEffect (ADR 070)", () => {
+  it("does nothing for a change that comes with a new sequence (ADR 072)", () => {
+    // The open of a project: the element of the new sequence is a new attachment, which reads the
+    // choice of the document. No reload keeps the position of the old element.
+    expect(audioStreamChangeEffect({ ...ATTACHED, isNewSequence: true })).toBe("none");
+    expect(audioStreamChangeEffect({ ...FAILED, isNewSequence: true })).toBe("none");
+    expect(
+      audioStreamChangeEffect({ ...ATTACHED, path: "native", isNewSequence: true }),
+    ).toBe("none");
+    // The same change in the same sequence still reloads.
+    expect(audioStreamChangeEffect(ATTACHED)).toBe("reloadElement");
+  });
+
   it("retries a MediaSource source whose failure panel shows, for a new effective stream", () => {
     expect(audioStreamChangeEffect(FAILED)).toBe("retryFailed");
   });

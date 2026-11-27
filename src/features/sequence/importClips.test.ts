@@ -5,7 +5,7 @@ import { createTimelineStore } from "@/features/timeline/store";
 import { canUndoEdit } from "@/components/layout/actionConditions";
 import { createAttachedMediaStore } from "./attachedMedia";
 import type { Pts, TickCount } from "@/types/project";
-import { importClips } from "./importClips";
+import { importClips, runInImportLine } from "./importClips";
 
 const pts = (value: string) => value as Pts;
 const ticks = (value: string) => value as TickCount;
@@ -173,5 +173,71 @@ describe("importClips", () => {
     expect(timeline.getState().sequenceSources[sourceId]).toBe(known);
     expect(known?.videoEndPts).toBe("10000");
     expect(media.getState().sources[sourceId]?.probe.videoEndPts).toBe("10000");
+  });
+
+  it("runs a task as one turn in the line, so a later import waits for its end (ADR 072)", async () => {
+    const h = harness({ "/a": imported("/a") });
+    let release: () => void = () => undefined;
+    const turn = runInImportLine(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve("done");
+        }),
+    );
+    const later = importClips(["/a"], null, h.deps);
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+    expect(h.timeline.getState().clips).toHaveLength(0);
+    release();
+    await expect(turn).resolves.toBe("done");
+    await expect(later).resolves.toHaveLength(1);
+    // A task that fails ends its turn too.
+    await expect(runInImportLine(() => Promise.reject(new Error("x")))).rejects.toThrow(
+      "x",
+    );
+    await expect(importClips(["/a"], null, h.deps)).resolves.toHaveLength(1);
+  });
+
+  it("adds at the end when the sequence got a new generation while the request waited", async () => {
+    const h = harness({
+      "/a": imported("/a"),
+      "/b": imported("/b"),
+      "/c": imported("/c"),
+    });
+    await importClips(["/a", "/b"], null, h.deps);
+    let release: () => void = () => undefined;
+    const turn = runInImportLine(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    // A drop at the first junction, and then a new sequence in the turn in front of it.
+    const dropped = importClips(["/c"], 0, h.deps);
+    const sources = Object.values(h.timeline.getState().sequenceSources);
+    h.timeline.getState().loadSequence(
+      [
+        { id: "n1", sourceId: sources[0].id },
+        { id: "n2", sourceId: sources[1].id },
+      ],
+      sources,
+      [],
+    );
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+    release();
+    await turn;
+    await dropped;
+    expect(h.timeline.getState().clips.map((clip) => clip.id)).toEqual([
+      "n1",
+      "n2",
+      "clip-3",
+    ]);
+
+    // With no new generation, the junction stays.
+    await importClips(["/c"], 0, h.deps);
+    expect(h.timeline.getState().clips[0]?.id).toBe("clip-4");
   });
 });

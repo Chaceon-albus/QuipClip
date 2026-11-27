@@ -7,10 +7,12 @@ import {
   needsStrictRevisionCheck,
   measurementScope,
   runExportFlow,
+  staleExportOpenStep,
   SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
 import { loudnessRequestId } from "@/features/loudness/store";
+import type { ExportScope } from "@/features/export/scope";
 import {
   cancelExport as clientCancelExport,
   createExportComposeStore,
@@ -859,7 +861,10 @@ describe("ExportFlowController", () => {
        */
       function startPendingStep(
         path = "/media/video.mp4",
-        extra: { sourceRevisionTimeoutMs?: number } = {},
+        extra: {
+          sourceRevisionTimeoutMs?: number;
+          publishScope?: (scope: ExportScope) => void;
+        } = {},
       ) {
         const media = createMedia(path, "video.mp4");
         let finishLoad: () => void = () => {};
@@ -999,6 +1004,34 @@ describe("ExportFlowController", () => {
 
         const next = secondStepOptions();
         await expect(runExportFlow(next)).resolves.toBe(true);
+      });
+
+      it("makes a waiting step stale, so it shows nothing and a new step runs (ADR 072)", async () => {
+        const publishScope = vi.fn();
+        const first = startPendingStep("/media/video.mp4", { publishScope });
+        await vi.waitFor(() => {
+          expect(first.loadSettings).toHaveBeenCalled();
+        });
+        staleExportOpenStep();
+
+        // A new step can start at once.
+        const second = secondStepOptions();
+        await expect(runExportFlow(second)).resolves.toBe(true);
+        expect(second.setModalOpen).toHaveBeenCalledWith(true);
+
+        // The stale step settles with a check that passes, and shows nothing: no modal, no
+        // error and no scope.
+        first.finishLoad();
+        await vi.waitFor(() => {
+          expect(first.readSourceRevision).toHaveBeenCalled();
+        });
+        first.answerCheck(false);
+        await expect(first.step).resolves.toBe(false);
+        expect(first.setModalOpen).not.toHaveBeenCalled();
+        expect(first.reportError).not.toHaveBeenCalled();
+        expect(publishScope).not.toHaveBeenCalled();
+        // With no step waiting, the call does nothing.
+        staleExportOpenStep();
       });
 
       it("opens the setup step when the source check does not answer in time", async () => {

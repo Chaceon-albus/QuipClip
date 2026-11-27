@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  choosableAudioStreamOf,
   effectiveAudioStreamOf,
   isFlvProbe,
   overrideOfStream,
@@ -155,5 +156,25 @@ describe("the override and the effective stream (ADR 070)", () => {
     ).toEqual([]);
     // A source that the probes do not hold is not named.
     expect(sourcesWithChangedEffectiveStream(probes, {}, { other: FIRST })).toEqual([]);
+  });
+});
+
+describe("choosableAudioStreamOf (ADR 070, ADR 072)", () => {
+  const streams = [listed(1, "aac", true), listed(2, "opus", false)];
+
+  it("gives a stream of a file with two or more audio streams that is not an FLV", () => {
+    const probe = { formatNames: ["matroska", "webm"], audioStreams: streams };
+    expect(choosableAudioStreamOf(probe, 2)).toBe(streams[1]);
+    expect(choosableAudioStreamOf(probe, 3)).toBeNull();
+  });
+
+  it("gives null for one stream, for no list, and for an FLV", () => {
+    expect(
+      choosableAudioStreamOf({ formatNames: ["mp4"], audioStreams: [streams[0]] }, 1),
+    ).toBeNull();
+    expect(choosableAudioStreamOf({ formatNames: ["mp4"] }, 1)).toBeNull();
+    expect(
+      choosableAudioStreamOf({ formatNames: ["flv"], audioStreams: streams }, 2),
+    ).toBeNull();
   });
 });
