@@ -4,6 +4,7 @@
 - Date: 2026-11-26
 - Deciders: capric98
 - Amends: ADR 007, ADR 026
+- Amended by: ADR 067
 
 ## Context
 
@@ -32,6 +33,10 @@ they agree with the export and with each other:
 - the number `#N` of each bar, its tooltip and its accessible name
 
 A bar still shows only for a segment that has a place on the timeline.
+
+(Changed on 2026-11-26.) An export can take only some of the segments of the export: the
+segments of its scope (ADR 067). The code that builds the request reads the scope. The other
+parts of this list read the segments of the export, as before.
 
 ### The Export Order dialog
 

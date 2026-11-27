@@ -4,7 +4,7 @@
 - Date: 2026-10-14
 - Deciders: capric98
 - Amends: ADR 007, ADR 026, ADR 030
-- Amended by: ADR 052, ADR 065
+- Amended by: ADR 052, ADR 065, ADR 067
 
 ## Context
 
@@ -121,7 +121,9 @@ from the restored selection.
   named target.
 - The context menu of a selection offers only Delete. A later record can add more actions that
   act on several segments. (Changed on 2026-11-26.) The item "Rename…" of ADR 065 is in the
-  menu, and it is disabled for a selection of several segments.
+  menu, and it is disabled for a selection of several segments. (Changed on 2026-11-26.) The
+  item of Export Selected Segments (ADR 067) acts on a selection of several segments, as Delete
+  does.
 - The key table of ADR 026 gains one row. `primary` with `A` no longer reaches the web view
   outside a text field.
 - The Select All item of the macOS Edit menu does not select segments. A key press of `Cmd+A`

@@ -88,6 +88,7 @@ document summarizes them and shows how the parts fit together.
 | [`064-keep-the-frame-step-cue-after-a-failure.md`](../.agents/decisions/064-keep-the-frame-step-cue-after-a-failure.md)                                                 | The PCM cue turns on again 3 s after a failure, except after a changed file        |
 | [`065-give-a-segment-a-name.md`](../.agents/decisions/065-give-a-segment-a-name.md)                                                                                     | A segment can have a name of one line, set in a dialog with `F2`                   |
 | [`066-change-the-export-order-in-a-dialog.md`](../.agents/decisions/066-change-the-export-order-in-a-dialog.md)                                                         | A dialog lists the segments of the export, and the user puts them in a new order   |
+| [`067-export-the-selected-segments.md`](../.agents/decisions/067-export-the-selected-segments.md)                                                                       | The menu of a segment exports only the selected segments, as one ordinary export   |
 | [`068-write-no-chapter-of-a-source-into-an-export.md`](../.agents/decisions/068-write-no-chapter-of-a-source-into-an-export.md)                                         | Each command that writes the output file has `-map_chapters -1`                    |
 | [`069-export-one-frame-as-an-image.md`](../.agents/decisions/069-export-one-frame-as-an-image.md)                                                                       | Export Frame saves the frame that Mark In would mark as a PNG file                 |
 | [`070-choose-the-audio-stream-of-a-source.md`](../.agents/decisions/070-choose-the-audio-stream-of-a-source.md)                                                         | The user can choose which audio stream of a source QuipClip reads                  |
@@ -712,6 +713,12 @@ at that moment, from one function that the request, the dialog, the summary and 
 the bars all use. The user drags a row, moves it with `Alt` and an arrow key, or sorts the rows
 by their place on the timeline. The confirm writes the new order into the segment array as one
 edit.
+
+An export has a scope: the whole export, or a list of segments (ADR 067). The context menu of
+a segment has an item that opens the export dialog for the segment, or for the selection of
+several segments that the segment is part of. The export flow and the setup step read the
+segments of the scope from one function. The request is an ordinary request, so the backend
+and the queue do not change. Each part outside the dialog reads the segments of the export.
 
 On the first frame of a clip, Mark Out stores the end of the clip before it, so each
 boundary has one form. When that clip has no `videoEndPts`, or when no clip comes before,

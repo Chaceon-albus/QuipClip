@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-22
 - Deciders: capric98
-- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058, ADR 061, ADR 070
+- Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058, ADR 061, ADR 067,
+  ADR 070
 
 ## Context
 
@@ -162,6 +163,13 @@ backend refuses a request with `audioStreamChanged` when a file has no audio str
 index of the request, or when that stream differs from the request in its codec, its sample
 rate or its channel count. "Export anyway" removes only the check of the revision, so that
 refusal stays.
+
+(Changed on 2026-11-26.) An export has a scope: the whole export, or a list of segments
+(ADR 067). The checks before the step, the facts of the step and the request read the segments
+of the scope. For a list, the step shows one more line with the number of the selected
+segments. When a list gives exactly one segment, the save dialog proposes a name with the
+number of that segment, and with its name when it has one. The scope goes with each step of
+the flow: the open step, the confirm step and Back (ADR 067).
 
 ## Consequences
 

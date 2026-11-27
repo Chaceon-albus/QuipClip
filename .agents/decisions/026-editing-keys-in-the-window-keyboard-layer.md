@@ -4,7 +4,8 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 021
-- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066, ADR 069
+- Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066, ADR 067,
+  ADR 069
 
 ## Context
 
@@ -288,6 +289,14 @@ on one segment or on a selection.
 macOS and `Ctrl+Shift+S` on Windows (ADR 069). It saves the frame that Mark In would mark as a
 PNG file. The menu of a segment gets no item for it, because the action is at the playhead.
 `Cmd+S` and `Ctrl+S` stay free for a later action that saves the project.
+
+(Changed on 2026-11-26.) The actions of the key table gain Export Selected Segments (ADR 067).
+It has no binding: no key runs it, and it has no accelerator and no key in a label. An action
+can thus have no binding. Its plan and its run are those of the key table, as for each other
+action. The rules of this record about the key of a menu item apply to an item whose action
+has a binding. The menu gains an item for the action, directly after "Rename…". The item acts
+on the segment of the menu, or on the selection of several segments that the segment is part
+of. Its command opens the export dialog after the menu closes.
 
 The menu holds only actions whose operand is the segment. Mark In, Mark Out and Split act at
 the playhead, which a right-click does not move. Finish Segment clears the selection that the
