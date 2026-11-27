@@ -2452,6 +2452,40 @@ describe("planShortcutCommand", () => {
       expect(planShortcutCommand("redo", history)).toEqual({ kind: "redo" });
     });
 
+    it("undoes and redoes on a sequence with no clip and no video in the preview (ADR 072)", () => {
+      // After Clear Timeline: no media, no attached element, and an entry in the history.
+      const cleared = createSnapshot({
+        probe: null,
+        playback: { isAttached: false, isReady: false, presentedFrame: null },
+        timeline: { clips: [], sourceId: null, canUndo: true, canRedo: true },
+      });
+      expect(planShortcutCommand("undo", cleared)).toEqual({ kind: "undo" });
+      expect(planShortcutCommand("redo", cleared)).toEqual({ kind: "redo" });
+      // With no entry, nothing to do.
+      const empty = createSnapshot({
+        probe: null,
+        playback: { isAttached: false, isReady: false, presentedFrame: null },
+        timeline: { clips: [], sourceId: null },
+      });
+      expect(planShortcutCommand("undo", empty)).toBeNull();
+      expect(planShortcutCommand("redo", empty)).toBeNull();
+      // A sequence with a clip whose video is not ready keeps the old rule.
+      const loading = createSnapshot({
+        playback: { isReady: false },
+        timeline: {
+          clips: [{ id: "c1", sourceId: "s1" }],
+          canUndo: true,
+          canRedo: true,
+        },
+      });
+      expect(planShortcutCommand("undo", loading)).toBeNull();
+      expect(planShortcutCommand("redo", loading)).toBeNull();
+      // The trim locks stay.
+      expect(
+        planShortcutCommand("undo", { ...cleared, isTrimDragging: true }),
+      ).toBeNull();
+    });
+
     it("keeps the edit actions that need no frame available during a pending seek", () => {
       const snapshot = createSnapshot({
         playback: { presentedFrame: null },

@@ -5,7 +5,6 @@ import {
   hasValidAudioStreamIndexField,
   isSourceFingerprint,
   isValidAudioStreamIndex,
-  toPersistedSource,
   type PersistedSource,
   type FrameCount,
   type Project,
@@ -14,8 +13,6 @@ import {
   type Segment,
   type SequenceSegment,
   type Clip,
-  type Source,
-  type SourceProxy,
   type TickCount,
 } from "@/types/project";
 
@@ -73,33 +70,6 @@ describe("project type definitions and schema", () => {
     expect(project.segments[0].outClipId).toBe("c1");
   });
 
-  it("runtime source permits proxy object", () => {
-    const videoTimeBase: Rational = { n: 1, d: 90000 };
-    const proxy: SourceProxy = {
-      path: "/cache/s1.mp4",
-      state: "ready",
-    };
-    const runtime: Source = {
-      id: "s1",
-      path: "/media/clip.mp4",
-      relPath: "clip.mp4",
-      size: 1048576,
-      mtime: 1787073674,
-      videoStreamIndex: 0,
-      videoTimeBase,
-      videoStartPts: "0" as Pts,
-      videoEndPts: "90000" as Pts,
-      videoDurationTicks: "90000" as TickCount,
-      approximateDurationSeconds: 1.0,
-      avgFrameRate: { n: 30, d: 1 },
-      rFrameRate: { n: 30, d: 1 },
-      reportedFrameCount: "30" as FrameCount,
-      proxy,
-    };
-    expect(runtime.proxy?.state).toBe("ready");
-    expect(runtime.proxy?.path).toBe("/cache/s1.mp4");
-  });
-
   it("segment conforms to half-open PTS interval model", () => {
     const segment: Segment = {
       id: "seg-1",
@@ -109,150 +79,6 @@ describe("project type definitions and schema", () => {
     };
     expect(segment.inPts).toBe("1000");
     expect(segment.outPts).toBe("2000");
-  });
-
-  describe("toPersistedSource projection", () => {
-    it("creates a clean new PersistedSource object and strips runtime proxy state", () => {
-      const runtime: Source = {
-        id: "s1",
-        path: "/media/clip.mp4",
-        relPath: "clip.mp4",
-        size: 1048576,
-        mtime: 1787073674,
-        videoStreamIndex: 0,
-        videoTimeBase: { n: 1, d: 90000 },
-        videoStartPts: "-1800" as Pts,
-        videoEndPts: "32368200" as Pts,
-        videoDurationTicks: "32370000" as TickCount,
-        approximateDurationSeconds: 359.666667,
-        avgFrameRate: { n: 30000, d: 1001 },
-        rFrameRate: { n: 30000, d: 1001 },
-        reportedFrameCount: "10790" as FrameCount,
-        proxy: {
-          path: "/cache/s1.mp4",
-          state: "ready",
-        },
-      };
-
-      const persisted = toPersistedSource(runtime);
-
-      expect(persisted).toEqual({
-        id: "s1",
-        path: "/media/clip.mp4",
-        size: 1048576,
-        mtime: 1787073674,
-        videoStreamIndex: 0,
-        videoTimeBase: { n: 1, d: 90000 },
-        videoStartPts: "-1800",
-        videoEndPts: "32368200",
-        videoDurationTicks: "32370000",
-        approximateDurationSeconds: 359.666667,
-        avgFrameRate: { n: 30000, d: 1001 },
-        rFrameRate: { n: 30000, d: 1001 },
-        reportedFrameCount: "10790",
-      });
-
-      expect("proxy" in persisted).toBe(false);
-      // The backend writes the relative path at each save (ADR 072).
-      expect("relPath" in persisted).toBe(false);
-      expect(Object.keys(persisted).sort()).toEqual(
-        [
-          "id",
-          "path",
-          "size",
-          "mtime",
-          "videoStreamIndex",
-          "videoTimeBase",
-          "videoStartPts",
-          "videoEndPts",
-          "videoDurationTicks",
-          "approximateDurationSeconds",
-          "avgFrameRate",
-          "rFrameRate",
-          "reportedFrameCount",
-        ].sort(),
-      );
-    });
-
-    it("preserves null values for optional metadata fields", () => {
-      const runtime: Source = {
-        id: "s2",
-        path: "/media/live.ts",
-        relPath: "live.ts",
-        size: 2048576,
-        mtime: 1787073680,
-        videoStreamIndex: 1,
-        videoTimeBase: { n: 1, d: 90000 },
-        videoStartPts: null,
-        videoEndPts: null,
-        videoDurationTicks: null,
-        approximateDurationSeconds: null,
-        avgFrameRate: null,
-        rFrameRate: null,
-        reportedFrameCount: null,
-      };
-
-      const persisted = toPersistedSource(runtime);
-
-      expect(persisted.videoStartPts).toBeNull();
-      expect(persisted.videoEndPts).toBeNull();
-      expect(persisted.videoDurationTicks).toBeNull();
-      expect(persisted.approximateDurationSeconds).toBeNull();
-      expect(persisted.avgFrameRate).toBeNull();
-      expect(persisted.rFrameRate).toBeNull();
-      expect(persisted.reportedFrameCount).toBeNull();
-      expect("proxy" in persisted).toBe(false);
-      // No override, so no field (ADR 070).
-      expect("audioStreamIndex" in persisted).toBe(false);
-    });
-
-    it("keeps the audio stream index of a source with an override (ADR 070)", () => {
-      const runtime: Source = {
-        id: "s3",
-        path: "/media/two.mkv",
-        relPath: "two.mkv",
-        size: 1,
-        mtime: 1,
-        videoStreamIndex: 0,
-        videoTimeBase: { n: 1, d: 1000 },
-        videoStartPts: null,
-        videoEndPts: null,
-        videoDurationTicks: null,
-        approximateDurationSeconds: null,
-        avgFrameRate: null,
-        rFrameRate: null,
-        reportedFrameCount: null,
-        audioStreamIndex: 0,
-      };
-      expect(toPersistedSource(runtime).audioStreamIndex).toBe(0);
-    });
-
-    it("copies the fingerprint of a source that has one, as a new object (ADR 072)", () => {
-      const fingerprint = { start: "1048576", fnv1a64: "9f3c5a7714e0b2d1" };
-      const runtime: Source = {
-        id: "s4",
-        path: "/media/live.flv",
-        relPath: "live.flv",
-        size: 1_048_577,
-        mtime: 1,
-        videoStreamIndex: 0,
-        videoTimeBase: { n: 1, d: 1000 },
-        videoStartPts: null,
-        videoEndPts: null,
-        videoDurationTicks: null,
-        approximateDurationSeconds: null,
-        avgFrameRate: null,
-        rFrameRate: null,
-        reportedFrameCount: null,
-        fingerprint,
-      };
-      const persisted = toPersistedSource(runtime);
-      expect(persisted.fingerprint).toEqual(fingerprint);
-      expect(persisted.fingerprint).not.toBe(fingerprint);
-      const withoutFingerprint: Source = { ...runtime };
-      delete withoutFingerprint.fingerprint;
-      expect("fingerprint" in toPersistedSource(withoutFingerprint)).toBe(false);
-    });
   });
 
   describe("the fingerprint of a persisted source (ADR 072)", () => {
@@ -343,7 +169,7 @@ describe("project type definitions and schema", () => {
     });
   });
 
-  it("enforces at compile-time that Source does not assign to PersistedSource while plain persisted object does", () => {
+  it("enforces at compile-time that a source with a proxy does not assign to PersistedSource while plain persisted object does", () => {
     type PlainPersistedSource = {
       id: string;
       path: string;
@@ -360,6 +186,8 @@ describe("project type definitions and schema", () => {
       rFrameRate: Rational | null;
       reportedFrameCount: FrameCount | null;
     };
+    // A source with machine-specific proxy state (ADR 010).
+    type Source = PlainPersistedSource & { proxy: { path: string; state: string } };
 
     type Extends<A, B> = [A] extends [B] ? true : false;
 

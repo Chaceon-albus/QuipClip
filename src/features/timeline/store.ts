@@ -25,6 +25,7 @@ import {
   canonicalIn,
   canonicalOut,
   compareEditPoints,
+  givesApproximateExtent,
   insertClips as insertClipsInto,
   isValidSequenceSegment,
   layoutSequence,
@@ -33,6 +34,7 @@ import {
   type SequenceSource,
   type SequenceSources,
 } from "./sequence";
+import { checkSequenceLoad } from "./sequenceLoad";
 import type {
   SegmentEdge,
   TimelineState,
@@ -126,8 +128,11 @@ function browserDurationsOf(
   return new Map(Object.entries(truth.browserDurations));
 }
 
+/** The parts of the truth that decide whether a segment is live. */
+type LiveTruth = Pick<TimelineTruth, "clips" | "sequenceSegments" | "sequenceSources">;
+
 /** True when a segment lies on the sequence and keeps every rule of ADR 052. */
-function isLive(segment: SequenceSegment, truth: TimelineTruth): boolean {
+function isLive(segment: SequenceSegment, truth: LiveTruth): boolean {
   return isValidSequenceSegment(segment, truth.clips, sourcesOf(truth));
 }
 
@@ -592,7 +597,11 @@ export function createTimelineStore(
         const state = get();
         const sequenceSources = { ...state.sequenceSources };
         for (const source of sources) {
-          sequenceSources[source.id] = source;
+          // A source that the session has keeps its facts (ADR 052, ADR 072). An import after
+          // the open of a project thus keeps the end that the open gave to an FLV.
+          if (sequenceSources[source.id] === undefined) {
+            sequenceSources[source.id] = source;
+          }
         }
         const allSources: SequenceSources = new Map(Object.entries(sequenceSources));
         const edited = insertClipsInto(
@@ -661,6 +670,35 @@ export function createTimelineStore(
         applyClipEdit({ clips: [], sequenceSegments: [] });
       },
 
+      loadSequence: (clips, sources, segments) => {
+        const check = checkSequenceLoad(clips, sources, segments);
+        if (!check.ok) {
+          return check;
+        }
+        const sequenceSources: Record<string, SequenceSource> = {};
+        for (const source of sources) {
+          sequenceSources[source.id] = copySource(source);
+        }
+        // The history of the sequence before cannot apply to this one.
+        undoStack = [];
+        redoStack = [];
+        write({
+          clips: clips.map((clip) => ({ id: clip.id, sourceId: clip.sourceId })),
+          sequenceSegments: segments.map(copySegment),
+          sequenceSources,
+          browserDurations: {},
+          pendingIn: null,
+          ...NO_SELECTION,
+          attachedClipId: clips[0]?.id ?? null,
+          // Always a new generation, so each reader of `generation` and `sourceId` sees a new
+          // sequence, also when the same file was on the sequence before (ADR 072).
+          generation: get().generation + 1,
+          canUndo: false,
+          canRedo: false,
+        });
+        return check;
+      },
+
       setAttachedClip: (clipId) => {
         if (get().attachedClipId !== clipId) {
           write({ attachedClipId: clipId });
@@ -668,18 +706,14 @@ export function createTimelineStore(
       },
 
       setBrowserDuration: (sourceId, seconds) => {
-        const state = get();
-        const known = state.browserDurations[sourceId];
-        if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) {
-          if (known === undefined) {
-            return;
-          }
-          const next = { ...state.browserDurations };
-          delete next[sourceId];
-          write({ browserDurations: next });
+        // Only a length that gives an extent replaces the length that the store has. A later
+        // value that gives none, such as a length that rounds to zero, would take the extent
+        // away from the clip, and with it the layout of a sequence that has another clip.
+        if (seconds === null || !givesApproximateExtent(seconds)) {
           return;
         }
-        if (known !== seconds) {
+        const state = get();
+        if (state.browserDurations[sourceId] !== seconds) {
           write({
             browserDurations: { ...state.browserDurations, [sourceId]: seconds },
           });
@@ -1035,9 +1069,40 @@ function nextAttachedClip(
   return after[index < 0 ? 0 : Math.min(index, after.length - 1)]?.id ?? null;
 }
 
-/** The live segments of the truth, the input of a clip operation of `sequence.ts`. */
-function liveSegments(truth: TimelineTruth): SequenceSegment[] {
+/**
+ * The live segments of the truth, in array order: the segments whose clips are on the sequence
+ * and that keep every rule of ADR 052. They are the input of a clip operation of `sequence.ts`,
+ * and the segments of a project document (ADR 072).
+ */
+export function liveSegments(truth: LiveTruth): SequenceSegment[] {
   return truth.sequenceSegments.filter((segment) => isLive(segment, truth));
+}
+
+/** A new source object with each field of `source`, and a new time base. */
+function copySource(source: SequenceSource): SequenceSource {
+  return {
+    id: source.id,
+    videoTimeBase: { n: source.videoTimeBase.n, d: source.videoTimeBase.d },
+    videoStartPts: source.videoStartPts,
+    videoEndPts: source.videoEndPts,
+    videoDurationTicks: source.videoDurationTicks,
+    approximateDurationSeconds: source.approximateDurationSeconds,
+  };
+}
+
+/** A new segment object with each field of `segment`, and no `name` field for no name. */
+function copySegment(segment: SequenceSegment): SequenceSegment {
+  const copy: SequenceSegment = {
+    id: segment.id,
+    inClipId: segment.inClipId,
+    inPts: segment.inPts,
+    outClipId: segment.outClipId,
+    outPts: segment.outPts,
+  };
+  if (segment.name !== undefined) {
+    copy.name = segment.name;
+  }
+  return copy;
 }
 
 /**

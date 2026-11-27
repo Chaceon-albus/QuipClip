@@ -1015,10 +1015,15 @@ export function planShortcutCommand(
       return planFinishSegmentCommand(snapshot, hasActiveSource);
 
     case "undo":
-      return canUndoEdit(hasActiveSource, timeline.canUndo) ? { kind: "undo" } : null;
+      // Also on a sequence with no clip, as after Clear Timeline (ADR 072).
+      return canUndoEdit(hasActiveSource, timeline.clips.length === 0, timeline.canUndo)
+        ? { kind: "undo" }
+        : null;
 
     case "redo":
-      return canRedoEdit(hasActiveSource, timeline.canRedo) ? { kind: "redo" } : null;
+      return canRedoEdit(hasActiveSource, timeline.clips.length === 0, timeline.canRedo)
+        ? { kind: "redo" }
+        : null;
 
     case "openMedia":
       // The Open Media item of the title bar menu has no condition.

@@ -271,6 +271,12 @@ export type MediaActions = {
   /**
    * Imports media at the given path with latest-selection-wins concurrency.
    * Resolves with the imported media on success, or null on error/superseded request.
+   *
+   * When the import gives a revision that `sources` holds already, the facts of that source do
+   * not change (ADR 052, ADR 072): the import resolves with a new object that has each field of
+   * the result that the store has, not with the new answer of the backend, and `media` and the
+   * entry of `sources` become that object. A new object, because its readers take a new media
+   * object as a new open of the file.
    */
   importPath: (path: string) => Promise<ImportMediaResult | null>;
   /**

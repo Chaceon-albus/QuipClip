@@ -9,6 +9,7 @@
 
 import type { Clip, EditPoint, Pts, Segment, SequenceSegment } from "@/types/project";
 import type { SequenceSource } from "./sequence";
+import type { SequenceLoadCheck } from "./sequenceLoad";
 import type { VirtualTimeline } from "./virtualTime";
 
 /**
@@ -133,7 +134,8 @@ export interface TimelineActions {
 
   /**
    * Inserts clips at junction `index` (ADR 052), with one history entry, and records the timing
-   * facts of their sources. A segment that crosses the junction is split there first. Refuses an
+   * facts of their sources. A source that the store has already keeps the facts that it has
+   * (ADR 072). A segment that crosses the junction is split there first. Refuses an
    * index out of range, a known clip identifier, and a sequence that `layoutSequence` refuses.
    * Returns whether it inserted.
    */
@@ -159,10 +161,39 @@ export interface TimelineActions {
   /** Removes every clip and every segment, with one history entry (ADR 052). */
   clearTimeline: () => void;
 
+  /**
+   * Replaces the whole truth with `clips`, `sources` and `segments` as one step, for the open of
+   * a project (ADR 072, "What the open changes"). It adds no history entry.
+   *
+   * It first tests the input with `checkSequenceLoad`, the rules that the store applies to its own
+   * edits, with no length from the web view. When the test fails, it changes nothing and returns
+   * the failure. Otherwise:
+   *
+   * - the clips, the segments and the sources of the sequence are those given, as new objects;
+   *   the lengths that the web view gave (`browserDurations`) are empty;
+   * - the history of Undo and Redo is empty;
+   * - no In is pending, and no segment is selected;
+   * - the attached clip is the first clip, or none for no clip;
+   * - `generation` takes a new value, so `sourceId` and `sourceRevisionKey` name a new sequence,
+   *   also when the same file was on the sequence before.
+   *
+   * The caller makes new identifiers for the clips and the segments (ADR 072). Each clip names a
+   * source of `sources`.
+   */
+  loadSequence: (
+    clips: readonly Clip[],
+    sources: readonly SequenceSource[],
+    segments: readonly SequenceSegment[],
+  ) => SequenceLoadCheck;
+
   /** Records the clip whose source the preview attached, or null. */
   setAttachedClip: (clipId: string | null) => void;
 
-  /** Records a finite media element duration of a source, or forgets it with null (ADR 007). */
+  /**
+   * Records the media element duration of a source, the last extent fallback (ADR 007). Only a
+   * value that gives a finite extent greater than zero (`givesApproximateExtent`) replaces the
+   * duration that the store has. Null and each other value change nothing.
+   */
   setBrowserDuration: (sourceId: string, seconds: number | null) => void;
 
   /**

@@ -40,7 +40,7 @@ export function createMediaStore(
   const importMediaFn = dependencies.importMedia ?? importMedia;
   let latestRequestId = 0;
 
-  return createStore<MediaStoreState>()((set) => ({
+  return createStore<MediaStoreState>()((set, get) => ({
     status: initialState?.status ?? "idle",
     media: initialState?.media ?? null,
     sources: initialState?.sources ?? {},
@@ -100,15 +100,23 @@ export function createMediaStore(
           return null;
         }
 
+        // A revision that the session has as a source keeps its facts (ADR 052, ADR 072): the
+        // import answers with the facts of the result that the store has, not with the new
+        // answer of the backend. So an import after the open of a project does not replace the
+        // end that the open gave to an FLV. The answer is still a new object, because a new
+        // media object is a new open of the file for its readers: the export stream choice
+        // resets, and the preview drops a decode failure.
         const id = getGeneratedSourceId(result);
+        const known = id === null ? undefined : get().sources[id];
+        const answer: ImportMediaResult = known === undefined ? result : { ...known };
         set((state) => ({
           status: "ready",
-          media: result,
-          sources: id === null ? state.sources : { ...state.sources, [id]: result },
+          media: answer,
+          sources: id === null ? state.sources : { ...state.sources, [id]: answer },
           error: null,
         }));
 
-        return result;
+        return answer;
       } catch (err) {
         const normalized = normalizeImportMediaError(err);
 

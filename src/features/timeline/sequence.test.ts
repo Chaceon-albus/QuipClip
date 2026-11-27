@@ -199,6 +199,30 @@ describe("layoutSequence", () => {
     ).toBe(1.5);
   });
 
+  it("takes an estimate that gives no finite extent above zero as no extent", () => {
+    // 1e307 s has no finite count of microseconds, and 0.0000004 s rounds to zero of them.
+    for (const bad of [1e307, 0.0000004]) {
+      const estimated = new Map([
+        ["X", { ...sourceX, approximateDurationSeconds: bad }],
+        ["B", sourceB],
+      ]);
+      // It answers, and never throws: no extent next to another clip.
+      expect(layoutSequence([x1, b1], estimated)).toBeNull();
+      // Alone, the clip has no extent.
+      expect(layoutSequence([x1], estimated)?.placements[0]?.duration).toBeNull();
+      // The browser duration is the next fallback.
+      expect(
+        layoutSequence([x1, b1], estimated, new Map([["X", 1.5]]))?.placements[1]
+          ?.startSeconds,
+      ).toBe(1.5);
+      // The same guard for a browser duration.
+      expect(layoutSequence([x1, b1], sources, new Map([["X", bad]]))).toBeNull();
+      expect(
+        layoutSequence([x1], sources, new Map([["X", bad]]))?.placements[0]?.duration,
+      ).toBeNull();
+    }
+  });
+
   it("refuses an unknown source and lays out an empty sequence", () => {
     expect(layoutSequence([{ id: "q", sourceId: "missing" }], sources)).toBeNull();
     expect(layoutSequence([], sources)?.totalSeconds).toBe(0);

@@ -54,14 +54,29 @@ export function canStepFrames(
   return hasActiveSource && hasNominalRate && !isDecodeStalled;
 }
 
-/** Undo needs an active source and an entry in the edit history. */
-export function canUndoEdit(hasActiveSource: boolean, canUndo: boolean): boolean {
-  return hasActiveSource && canUndo;
+/**
+ * Undo needs an entry in the edit history, and an active source or a sequence with no clip
+ * (ADR 072). So Undo works after Clear Timeline, while no video is in the preview. The edit locks
+ * of the callers stay as they are.
+ */
+export function canUndoEdit(
+  hasActiveSource: boolean,
+  isSequenceEmpty: boolean,
+  canUndo: boolean,
+): boolean {
+  return (hasActiveSource || isSequenceEmpty) && canUndo;
 }
 
-/** Redo needs an active source and an undone entry in the edit history. */
-export function canRedoEdit(hasActiveSource: boolean, canRedo: boolean): boolean {
-  return hasActiveSource && canRedo;
+/**
+ * Redo needs an undone entry in the edit history, and an active source or a sequence with no
+ * clip (ADR 072), as Undo does.
+ */
+export function canRedoEdit(
+  hasActiveSource: boolean,
+  isSequenceEmpty: boolean,
+  canRedo: boolean,
+): boolean {
+  return (hasActiveSource || isSequenceEmpty) && canRedo;
 }
 
 /**

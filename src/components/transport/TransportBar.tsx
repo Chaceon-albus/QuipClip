@@ -81,6 +81,7 @@ const selectMedia = (s: MediaStoreState) => s.media;
 
 const selectCanUndo = (s: TimelineStoreState) => s.canUndo;
 const selectCanRedo = (s: TimelineStoreState) => s.canRedo;
+const selectIsSequenceEmpty = (s: TimelineStoreState) => s.clips.length === 0;
 const selectPendingInPts = (s: TimelineStoreState) => s.pendingInPts;
 const selectSegments = (s: TimelineStoreState) => s.segments;
 const selectSourceId = (s: TimelineStoreState) => s.sourceId;
@@ -159,6 +160,7 @@ export function TransportBar() {
 
   const canUndo = useTimelineStore(selectCanUndo);
   const canRedo = useTimelineStore(selectCanRedo);
+  const isSequenceEmpty = useTimelineStore(selectIsSequenceEmpty);
   const pendingInPts = useTimelineStore(selectPendingInPts);
   const segments = useTimelineStore(selectSegments);
   const sourceId = useTimelineStore(selectSourceId);
@@ -342,8 +344,9 @@ export function TransportBar() {
     ? t("transport.state.exportingFrame")
     : null;
 
-  const isUndoDisabled = !canUndoEdit(hasActiveSource, canUndo);
-  const isRedoDisabled = !canRedoEdit(hasActiveSource, canRedo);
+  // Undo and Redo also work on a sequence with no clip, as after Clear Timeline (ADR 072).
+  const isUndoDisabled = !canUndoEdit(hasActiveSource, isSequenceEmpty, canUndo);
+  const isRedoDisabled = !canRedoEdit(hasActiveSource, isSequenceEmpty, canRedo);
   const isMarkInDisabled = !isMarkInEnabled;
   const isMarkOutDisabled = !isMarkOutEnabled;
   const isSplitDisabled = !isSplitEnabled;

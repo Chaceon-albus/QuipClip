@@ -76,17 +76,24 @@ describe("actionConditions", () => {
     }
   });
 
-  it("lets undo and redo run with an active source and a history entry", () => {
+  it("lets undo and redo run with a history entry, and an active source or no clip", () => {
     for (const hasActiveSource of BOOLEANS) {
-      for (const hasEntry of BOOLEANS) {
-        expect(canUndoEdit(hasActiveSource, hasEntry)).toBe(
-          hasActiveSource && hasEntry,
-        );
-        expect(canRedoEdit(hasActiveSource, hasEntry)).toBe(
-          hasActiveSource && hasEntry,
-        );
+      for (const isSequenceEmpty of BOOLEANS) {
+        for (const hasEntry of BOOLEANS) {
+          const expected = (hasActiveSource || isSequenceEmpty) && hasEntry;
+          expect(canUndoEdit(hasActiveSource, isSequenceEmpty, hasEntry)).toBe(
+            expected,
+          );
+          expect(canRedoEdit(hasActiveSource, isSequenceEmpty, hasEntry)).toBe(
+            expected,
+          );
+        }
       }
     }
+    // After Clear Timeline no video is in the preview, and Undo still runs (ADR 072).
+    expect(canUndoEdit(false, true, true)).toBe(true);
+    // A sequence with clips and no ready video in the preview keeps the old rule.
+    expect(canUndoEdit(false, false, true)).toBe(false);
   });
 
   it("deletes only while at least one segment is selected", () => {

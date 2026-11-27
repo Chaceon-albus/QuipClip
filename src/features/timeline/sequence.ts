@@ -155,10 +155,31 @@ export type SequenceLayout = {
   readonly exact: boolean;
 };
 
-/** Seconds of a browser or probe estimate as a rational. The value is approximate anyway. */
-function approximateSecondsToRational(seconds: number): BigIntRational {
+/**
+ * Seconds of a browser or probe estimate as a rational in whole microseconds, or null when the
+ * estimate gives no finite extent greater than zero. The value is approximate anyway. An estimate
+ * so large that its microseconds are not finite, and one that rounds to zero microseconds, give
+ * null: such a value is no extent, and the next fallback applies. Without this guard the first
+ * would throw in `BigInt`, and the second would start two clips at the same place.
+ */
+function approximateSecondsToRational(seconds: number): BigIntRational | null {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
   // `seconds` is finite and positive here, so `Math.round` meets no negative tie (ADR 002).
-  return reduceBigIntRational(BigInt(Math.round(seconds * 1_000_000)), 1_000_000n);
+  const microseconds = Math.round(seconds * 1_000_000);
+  if (!Number.isFinite(microseconds) || microseconds <= 0) {
+    return null;
+  }
+  return reduceBigIntRational(BigInt(microseconds), 1_000_000n);
+}
+
+/**
+ * True when an estimate in seconds, from the probe or from the web view, gives a finite extent
+ * greater than zero (`approximateSecondsToRational`). A value that gives none is no extent.
+ */
+export function givesApproximateExtent(seconds: number): boolean {
+  return approximateSecondsToRational(seconds) !== null;
 }
 
 type ClipExtent = { readonly duration: BigIntRational; readonly exact: boolean };
@@ -192,18 +213,17 @@ function clipExtent(
       exact: false,
     };
   }
-  if (
-    isValidApproximateDuration(source.approximateDurationSeconds) &&
-    source.approximateDurationSeconds > 0
-  ) {
-    return {
-      duration: approximateSecondsToRational(source.approximateDurationSeconds),
-      exact: false,
-    };
+  const estimate = isValidApproximateDuration(source.approximateDurationSeconds)
+    ? approximateSecondsToRational(source.approximateDurationSeconds)
+    : null;
+  if (estimate !== null) {
+    return { duration: estimate, exact: false };
   }
-  const browser = browserDurationSeconds?.get(source.id);
-  if (browser !== undefined && Number.isFinite(browser) && browser > 0) {
-    return { duration: approximateSecondsToRational(browser), exact: false };
+  const browserSeconds = browserDurationSeconds?.get(source.id);
+  const browser =
+    browserSeconds === undefined ? null : approximateSecondsToRational(browserSeconds);
+  if (browser !== null) {
+    return { duration: browser, exact: false };
   }
   return null;
 }

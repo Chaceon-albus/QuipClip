@@ -563,6 +563,56 @@ describe("Media Store", () => {
     });
   });
 
+  describe("A revision that the session has (ADR 072)", () => {
+    it("keeps the facts of the known source, and answers with them", async () => {
+      const first = createFakeMediaResult("known-revision.mp4");
+      // The same revision, probed again with another end and fingerprint.
+      const second: ImportMediaResult = {
+        ...createFakeMediaResult("known-revision.mp4"),
+        probe: {
+          ...createFakeMediaResult("known-revision.mp4").probe,
+          videoEndPts: "912345" as Pts,
+        },
+        fingerprint: { start: "0", fnv1a64: "0123456789abcdef" },
+      };
+      const importMediaMock = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValueOnce(second);
+      const store = createMediaStore({ importMedia: importMediaMock });
+
+      const opened = await store.getState().importPath(first.path);
+      const sourceId = Object.keys(store.getState().sources)[0];
+      const again = await store.getState().importPath(first.path);
+
+      expect(opened).toBe(first);
+      expect(again).toEqual(first);
+      expect(again?.probe.videoEndPts).toBeNull();
+      expect(again && "fingerprint" in again).toBe(false);
+      const state = store.getState();
+      expect(Object.keys(state.sources)).toEqual([sourceId]);
+      expect(state.sources[sourceId]).toEqual(first);
+      expect(state.media).toEqual(first);
+      // A new object, so the readers of `media` see a new open of the file.
+      expect(state.media).toBe(again);
+      expect(state.media).not.toBe(first);
+    });
+
+    it("records a new revision of the same path as a new source", async () => {
+      const first = createFakeMediaResult("changed-revision.mp4");
+      const changed: ImportMediaResult = { ...first, mtime: first.mtime + 1 };
+      const importMediaMock = vi
+        .fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValueOnce(changed);
+      const store = createMediaStore({ importMedia: importMediaMock });
+      await store.getState().importPath(first.path);
+      const again = await store.getState().importPath(first.path);
+      expect(again).toBe(changed);
+      expect(Object.values(store.getState().sources)).toEqual([first, changed]);
+    });
+  });
+
   describe("Default Store Singleton", () => {
     it("provides a default singleton store instance in idle state", () => {
       const state = mediaStore.getState();

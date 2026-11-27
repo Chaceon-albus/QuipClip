@@ -37,7 +37,7 @@ import {
 } from "@/features/sequence/attachedMedia";
 import { useSequenceMediaStore } from "@/features/sequence/media";
 import { sequencePlayback } from "@/features/sequence/playback";
-import { timelineStore } from "@/features/timeline";
+import { timelineStore, useTimelineStore } from "@/features/timeline";
 import {
   clearScrubCue,
   createVideoRefCallback,
@@ -154,6 +154,7 @@ import {
 } from "@/features/frameExport";
 import { createSourceLifecycleGuard, formatPreviewTotalDuration } from "./previewFrame";
 import { PreviewTimecode } from "./PreviewTimecode";
+import { previewElementKey, previewSequenceGeneration } from "./previewElementKey";
 
 // The playback store actions never change, so they are read once instead of through a
 // subscription for each one.
@@ -540,13 +541,25 @@ export function PreviewPane() {
   // changes.
   const volumePercent = usePreviewMutePreference((s) => s.volumePercent);
 
+  // The generation of the sequence of the shown media. The open of a project gives a new one,
+  // also when the first clip is the file that the preview showed (ADR 072).
+  const sequenceGeneration = useTimelineStore(previewSequenceGeneration);
+
   const sourceRevisionKey = getSourceRevisionKey(media);
   // The key of the media elements and of the components that follow the video element. A new
-  // source, a reload after a decode stall and a recalibration give a new key, so React builds new
-  // elements. A media element does not play or seek again after a decode error, and a new one
-  // does. A new element also calibrates from its own first frame (ADR 063).
-  const elementKey = `${sourceRevisionKey}:${reloadGeneration}`;
+  // source, a reload after a decode stall, a recalibration and a new sequence from an open give a
+  // new key, so React builds new elements. A media element does not play or seek again after a
+  // decode error, and a new one does. A new element also calibrates from its own first frame
+  // (ADR 063).
+  const elementKey = previewElementKey(
+    sourceRevisionKey,
+    sequenceGeneration,
+    reloadGeneration,
+  );
   const [previousMedia, setPreviousMedia] = useState(media);
+  // The generation part of the element key that the pane last rendered (ADR 072).
+  const [previousSequenceGeneration, setPreviousSequenceGeneration] =
+    useState(sequenceGeneration);
   // What made the web view fail to play the source, or null while it plays: the element
   // fired `error`, or the picture check found no picture. The pane then shows the
   // decode-failure panel in place of the element.
@@ -707,6 +720,19 @@ export function PreviewPane() {
         hasMedia: media !== null,
       }),
     );
+  }
+
+  // A new sequence from the open of a project builds new media elements, also for the file that
+  // the preview showed (ADR 072). The states that the pane keeps for a revision belong to the
+  // elements and the controller before the open, so they go before the new element attaches its
+  // controller in the commit of this render: the decode failure, the notices of the MediaSource
+  // controller, the sources that decoded in part, and the scan of a stall reload.
+  if (previousSequenceGeneration !== sequenceGeneration) {
+    setPreviousSequenceGeneration(sequenceGeneration);
+    setFailureTrigger(null);
+    setMediaSourceNotices({ ...NO_MEDIA_SOURCE_NOTICES, sourceRevisionKey });
+    decodedSources.clear();
+    rescanGenerations.clear();
   }
 
   // Reset playback store if media disappears
@@ -1055,9 +1081,10 @@ export function PreviewPane() {
   }, []);
 
   // Register requestVideoFrameCallback lifecycle loop (ADR 003). The loop starts again for each
-  // new video element: a new source, and a reload after a decode stall or of a recalibration,
-  // which replaces the element with no change of the source. Without `reloadGeneration` the new
-  // element of a reload would get no frame callback and never calibrate.
+  // new video element: a new source, a reload after a decode stall or of a recalibration, and a
+  // new sequence from an open, which replace the element with no change of the source. Without
+  // `elementKey` the new element of a reload or of an open would get no frame callback and never
+  // calibrate.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !media || decodeFailed) {
@@ -1152,7 +1179,7 @@ export function PreviewPane() {
     };
   }, [
     sourceRevisionKey,
-    reloadGeneration,
+    elementKey,
     media,
     decodeFailed,
     sourceGuard,
