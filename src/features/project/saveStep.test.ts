@@ -132,6 +132,40 @@ describe("the save step", () => {
     expect(h.project.getState().file?.name).toBe("copy.qcproj");
   });
 
+  it("proposes the name and the directory of the proposed path of a restored project", async () => {
+    const h = harness();
+    h.project.getState().completeRestore({ proposedPath: "/old/work/Stream.qcproj" });
+    for (const mode of ["save", "saveAs"] as const) {
+      h.showSaveDialog.mockResolvedValueOnce(null);
+      await expect(h.step.save(mode)).resolves.toEqual({ status: "canceled" });
+      expect(h.showSaveDialog).toHaveBeenLastCalledWith("Stream.qcproj", "/old/work");
+    }
+    expect(h.saveProject).not.toHaveBeenCalled();
+    // The save gives the project a file, and the proposed path goes.
+    await h.step.save("save");
+    expect(h.project.getState().file?.path).toBe("/canonical/out/cut.qcproj");
+    expect(h.project.getState().proposedPath).toBeNull();
+    h.showSaveDialog.mockClear();
+    await h.step.save("saveAs");
+    expect(h.showSaveDialog).toHaveBeenCalledWith("cut.qcproj", "/canonical/out");
+  });
+
+  it("proposes the name of the first clip for a restored project with no proposed path", async () => {
+    const h = harness();
+    h.project.getState().completeRestore({ proposedPath: null });
+    h.showSaveDialog.mockResolvedValueOnce(null);
+    await h.step.save("save");
+    expect(h.showSaveDialog).toHaveBeenCalledWith("clip.qcproj", "/media");
+  });
+
+  it("proposes a Windows proposed path with its own separator", async () => {
+    const h = harness();
+    h.project.getState().completeRestore({ proposedPath: "C:\\Cuts\\Stream.qcproj" });
+    h.showSaveDialog.mockResolvedValueOnce(null);
+    await h.step.save("saveAs");
+    expect(h.showSaveDialog).toHaveBeenCalledWith("Stream.qcproj", "C:\\Cuts");
+  });
+
   it("writes nothing for a canceled dialog and for a name that does not end in .qcproj", async () => {
     const h = harness();
     h.showSaveDialog.mockResolvedValueOnce(null);

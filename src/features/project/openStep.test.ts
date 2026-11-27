@@ -10,6 +10,10 @@ import {
   type ImportMediaResult,
   type ListedAudioStream,
 } from "@/features/media/types";
+import {
+  RecoveryCommandError,
+  type RecoveryReadResult,
+} from "@/features/recovery/types";
 import { importClips, runInImportLine } from "@/features/sequence/importClips";
 import type { SequenceSource } from "@/features/timeline/sequence";
 import { createTimelineStore } from "@/features/timeline/store";
@@ -20,9 +24,13 @@ import type {
   Pts,
   SequenceSegment,
 } from "@/types/project";
-import { projectContentOf } from "./document";
+import { EMPTY_PROJECT_CONTENT, projectContentOf } from "./document";
 import type { DropContentAnswer } from "./dropContent";
-import { createProjectOpenStep, type OpenProjectResult } from "./openStep";
+import {
+  createProjectOpenStep,
+  type OpenProjectResult,
+  type RestoreProjectResult,
+} from "./openStep";
 import {
   entryOf,
   flush,
@@ -34,6 +42,7 @@ import {
 import type { ProjectSaveResult } from "./saveStep";
 import {
   createProjectStore,
+  hasChangesToSave,
   installProjectSequenceRule,
   isProjectModified,
 } from "./store";
@@ -294,6 +303,7 @@ function harness(options: HarnessOptions = {}) {
     savedContent: project.getState().savedContent,
     identity: project.getState().identity,
     located: project.getState().located,
+    proposedPath: project.getState().proposedPath,
   });
 
   return {
@@ -387,6 +397,7 @@ describe("the open step", () => {
     expect(h.step.store.getState()).toEqual({
       phase: { kind: "idle" },
       projectPath: null,
+      mode: "open",
     });
     expect(h.step.isOpening()).toBe(false);
 
@@ -426,6 +437,7 @@ describe("the open step", () => {
         fileName: "b.mp4",
       },
       projectPath: PROJECT_PATH,
+      mode: "open",
     });
     expect(h.step.isOpening()).toBe(true);
     answer.resolve(mediaForEntry(B, B.path));
@@ -1107,6 +1119,7 @@ describe("the open step", () => {
       expect(h.step.store.getState()).toEqual({
         phase: { kind: "idle" },
         projectPath: null,
+        mode: "open",
       });
       expect(h.step.isOpening()).toBe(false);
       return result;
@@ -1284,5 +1297,366 @@ describe("the open step", () => {
       "new-clip-2",
       "import-2",
     ]);
+  });
+});
+
+describe("the restore of an offer", () => {
+  const OFFER = { id: "00000000000000ab", projectPath: "/old/stream.qcproj" };
+  /**
+   * The `projectPath` that the read gives. It is another path than the one of the list, so each
+   * test shows that the proposed path is the one of the read.
+   */
+  const READ_PATH = "/read/stream.qcproj";
+
+  /** The answer of `read_recovery` for `project`: one candidate path for each source. */
+  function recovered(
+    project: Project,
+    projectPath: string | null = READ_PATH,
+  ): RecoveryReadResult {
+    return {
+      owner: true,
+      status: "done",
+      offer: {
+        projectPath,
+        project,
+        candidates: project.sources.map((entry) => [entry.path]),
+      },
+    };
+  }
+
+  /** The functions of one restore, which note their calls in the calls of the harness. */
+  function hooksOf(
+    h: ReturnType<typeof harness>,
+    read: RecoveryReadResult | Held<RecoveryReadResult> | Error = recovered(
+      documentOf([A, B]),
+    ),
+  ) {
+    const readRecovery = vi.fn((id: string) => {
+      h.calls.push(`read ${id}`);
+      if (read instanceof Error) {
+        return Promise.reject(read);
+      }
+      return isHeld<RecoveryReadResult>(read) ? read.promise : Promise.resolve(read);
+    });
+    const onRestored = vi.fn((id: string) => {
+      h.calls.push(`restored ${id}`);
+    });
+    return { readRecovery, onRestored };
+  }
+
+  it("reads the document from the offer, and leaves the project with no file and the proposed path", async () => {
+    const h = harness({ disk: diskOf(A, B) });
+    const hooks = hooksOf(h);
+    const identity = h.project.getState().identity;
+    // What step 8 has done when it calls `onRestored`.
+    let atRestored: unknown = null;
+    hooks.onRestored.mockImplementation((id: string) => {
+      h.calls.push(`restored ${id}`);
+      atRestored = {
+        clips: h.timeline.getState().clips.map((clip) => clip.id),
+        file: h.project.getState().file,
+        proposedPath: h.project.getState().proposedPath,
+        phase: h.phase().kind,
+      };
+    });
+
+    const result: RestoreProjectResult = await h.step.restore(OFFER, hooks);
+
+    expect(result).toEqual({ status: "restored" });
+    expect(h.loadProject).not.toHaveBeenCalled();
+    expect(hooks.readRecovery).toHaveBeenCalledWith(OFFER.id);
+    expect(hooks.onRestored).toHaveBeenCalledTimes(1);
+    expect(atRestored).toEqual({
+      clips: ["new-clip-1", "new-clip-2"],
+      file: null,
+      proposedPath: READ_PATH,
+      phase: "idle",
+    });
+    const state = h.project.getState();
+    expect(state.file).toBeNull();
+    // The proposed path is the `projectPath` of the read, not the one of the list.
+    expect(state.proposedPath).toBe(READ_PATH);
+    expect(state.savedContent).toBe(EMPTY_PROJECT_CONTENT);
+    expect(state.located).toBe(false);
+    expect(state.identity).toBeGreaterThan(identity);
+    // The restored work has changes to save, as each project with no file with a segment.
+    const content = projectContentOf(h.timeline.getState(), {});
+    expect(hasChangesToSave(state, content, 1)).toBe(true);
+    expect(
+      h.timeline.getState().sequenceSegments.map((segment) => segment.name),
+    ).toEqual(["Cross"]);
+    // Each step of an open, with the read in place of the load, and `onRestored` last.
+    const generation = h.timeline.getState().generation;
+    expect(h.calls).toEqual([
+      "stale",
+      "stale",
+      `read ${OFFER.id}`,
+      `import ${A.path}`,
+      `import ${B.path}`,
+      `revision ${A.path}`,
+      `revision ${B.path}`,
+      "pause old-clip",
+      "dropNavigation",
+      "resetPlayback",
+      "media",
+      "sequence",
+      `overrides at generation ${generation}`,
+      `restored ${OFFER.id}`,
+    ]);
+    expect(h.step.store.getState()).toEqual({
+      phase: { kind: "idle" },
+      projectPath: null,
+      mode: "open",
+    });
+  });
+
+  it("says in the store that the step is a restore, with the path of the list, and proposes the path of the read", async () => {
+    const cases: [string | null, string | null][] = [
+      [OFFER.projectPath, READ_PATH],
+      [null, READ_PATH],
+      [OFFER.projectPath, null],
+    ];
+    for (const [listed, read] of cases) {
+      const h = harness({ disk: diskOf(A, B) });
+      const answer = held<RecoveryReadResult>();
+      const restoring = h.step.restore(
+        { ...OFFER, projectPath: listed },
+        hooksOf(h, answer),
+      );
+      await flush();
+      expect(h.step.store.getState()).toEqual({
+        phase: { kind: "loading" },
+        projectPath: listed,
+        mode: "restore",
+      });
+      answer.resolve(recovered(documentOf([A, B]), read));
+      await expect(restoring).resolves.toEqual({ status: "restored" });
+      expect(h.project.getState().proposedPath).toBe(read);
+    }
+  });
+
+  it("tries the one candidate of each source, and lists a source that is absent", async () => {
+    const h = harness({
+      disk: { ...diskOf(B), "/new/a.mp4": mediaForEntry(A, "/new/a.mp4") },
+    });
+    const hooks = hooksOf(h);
+    const restoring = h.step.restore(OFFER, hooks);
+    await flush();
+    expect(h.importMedia.mock.calls.map(([path]) => path)).toEqual([A.path, B.path]);
+    expect(rowOf(h, "e1").failure).toEqual({ kind: "absent" });
+    expect(hooks.onRestored).not.toHaveBeenCalled();
+    await h.step.locateFile("e1", "/new/a.mp4");
+    h.step.confirm();
+    await expect(restoring).resolves.toEqual({ status: "restored" });
+    // A located file makes no file of the project either.
+    expect(h.project.getState()).toMatchObject({
+      file: null,
+      located: false,
+      proposedPath: READ_PATH,
+    });
+    expect(h.media.getState().media?.path).toBe("/new/a.mp4");
+  });
+
+  it("keeps no proposed path for a document with no clip", async () => {
+    const h = harness();
+    const hooks = hooksOf(h, recovered(documentOf([], [], [])));
+    await expect(h.step.restore(OFFER, hooks)).resolves.toEqual({ status: "restored" });
+    expect(h.timeline.getState().clips).toEqual([]);
+    expect(h.project.getState()).toMatchObject({ file: null, proposedPath: null });
+    expect(hooks.onRestored).toHaveBeenCalledWith(OFFER.id);
+  });
+
+  it("fails with the error of a read that gave no document", async () => {
+    const failure = new RecoveryCommandError({ code: "invalidRecoveryFile" });
+    const cases: [RecoveryReadResult | Error, unknown][] = [
+      [
+        { owner: true, status: "failed", error: failure },
+        { kind: "recoveryReadFailed", status: "failed", error: failure },
+      ],
+      [
+        { owner: false, status: "notOwner" },
+        { kind: "recoveryReadFailed", status: "notOwner", error: null },
+      ],
+      [
+        { owner: false, status: "staleSession" },
+        { kind: "recoveryReadFailed", status: "staleSession", error: null },
+      ],
+      [
+        new Error("ipc"),
+        {
+          kind: "recoveryReadFailed",
+          status: "failed",
+          error: expect.objectContaining({ code: "unknown" }) as unknown,
+        },
+      ],
+    ];
+    for (const [read, error] of cases) {
+      const h = harness({ disk: diskOf(A, B) });
+      const before = h.snapshot();
+      const hooks = hooksOf(h, read);
+      const restoring = h.step.restore(OFFER, hooks);
+      await flush();
+      expect(h.phase()).toEqual({ kind: "failed", error });
+      expect(h.step.store.getState().mode).toBe("restore");
+      h.step.cancel();
+      await expect(restoring).resolves.toEqual({ status: "failed", error });
+      expect(h.importMedia).not.toHaveBeenCalled();
+      expect(hooks.onRestored).not.toHaveBeenCalled();
+      expect(h.snapshot()).toEqual(before);
+    }
+  });
+
+  it("answers a quit that closes the error view as a cancel of a quit, and a close of the user as a failure", async () => {
+    const failure = new RecoveryCommandError({ code: "readFailed" });
+    const read: RecoveryReadResult = { owner: true, status: "failed", error: failure };
+    const error = { kind: "recoveryReadFailed", status: "failed", error: failure };
+    for (const [reason, expected] of [
+      ["quit", { status: "canceled", by: "quit" }],
+      ["user", { status: "failed", error }],
+      [undefined, { status: "failed", error }],
+    ] as const) {
+      const h = harness({ disk: diskOf(A, B) });
+      const before = h.snapshot();
+      const hooks = hooksOf(h, read);
+      const restoring = h.step.restore(OFFER, hooks);
+      await flush();
+      expect(h.phase()).toEqual({ kind: "failed", error });
+      h.step.cancel(reason);
+      await expect(restoring).resolves.toEqual(expected);
+      expect(hooks.onRestored).not.toHaveBeenCalled();
+      expect(h.snapshot()).toEqual(before);
+    }
+  });
+
+  it("answers an open whose error view a quit closed with its error, as before", async () => {
+    const failure = new ProjectCommandError({ code: "invalidJson" });
+    const h = harness({ load: failure });
+    const opening = h.step.open(PROJECT_PATH);
+    await flush();
+    expect(h.phase()).toMatchObject({ kind: "failed" });
+    h.step.cancel("quit");
+    await expect(opening).resolves.toEqual({
+      status: "failed",
+      error: { kind: "loadFailed", error: failure },
+    });
+  });
+
+  it("fails for a document that fails the rules of the sequence", async () => {
+    const h = harness({ disk: diskOf(A, B) });
+    const hooks = hooksOf(
+      h,
+      recovered(documentOf([A, B], [...CLIPS, { id: "d1", sourceId: "e2" }])),
+    );
+    const restoring = h.step.restore(OFFER, hooks);
+    await flush();
+    expect(h.phase()).toMatchObject({
+      kind: "failed",
+      error: { kind: "documentRefused" },
+    });
+    h.step.cancel();
+    await expect(restoring).resolves.toMatchObject({ status: "failed" });
+    expect(hooks.onRestored).not.toHaveBeenCalled();
+  });
+
+  it("changes nothing while another dialog of the window is open", async () => {
+    const h = harness({ disk: diskOf(A, B), otherDialog: true });
+    const before = h.snapshot();
+    const hooks = hooksOf(h);
+    await expect(h.step.restore(OFFER, hooks)).resolves.toEqual({ status: "blocked" });
+    expect(hooks.readRecovery).not.toHaveBeenCalled();
+    expect(hooks.onRestored).not.toHaveBeenCalled();
+    expect(h.snapshot()).toEqual(before);
+  });
+
+  it("tests again for another dialog after the save of the prompt", async () => {
+    const saved = () => h.saveStep.save.mock.calls.length > 0;
+    const h = harness({
+      disk: diskOf(A, B),
+      changes: () => !saved(),
+      answers: ["save"],
+      otherDialog: saved,
+    });
+    const hooks = hooksOf(h);
+    await expect(h.step.restore(OFFER, hooks)).resolves.toEqual({ status: "blocked" });
+    expect(h.saveStep.save).toHaveBeenCalledTimes(1);
+    expect(hooks.readRecovery).not.toHaveBeenCalled();
+  });
+
+  it("makes the open step of the export stale before the prompt and before the dialog", async () => {
+    const h = harness({ disk: diskOf(A, B), changes: true, answers: ["dontSave"] });
+    await expect(h.step.restore(OFFER, hooksOf(h))).resolves.toEqual({
+      status: "restored",
+    });
+    expect(h.calls.slice(0, 4)).toEqual(["stale", "ask", "stale", `read ${OFFER.id}`]);
+  });
+
+  it("stops at Cancel of the save prompt, and at a save of the prompt that failed", async () => {
+    const canceled = harness({ changes: true, answers: ["cancel"] });
+    const canceledHooks = hooksOf(canceled);
+    await expect(canceled.step.restore(OFFER, canceledHooks)).resolves.toEqual({
+      status: "stopped",
+      saveError: null,
+    });
+    expect(canceledHooks.readRecovery).not.toHaveBeenCalled();
+
+    const failed = harness({ changes: true, answers: ["save"] });
+    failed.saves.push({ status: "failed", error: { kind: "noClip" } });
+    await expect(failed.step.restore(OFFER, hooksOf(failed))).resolves.toEqual({
+      status: "stopped",
+      saveError: { kind: "noClip" },
+    });
+  });
+
+  it("tells a cancel of the user from a cancel of a quit, and changes nothing before step 8", async () => {
+    for (const reason of ["user", "quit"] as const) {
+      // At the read of the offer.
+      const atRead = harness({ disk: diskOf(A, B) });
+      const before = atRead.snapshot();
+      const read = held<RecoveryReadResult>();
+      const hooks = hooksOf(atRead, read);
+      const restoring = atRead.step.restore(OFFER, hooks);
+      await flush();
+      atRead.step.cancel(reason);
+      await expect(restoring).resolves.toEqual({ status: "canceled", by: reason });
+      read.resolve(recovered(documentOf([A, B])));
+      await flush();
+      expect(atRead.importMedia).not.toHaveBeenCalled();
+      expect(hooks.onRestored).not.toHaveBeenCalled();
+      expect(atRead.snapshot()).toEqual(before);
+
+      // At the list of the files to locate.
+      const atList = harness({ disk: diskOf(B) });
+      const listBefore = atList.snapshot();
+      const listHooks = hooksOf(atList);
+      const listing = atList.step.restore(OFFER, listHooks);
+      await flush();
+      expect(atList.phase().kind).toBe("locating");
+      atList.step.cancel(reason);
+      await expect(listing).resolves.toEqual({ status: "canceled", by: reason });
+      expect(listHooks.onRestored).not.toHaveBeenCalled();
+      expect(atList.snapshot()).toEqual(listBefore);
+    }
+  });
+
+  it("says who canceled a restore that waits for its turn", async () => {
+    const h = harness({ disk: diskOf(A, B) });
+    const blocker = held<void>();
+    void h.turn(() => blocker.promise);
+    const hooks = hooksOf(h);
+    const restoring = h.step.restore(OFFER, hooks);
+    await flush();
+    h.step.cancel("quit");
+    await expect(restoring).resolves.toEqual({ status: "canceled", by: "quit" });
+    blocker.resolve();
+    await flush();
+    expect(hooks.readRecovery).not.toHaveBeenCalled();
+  });
+
+  it("answers an open that a quit canceled as an open canceled", async () => {
+    const h = harness({ disk: diskOf(B) });
+    const opening = h.step.open(PROJECT_PATH);
+    await flush();
+    h.step.cancel("quit");
+    await expect(opening).resolves.toEqual({ status: "canceled" });
   });
 });

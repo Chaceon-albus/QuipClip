@@ -119,12 +119,22 @@ export function createProjectSaveStep(
 
   let running: Promise<ProjectSaveResult> | null = null;
 
-  /** The name and the directory that the save dialog proposes (ADR 072, Save As). */
+  /**
+   * The name and the directory that the save dialog proposes (ADR 072, Save As): those of the file
+   * of the project, or else those of its proposed path (ADR 073, "The restore"), or else the name
+   * and the directory of the file of the first clip.
+   */
   const proposal = ():
     { name: string; directory: string | null } | ProjectSaveError => {
-    const file = project.getState().file;
+    const { file, proposedPath } = project.getState();
     if (file !== null) {
       return { name: file.name, directory: directoryOfPath(file.path) };
+    }
+    if (proposedPath !== null) {
+      return {
+        name: fileNameOfPath(proposedPath),
+        directory: directoryOfPath(proposedPath),
+      };
     }
     const first = timeline.getState().clips[0];
     if (first === undefined) {

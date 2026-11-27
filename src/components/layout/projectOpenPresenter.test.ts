@@ -9,6 +9,7 @@ import {
   PROJECT_COMMAND_ERROR_CODES,
   ProjectCommandError,
 } from "@/features/project/types";
+import { RecoveryCommandError } from "@/features/recovery/types";
 import { createI18nInstance } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
@@ -51,8 +52,11 @@ const MISSING: OpenSourceRow = {
   failure: { kind: "absent" },
 };
 
-function state(phase: OpenProjectState["phase"], projectPath: string | null = null) {
-  return { phase, projectPath };
+function state(
+  phase: OpenProjectState["phase"],
+  projectPath: string | null = null,
+): OpenProjectState {
+  return { phase, projectPath, mode: "open" };
 }
 
 describe("presentProjectOpen", () => {
@@ -330,6 +334,19 @@ describe("presentOpenError", () => {
     expect(SEQUENCE_REFUSED_MESSAGE_KEYS.invalidSegment).not.toBe(
       DOCUMENT_REFUSED_MESSAGE_KEYS.invalidSegment,
     );
+  });
+
+  it("gives a read of a recovery offer that failed the message of an unknown error, with its detail", () => {
+    expect(
+      presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "failed",
+        error: new RecoveryCommandError({ code: "readFailed", detail: "EIO" }),
+      }),
+    ).toEqual({ message: { key: "projectOpen.error.load.unknown" }, detail: "EIO" });
+    expect(
+      presentOpenError({ kind: "recoveryReadFailed", status: "notOwner", error: null }),
+    ).toEqual({ message: { key: "projectOpen.error.load.unknown" }, detail: null });
   });
 });
 

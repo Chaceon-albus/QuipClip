@@ -1278,6 +1278,8 @@ function createOpenStepFake() {
         opening = false;
       });
     }),
+    // The guard starts no restore yet.
+    restore: vi.fn(() => Promise.resolve({ status: "canceled", by: "user" } as const)),
     locate: vi.fn(() => Promise.resolve(false)),
     locateFile: vi.fn(() => Promise.resolve(false)),
     confirm: vi.fn(() => false),

@@ -302,6 +302,120 @@ describe("the project store", () => {
   });
 });
 
+describe("the proposed path of the project", () => {
+  const PROPOSED = "/old/stream.qcproj";
+
+  /** Restores the session that `addClips` makes, as the restore does in its step 8. */
+  function restore(h: ReturnType<typeof harness>): void {
+    addClips(h.timeline);
+    h.project.getState().completeRestore({ proposedPath: PROPOSED });
+  }
+
+  it("starts with no proposed path", () => {
+    expect(
+      createProjectStore({ sequenceHasClips: () => false }).getState().proposedPath,
+    ).toBe(null);
+  });
+
+  it("gives a restored project no file, the empty content, a new identity and the proposed path", () => {
+    const h = harness();
+    addClips(h.timeline);
+    save(h);
+    const identity = h.project.getState().identity;
+    h.project.getState().completeRestore({ proposedPath: PROPOSED });
+    const state = h.project.getState();
+    expect(state).toMatchObject({
+      file: null,
+      savedContent: EMPTY_PROJECT_CONTENT,
+      located: false,
+      proposedPath: PROPOSED,
+      identity: identity + 1,
+    });
+    // A restored project with a segment has changes to save, as each project with no file.
+    expect(hasChangesToSave(state, contentOf(h.timeline), 1)).toBe(true);
+  });
+
+  it("keeps no proposed path for a restore with no clip, or with no path", () => {
+    const h = harness();
+    h.project.getState().completeRestore({ proposedPath: PROPOSED });
+    expect(h.project.getState().proposedPath).toBeNull();
+    addClips(h.timeline);
+    h.project.getState().completeRestore({ proposedPath: null });
+    expect(h.project.getState().proposedPath).toBeNull();
+  });
+
+  it("is not content: it does not make the project modified", () => {
+    const h = harness();
+    addClips(h.timeline);
+    const before = contentOf(h.timeline);
+    h.project.getState().completeRestore({ proposedPath: PROPOSED });
+    expect(contentOf(h.timeline)).toBe(before);
+    const withPath = h.project.getState();
+    const withoutPath = { ...withPath, proposedPath: null };
+    expect(isProjectModified(withPath, before)).toBe(
+      isProjectModified(withoutPath, before),
+    );
+  });
+
+  it("goes when a save gives the project a file", () => {
+    const h = harness();
+    restore(h);
+    expect(save(h)).toBe(true);
+    expect(h.project.getState().proposedPath).toBeNull();
+  });
+
+  it("stays after a save that does not bind its file", () => {
+    const h = harness();
+    restore(h);
+    const bound = h.project.getState().completeSave({
+      file: FILE,
+      savedContent: contentOf(h.timeline),
+      identity: h.project.getState().identity - 1,
+    });
+    expect(bound).toBe(false);
+    expect(h.project.getState().proposedPath).toBe(PROPOSED);
+  });
+
+  it("goes when an open changes the session", () => {
+    const h = harness();
+    restore(h);
+    h.project.getState().completeOpen({
+      file: OTHER_FILE,
+      savedContent: contentOf(h.timeline),
+      located: false,
+    });
+    expect(h.project.getState().proposedPath).toBeNull();
+    restore(h);
+    h.project.getState().completeOpen({
+      file: null,
+      savedContent: EMPTY_PROJECT_CONTENT,
+      located: false,
+    });
+    expect(h.project.getState().proposedPath).toBeNull();
+  });
+
+  it("goes when the project closes, and an Undo does not give it back", () => {
+    const h = harness();
+    restore(h);
+    const identity = h.project.getState().identity;
+    h.timeline.getState().clearTimeline();
+    expect(h.project.getState().proposedPath).toBeNull();
+    expect(h.project.getState().identity).toBe(identity + 1);
+    h.timeline.getState().undo();
+    expect(h.timeline.getState().clips.length).toBeGreaterThan(0);
+    expect(h.project.getState().proposedPath).toBeNull();
+  });
+
+  it("goes at a close with no change of the identity", () => {
+    const h = harness();
+    restore(h);
+    const identity = h.project.getState().identity;
+    h.project.getState().closeProject(false);
+    expect(h.project.getState().proposedPath).toBeNull();
+    expect(h.project.getState().identity).toBe(identity);
+  });
+});
+
 describe("isProjectModified and hasChangesToSave", () => {
   const A = "content-a" as ProjectContent;
   const B = "content-b" as ProjectContent;

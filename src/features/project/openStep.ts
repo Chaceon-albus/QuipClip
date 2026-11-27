@@ -14,6 +14,12 @@
  *
  * Only one open step runs at a time: each request takes a turn in the line of the imports (step
  * 1), so a second request waits for the end of the first one, and each import waits too.
+ *
+ * The restore (ADR 073, "The restore") is the same step with two differences. Step 4 reads the
+ * document from an offer through the read function of the request, not with `load_project`, and
+ * each source then has one candidate path. Step 8 leaves the project with no file and with the
+ * `projectPath` of the offer as its proposed path, and then calls `onRestored` of the request in
+ * the same call. The store says that the step is a restore (`mode`).
  */
 
 import { useStore } from "zustand";
@@ -40,6 +46,12 @@ import type {
   ImportMediaResult,
 } from "@/features/media/types";
 import { normalizeImportMediaError } from "@/features/media/validation";
+import type {
+  RecoveryCommandError,
+  RecoveryOfferSummary,
+  RecoveryReadResult,
+} from "@/features/recovery/types";
+import { normalizeRecoveryCommandError } from "@/features/recovery/validation";
 import { generateClipId, runInImportLine } from "@/features/sequence/importClips";
 import { sequencePlayback } from "@/features/sequence/playback";
 import type { SequenceSource } from "@/features/timeline/sequence";
@@ -52,7 +64,7 @@ import {
   timelineStore,
   type TimelineStore,
 } from "@/features/timeline/store";
-import type { Clip, PersistedSource, SequenceSegment } from "@/types/project";
+import type { Clip, PersistedSource, Project, SequenceSegment } from "@/types/project";
 import { loadProject as loadProjectCommand } from "./client";
 import { checkProjectDocument, projectContentOf } from "./document";
 import {
@@ -103,6 +115,15 @@ export interface OpenSourceRow {
 export type OpenProjectError =
   /** `load_project` failed. */
   | { readonly kind: "loadFailed"; readonly error: ProjectCommandError }
+  /**
+   * The read of the offer of a restore did not give a document (ADR 073, restore step 4).
+   * `error` is the error of the answer, or null for `notOwner` and `staleSession`.
+   */
+  | {
+      readonly kind: "recoveryReadFailed";
+      readonly status: "notOwner" | "staleSession" | "failed";
+      readonly error: RecoveryCommandError | null;
+    }
   /** The document fails the rules of the sequence (step 4, `checkProjectDocument`). */
   | { readonly kind: "documentRefused"; readonly problem: SequenceLoadProblem }
   /**
@@ -117,7 +138,7 @@ export type OpenProjectError =
 export type OpenProjectPhase =
   /** No dialog. */
   | { readonly kind: "idle" }
-  /** `load_project` runs. */
+  /** `load_project`, or the read of the offer of a restore, runs. */
   | { readonly kind: "loading" }
   /**
    * The step checks a source: `sources` in step 5, `revisions` in step 7. `current` counts from 1
@@ -144,17 +165,29 @@ export type OpenProjectPhase =
   /** The step stopped with an error. Close of the dialog is `cancel`. */
   | { readonly kind: "failed"; readonly error: OpenProjectError };
 
+/** `open` for the open of a project file, `restore` for the restore of an offer (ADR 073). */
+export type OpenProjectMode = "open" | "restore";
+
 /** Public state of the open step store. */
 export interface OpenProjectState {
   readonly phase: OpenProjectPhase;
-  /** The path that the open step received, while the dialog shows, or null. */
+  /**
+   * While the dialog shows: the path that the open step received, or the `projectPath` of the
+   * offer of a restore. Null otherwise, and for an offer with no path.
+   */
   readonly projectPath: string | null;
+  /** Whether the step that the dialog shows is an open or a restore. `open` while idle. */
+  readonly mode: OpenProjectMode;
 }
 
 /** The store of what the project dialog shows. */
 export type OpenProjectStore = StoreApi<OpenProjectState>;
 
-const IDLE: OpenProjectState = { phase: { kind: "idle" }, projectPath: null };
+const IDLE: OpenProjectState = {
+  phase: { kind: "idle" },
+  projectPath: null,
+  mode: "open",
+};
 
 /** Creates a store of what the project dialog shows, in its idle state. */
 export function createOpenProjectStore(): OpenProjectStore {
@@ -179,6 +212,42 @@ export type OpenProjectResult =
   | { readonly status: "stopped"; readonly saveError: ProjectSaveError | null }
   /** The step failed, and the user closed the dialog that showed the error. */
   | { readonly status: "failed"; readonly error: OpenProjectError };
+
+/** Who canceled an open step or a restore: Cancel of the user, or a request to quit. */
+export type OpenCancelReason = "user" | "quit";
+
+/** The result of a restore (ADR 073, "The restore"). */
+export type RestoreProjectResult =
+  /** Step 8 changed the session, and `onRestored` ran. */
+  | { readonly status: "restored" }
+  /**
+   * A cancel stopped the restore before step 8, or a quit closed its error view. `by` says who
+   * canceled it.
+   */
+  | { readonly status: "canceled"; readonly by: OpenCancelReason }
+  /** Another dialog of the window was open at step 2, as for an open. */
+  | { readonly status: "blocked" }
+  /** The save prompt of step 2 stopped the restore, as for an open. */
+  | { readonly status: "stopped"; readonly saveError: ProjectSaveError | null }
+  /** The restore failed, and the user closed the dialog that showed the error. */
+  | { readonly status: "failed"; readonly error: OpenProjectError };
+
+/** The offer that a restore reads: its `<id>` and its `projectPath` from the list. */
+export type RestoreOffer = Pick<RecoveryOfferSummary, "id" | "projectPath">;
+
+/** The functions of the recovery that one restore calls. */
+export interface RestoreHooks {
+  /**
+   * Reads the offer `id` with `read_recovery` and the token of the session (step 4). The recovery
+   * controller sends it in its line.
+   */
+  readonly readRecovery: (id: string) => Promise<RecoveryReadResult>;
+  /**
+   * Called in step 8, in the same call, after the session changed, with the `<id>` of the offer.
+   * The recovery controller puts `finish_restore` in its line there. Never called before step 8.
+   */
+  readonly onRestored: (id: string) => void;
+}
 
 /** The dependencies of the open step. */
 export interface ProjectOpenDependencies {
@@ -238,6 +307,16 @@ export interface ProjectOpenStep {
   /** Opens the project file at `path` (steps 1 to 8). */
   readonly open: (path: string) => Promise<OpenProjectResult>;
   /**
+   * Restores `offer` (ADR 073, "The restore"): the steps of an open, with the read of the offer
+   * through `hooks.readRecovery` in step 4. Step 8 leaves the project with no file and with the
+   * `projectPath` of the offer that the read gave as its proposed path, and then calls
+   * `hooks.onRestored` with the `<id>` of the offer.
+   */
+  readonly restore: (
+    offer: RestoreOffer,
+    hooks: RestoreHooks,
+  ) => Promise<RestoreProjectResult>;
+  /**
    * "Locate…" of a row: shows the file dialog, and checks the chosen file (`locateFile`). It holds
    * the locate operation from before the dialog until the end of the checks, so another `locate`,
    * `locateFile` or `confirm` does nothing and answers false meanwhile. A dialog that the user
@@ -261,8 +340,11 @@ export interface ProjectOpenStep {
   /**
    * Cancel of the dialog, and close of the error view. It stops the open step that runs and each
    * request that waits for its turn, before step 8. The quit calls it before it tests the project.
+   * `reason` is `user` when absent. A restore that a cancel stopped answers it in its result; an
+   * open does not. In the error view of a restore, `quit` gives `canceled` by a quit, and `user`
+   * gives `failed`.
    */
-  readonly cancel: () => void;
+  readonly cancel: (reason?: OpenCancelReason) => void;
   /** True while an open step runs before step 8, or a request waits for its turn. */
   readonly isOpening: () => boolean;
 }
@@ -417,9 +499,53 @@ type Action =
   | { readonly kind: "cancel" }
   | { readonly kind: "failed"; readonly error: OpenProjectError };
 
+/** What a step opens: a project file, or the offer of a restore. */
+type OpenSource =
+  | { readonly kind: "file"; readonly path: string }
+  | {
+      readonly kind: "restore";
+      readonly offer: RestoreOffer;
+      readonly hooks: RestoreHooks;
+    };
+
+/** The document of step 4 and the candidate paths of each of its sources. */
+interface ReadDocument {
+  readonly project: Project;
+  readonly candidates: readonly (readonly string[])[];
+}
+
+/** The result of step 4: the document, or the error that the dialog shows. */
+type ReadOutcome =
+  | {
+      readonly ok: true;
+      readonly document: ReadDocument;
+      /** The canonical path of the project file, or the `projectPath` of the offer. */
+      readonly path: string | null;
+    }
+  | { readonly ok: false; readonly error: OpenProjectError };
+
+/** How one step ended. `open` and `restore` give the result of their entry from it. */
+type StepOutcome =
+  /**
+   * Step 8 changed the session. `path` is the canonical path of the project file of an open, and
+   * null for a restore.
+   */
+  | { readonly status: "changed"; readonly path: string | null }
+  | { readonly status: "canceled"; readonly by: OpenCancelReason }
+  | { readonly status: "blocked" }
+  | { readonly status: "stopped"; readonly saveError: ProjectSaveError | null }
+  /** `closedBy` says who closed the error view: a cancel of the user, or of a quit. */
+  | {
+      readonly status: "failed";
+      readonly error: OpenProjectError;
+      readonly closedBy: OpenCancelReason;
+    };
+
 /** One open step from its turn to its end. */
 interface Session {
   canceled: boolean;
+  /** Who canceled the step, or null while it was not canceled. */
+  cancelReason: OpenCancelReason | null;
   busy: boolean;
   rows: Row[];
   /** Settles the wait of the main flow, or null while it does not wait. */
@@ -432,7 +558,12 @@ interface Session {
 
 /** An open request that waits for its turn in the line. */
 interface WaitingRequest {
-  readonly cancel: () => void;
+  readonly cancel: (by: OpenCancelReason) => void;
+}
+
+/** The canceled outcome of `current`, with the reason of its cancel. */
+function canceledOf(current: Session): StepOutcome {
+  return { status: "canceled", by: current.cancelReason ?? "user" };
 }
 
 /** Creates an open step over the commands and the stores of `dependencies`. */
@@ -571,13 +702,14 @@ export function createProjectOpenStep(
   const fail = async (
     current: Session,
     error: OpenProjectError,
-  ): Promise<OpenProjectResult> => {
+  ): Promise<StepOutcome> => {
     if (!alive(current)) {
-      return { status: "canceled" };
+      return canceledOf(current);
     }
     store.setState({ phase: { kind: "failed", error } });
     await waitForAction(current);
-    return { status: "failed", error };
+    // `cancel` notes its reason before it closes the error view.
+    return { status: "failed", error, closedBy: current.cancelReason ?? "user" };
   };
 
   /** Step 7, first part: each file is its revision again. False when one is not. */
@@ -627,7 +759,7 @@ export function createProjectOpenStep(
   };
 
   /** The sequence that step 8 makes, with new identifiers. */
-  const buildSession = (current: Session, loaded: LoadProjectResult) => {
+  const buildSession = (current: Session, loaded: ReadDocument) => {
     const byEntry = new Map(current.rows.map((row) => [row.entry.id, row]));
     const sourceOf = (entryId: string): string =>
       byEntry.get(entryId)?.found?.sourceId ?? "";
@@ -680,12 +812,64 @@ export function createProjectOpenStep(
     };
   };
 
+  /**
+   * Step 4 before the tests of the document: `load_project` for a project file, and the read of
+   * the offer for a restore (ADR 073). Neither function rejects.
+   */
+  const readDocument = async (source: OpenSource): Promise<ReadOutcome> => {
+    if (source.kind === "file") {
+      try {
+        const loaded = await loadProject(source.path);
+        return {
+          ok: true,
+          document: { project: loaded.project, candidates: loaded.candidates },
+          path: loaded.path,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: { kind: "loadFailed", error: normalizeProjectCommandError(error) },
+        };
+      }
+    }
+    let read: RecoveryReadResult;
+    try {
+      read = await source.hooks.readRecovery(source.offer.id);
+    } catch (error) {
+      read = {
+        owner: false,
+        status: "failed",
+        error: normalizeRecoveryCommandError(error),
+      };
+    }
+    if (read.status === "done" && read.offer !== undefined) {
+      return {
+        ok: true,
+        document: { project: read.offer.project, candidates: read.offer.candidates },
+        path: read.offer.projectPath,
+      };
+    }
+    // A `done` with no offer does not pass the validation of the client. It counts as a failure.
+    const status = read.status === "done" ? "failed" : read.status;
+    return {
+      ok: false,
+      error: {
+        kind: "recoveryReadFailed",
+        status,
+        error:
+          status === "failed"
+            ? (read.error ?? normalizeRecoveryCommandError(null))
+            : null,
+      },
+    };
+  };
+
   /** Steps 2 to 8 of one session. */
-  const steps = async (current: Session, path: string): Promise<OpenProjectResult> => {
+  const steps = async (current: Session, source: OpenSource): Promise<StepOutcome> => {
     // Step 2.
     await dependencies.saveStep.whenIdle();
     if (!alive(current)) {
-      return { status: "canceled" };
+      return canceledOf(current);
     }
     if (dependencies.isOtherDialogOpen()) {
       return { status: "blocked" };
@@ -707,7 +891,7 @@ export function createProjectOpenStep(
       isCanceled: () => !alive(current),
     });
     if (!alive(current)) {
-      return { status: "canceled" };
+      return canceledOf(current);
     }
     if (question.kind === "stop") {
       return { status: "stopped", saveError: question.saveError };
@@ -727,19 +911,19 @@ export function createProjectOpenStep(
     // makes a waiting open step of the export stale again, directly before the project dialog
     // shows, in each path: with no prompt, after Don't Save, and after a save.
     dependencies.staleExportOpenStep();
-    store.setState({ phase: { kind: "loading" }, projectPath: path });
-    let loaded: LoadProjectResult;
-    try {
-      loaded = await loadProject(path);
-    } catch (error) {
-      return fail(current, {
-        kind: "loadFailed",
-        error: normalizeProjectCommandError(error),
-      });
+    store.setState({
+      phase: { kind: "loading" },
+      projectPath: source.kind === "file" ? source.path : source.offer.projectPath,
+      mode: source.kind === "file" ? "open" : "restore",
+    });
+    const read = await readDocument(source);
+    if (!read.ok) {
+      return fail(current, read.error);
     }
     if (!alive(current)) {
-      return { status: "canceled" };
+      return canceledOf(current);
     }
+    const loaded = read.document;
     const document = checkProjectDocument(loaded.project);
     if (!document.ok) {
       return fail(current, { kind: "documentRefused", problem: document.problem });
@@ -774,7 +958,7 @@ export function createProjectOpenStep(
       for (const candidate of row.candidates) {
         const result = await checkCandidate(row.entry, candidate);
         if (!alive(current)) {
-          return { status: "canceled" };
+          return canceledOf(current);
         }
         if ("media" in result) {
           const differ = recordFound(current, row, result, false);
@@ -804,12 +988,12 @@ export function createProjectOpenStep(
           return fail(current, action.error);
         }
         if (action.kind === "cancel" || !alive(current)) {
-          return { status: "canceled" };
+          return canceledOf(current);
         }
       }
       const verified = await verifyRevisions(current);
       if (!alive(current)) {
-        return { status: "canceled" };
+        return canceledOf(current);
       }
       if (!verified) {
         needsConfirm = true;
@@ -833,11 +1017,18 @@ export function createProjectOpenStep(
       media.getState().replaceSources(next.mediaSources, next.firstMedia);
       timeline.getState().loadSequence(next.clips, next.sources, next.segments);
       audioOverrides.getState().replaceOverrides(next.overrides);
+      if (source.kind === "restore") {
+        // ADR 073: the restored project has no file, and keeps the path of the offer as its
+        // proposed path. The recovery puts `finish_restore` in its line in this same call.
+        project.getState().completeRestore({ proposedPath: read.path });
+        store.setState(IDLE);
+        source.hooks.onRestored(source.offer.id);
+        return { status: "changed", path: null };
+      }
+      // `load_project` always gives the canonical path of the file.
+      const path = read.path ?? source.path;
       project.getState().completeOpen({
-        file:
-          next.clips.length === 0
-            ? null
-            : { path: loaded.path, name: fileNameOfPath(loaded.path) },
+        file: next.clips.length === 0 ? null : { path, name: fileNameOfPath(path) },
         savedContent: projectContentOf(
           timeline.getState(),
           audioOverrides.getState().overrides,
@@ -845,7 +1036,7 @@ export function createProjectOpenStep(
         located: next.located,
       });
       store.setState(IDLE);
-      return { status: "opened", path: loaded.path };
+      return { status: "changed", path };
     }
   };
 
@@ -948,49 +1139,84 @@ export function createProjectOpenStep(
     );
   };
 
+  /** One request of an open or of a restore, from its turn in the line to its end (step 1). */
+  const run = (source: OpenSource): Promise<StepOutcome> => {
+    const requested = epoch;
+    // A request that waits for its turn ends at once at a cancel, also while the line is held.
+    let endWaiting: (result: StepOutcome) => void = () => undefined;
+    const canceledWhileWaiting = new Promise<StepOutcome>((resolve) => {
+      endWaiting = resolve;
+    });
+    const request: WaitingRequest = {
+      cancel: (by) => endWaiting({ status: "canceled", by }),
+    };
+    waiting.add(request);
+    const turn = runTurn(async (): Promise<StepOutcome> => {
+      if (!waiting.delete(request) || epoch !== requested) {
+        // A cancel ended the request already: `canceledWhileWaiting` gave its result.
+        return { status: "canceled", by: "user" };
+      }
+      const current: Session = {
+        canceled: false,
+        cancelReason: null,
+        busy: false,
+        rows: [],
+        settle: null,
+        queued: null,
+        stop: null,
+      };
+      // A cancel ends the turn at once, also while a command does not answer. The answer that
+      // comes later changes nothing, because the session is not alive then.
+      const stopped = new Promise<StepOutcome>((resolve) => {
+        current.stop = () => resolve(canceledOf(current));
+      });
+      session = current;
+      const running = steps(current, source);
+      running.catch(() => undefined);
+      try {
+        return await Promise.race([running, stopped]);
+      } finally {
+        if (session === current) {
+          session = null;
+          store.setState(IDLE);
+        }
+      }
+    });
+    return Promise.race([turn, canceledWhileWaiting]);
+  };
+
   return {
     store,
-    open: (path) => {
-      const requested = epoch;
-      // A request that waits for its turn ends at once at a cancel, also while the line is held.
-      let endWaiting: (result: OpenProjectResult) => void = () => undefined;
-      const canceledWhileWaiting = new Promise<OpenProjectResult>((resolve) => {
-        endWaiting = resolve;
-      });
-      const request: WaitingRequest = {
-        cancel: () => endWaiting({ status: "canceled" }),
-      };
-      waiting.add(request);
-      const turn = runTurn(async (): Promise<OpenProjectResult> => {
-        if (!waiting.delete(request) || epoch !== requested) {
+    open: async (path) => {
+      const outcome = await run({ kind: "file", path });
+      switch (outcome.status) {
+        case "changed":
+          return { status: "opened", path: outcome.path ?? path };
+        case "canceled":
+          // An open does not say who canceled it.
           return { status: "canceled" };
-        }
-        const current: Session = {
-          canceled: false,
-          busy: false,
-          rows: [],
-          settle: null,
-          queued: null,
-          stop: null,
-        };
-        // A cancel ends the turn at once, also while a command does not answer. The answer that
-        // comes later changes nothing, because the session is not alive then.
-        const stopped = new Promise<OpenProjectResult>((resolve) => {
-          current.stop = () => resolve({ status: "canceled" });
-        });
-        session = current;
-        const running = steps(current, path);
-        running.catch(() => undefined);
-        try {
-          return await Promise.race([running, stopped]);
-        } finally {
-          if (session === current) {
-            session = null;
-            store.setState(IDLE);
-          }
-        }
-      });
-      return Promise.race([turn, canceledWhileWaiting]);
+        case "failed":
+          // An open answers its error, whoever closed the error view.
+          return { status: "failed", error: outcome.error };
+        default:
+          return outcome;
+      }
+    },
+    restore: async (offer, hooks) => {
+      const outcome = await run({ kind: "restore", offer, hooks });
+      switch (outcome.status) {
+        case "changed":
+          return { status: "restored" };
+        case "failed":
+          // A quit that closes the error view stops the restore (ADR 073): the caller then does
+          // not offer the work again in this life of the page. A close by the user is the end
+          // of a restore that failed.
+          return outcome.closedBy === "quit"
+            ? { status: "canceled", by: "quit" }
+            : { status: "failed", error: outcome.error };
+        default:
+          return outcome;
+      }
     },
     locate: async (entryId) => {
       // The operation is held from before the file dialog until the end of the checks.
@@ -1022,16 +1248,17 @@ export function createProjectOpenStep(
       signal(current, { kind: "confirm" });
       return true;
     },
-    cancel: () => {
+    cancel: (reason = "user") => {
       epoch += 1;
       for (const request of waiting) {
-        request.cancel();
+        request.cancel(reason);
       }
       waiting.clear();
       const current = session;
       if (current !== null) {
         const showsError = store.getState().phase.kind === "failed";
         current.canceled = true;
+        current.cancelReason = reason;
         session = null;
         signal(current, { kind: "cancel" });
         // The close of the error view ends the step with its error; no command waits then.

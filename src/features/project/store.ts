@@ -13,8 +13,14 @@
  *   timeline store that leaves the sequence with no clip closes the project
  *   (`installProjectSequenceRule`).
  * - The identity changes each time the sequence goes from one or more clips to no clip, and each
- *   time an open changes the session. A step that waits for a file or a dialog notes the identity
- *   when it starts, and it changes the project afterward only when the identity is still the same.
+ *   time an open or a restore changes the session. A step that waits for a file or a dialog notes
+ *   the identity when it starts, and it changes the project afterward only when the identity is
+ *   still the same.
+ * - A project with no file can have a proposed path: the path of the project file of the work
+ *   that a restore gave back (ADR 073, "The restore"). Save and Save As propose its name and its
+ *   directory. It is not content, so it does not make the project modified. It goes when the
+ *   project closes, when a save gives the project a file, and when an open or a restore changes
+ *   the session.
  */
 
 import { useStore } from "zustand";
@@ -44,6 +50,11 @@ export type ProjectState = {
    * project is modified while it is set.
    */
   readonly located: boolean;
+  /**
+   * The proposed path of a project with no file, or null (ADR 073, "The restore"). Only a restore
+   * sets it. It is null while the project has a file, and while the sequence has no clip.
+   */
+  readonly proposedPath: string | null;
 };
 
 /** What a save step reports when its write succeeded (ADR 072, Save step 4). */
@@ -66,26 +77,40 @@ export type ProjectOpenCompletion = {
   readonly located: boolean;
 };
 
+/** What the restore reports in its step 8 (ADR 073, "The restore"). */
+export type ProjectRestoreCompletion = {
+  /** The `projectPath` of the offer: the proposed path of the project, or null. */
+  readonly proposedPath: string | null;
+};
+
 /** Actions of the project store. */
 export type ProjectActions = {
   /**
    * Binds the file of a save whose write succeeded (ADR 072, Save step 4). When `identity` is
    * still the identity of the project and the sequence has a clip, the project gets `file` and
-   * `savedContent`, the located mark goes, and the call returns true. Otherwise the project does
+   * `savedContent`, the located mark and the proposed path go, and the call returns true.
+   * Otherwise the project does
    * not change, and the call returns false: the sequence was empty in the meantime, or an open
    * changed the session.
    */
   completeSave: (completion: ProjectSaveCompletion) => boolean;
   /**
    * Sets the project after the open step changed the session (ADR 072, open step 8). The open step
-   * calls it after `loadSequence` of the timeline store. The identity changes. While the sequence
-   * has no clip, the project gets no file, the empty content and no located mark, whatever the
-   * completion holds.
+   * calls it after `loadSequence` of the timeline store. The identity changes, and the proposed
+   * path goes. While the sequence has no clip, the project gets no file, the empty content and no
+   * located mark, whatever the completion holds.
    */
   completeOpen: (completion: ProjectOpenCompletion) => void;
   /**
-   * Closes the project: no file, the empty content, and no located mark. With `changeIdentity`,
-   * the identity changes too. `installProjectSequenceRule` calls it.
+   * Sets the project after a restore changed the session (ADR 073, "The restore", step 8). The
+   * restore calls it after `loadSequence` of the timeline store. The project gets no file, the
+   * empty content, no located mark and a new identity. It keeps the proposed path of the
+   * completion while the sequence has a clip, and no proposed path otherwise.
+   */
+  completeRestore: (completion: ProjectRestoreCompletion) => void;
+  /**
+   * Closes the project: no file, the empty content, no located mark and no proposed path. With
+   * `changeIdentity`, the identity changes too. `installProjectSequenceRule` calls it.
    */
   closeProject: (changeIdentity: boolean) => void;
 };
@@ -110,6 +135,7 @@ export function createProjectStore(
     savedContent: EMPTY_PROJECT_CONTENT,
     identity: 0,
     located: false,
+    proposedPath: null,
 
     completeSave: (completion) => {
       if (completion.identity !== get().identity || !sequenceHasClips()) {
@@ -119,6 +145,7 @@ export function createProjectStore(
         file: { path: completion.file.path, name: completion.file.name },
         savedContent: completion.savedContent,
         located: false,
+        proposedPath: null,
       });
       return true;
     },
@@ -130,6 +157,7 @@ export function createProjectStore(
           file: null,
           savedContent: EMPTY_PROJECT_CONTENT,
           located: false,
+          proposedPath: null,
           identity,
         });
         return;
@@ -138,7 +166,19 @@ export function createProjectStore(
         file: { path: completion.file.path, name: completion.file.name },
         savedContent: completion.savedContent,
         located: completion.located,
+        proposedPath: null,
         identity,
+      });
+    },
+
+    completeRestore: (completion) => {
+      set({
+        file: null,
+        savedContent: EMPTY_PROJECT_CONTENT,
+        located: false,
+        // A restore whose document has no clip leaves an empty sequence, which keeps no path.
+        proposedPath: sequenceHasClips() ? completion.proposedPath : null,
+        identity: get().identity + 1,
       });
     },
 
@@ -147,7 +187,8 @@ export function createProjectStore(
       const closed =
         state.file === null &&
         state.savedContent === EMPTY_PROJECT_CONTENT &&
-        !state.located;
+        !state.located &&
+        state.proposedPath === null;
       if (closed && !changeIdentity) {
         return;
       }
@@ -155,6 +196,7 @@ export function createProjectStore(
         file: null,
         savedContent: EMPTY_PROJECT_CONTENT,
         located: false,
+        proposedPath: null,
         identity: changeIdentity ? state.identity + 1 : state.identity,
       });
     },

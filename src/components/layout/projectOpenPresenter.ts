@@ -208,6 +208,13 @@ export function presentOpenError(error: OpenProjectError): {
       };
     case "entriesDiffer":
       return { message: { key: "projectOpen.error.entriesDiffer" }, detail: null };
+    case "recoveryReadFailed":
+      // The read of the offer of a restore (ADR 073). Nothing starts a restore yet, and the
+      // catalogs have no message of its own for it, so it uses the message of an unknown error.
+      return {
+        message: { key: "projectOpen.error.load.unknown" },
+        detail: nonBlank(error.error?.detail),
+      };
   }
 }
 
