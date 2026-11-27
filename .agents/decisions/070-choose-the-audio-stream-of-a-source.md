@@ -4,6 +4,7 @@
 - Date: 2026-11-26
 - Deciders: capric98
 - Amends: ADR 010, ADR 019, ADR 024, ADR 046, ADR 056, ADR 061, ADR 062
+- Amended by: ADR 072
 
 ## Context
 
@@ -141,6 +142,10 @@ For a native source with two or more audio streams, the submenu therefore shows 
 playback of the preview can use a different audio track from the one that the export uses. The
 note shows for each effective stream, also the preferred one. The step cue plays the effective
 stream only where the PCM cue is active.
+
+(Changed on 2026-11-26.) A save writes the override of a source as `audioStreamIndex`, and an
+open reads it (ADR 072). An open refuses a file that has no audio stream with that index that
+the user can choose.
 
 ## Consequences
 

@@ -4,7 +4,7 @@
 - Date: 2026-10-02
 - Deciders: capric98
 - Amends: ADR 006, ADR 011, ADR 013, ADR 020, ADR 021, ADR 024, ADR 026, ADR 027, ADR 031, ADR 032
-- Amended by: ADR 041, ADR 047, ADR 056, ADR 059
+- Amended by: ADR 041, ADR 047, ADR 056, ADR 059, ADR 072
 
 ## Context
 
@@ -151,6 +151,9 @@ The export dialog stays open when Settings opens from it. Its list of presets fo
 `settings:changed`. The return to the setup step of ADR 024 is removed. A preset that the user
 selects in Settings no longer becomes the choice of the setup step, and a visit to Settings no
 longer runs the source check again.
+
+(Changed on 2026-11-26.) The main window may call `load_project` and `save_project`, and only
+the main window may call them (ADR 072).
 
 ## Consequences
 

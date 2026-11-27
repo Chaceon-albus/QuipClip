@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-21
 - Deciders: capric98
-- Amended by: ADR 038, ADR 049
+- Amended by: ADR 038, ADR 049, ADR 072
 
 ## Context
 
@@ -111,6 +111,11 @@ declared by hand, as ADR 018 does for its calls, so no dependency is added.
   has the colour of the system.
 - Windows 10 has no attribute for the colour of the border. Its border does not change.
 - The links to `dwmapi` and `ntdll` are not checked on macOS. A build on Windows checks them.
+
+(Changed on 2026-11-26.) When the project has a file, the centre of the title bar shows the
+name of the project file in front of the name of the video, with a dot for a modified project
+(ADR 072). The File menu gets "Save" and "Save As…" after its Open item, and that item has the
+label "Open…".
 
 ## Consequences
 

@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amended by: ADR 038, ADR 036, ADR 048, ADR 049, ADR 052, ADR 053, ADR 058, ADR 061, ADR 067,
-  ADR 070
+  ADR 070, ADR 072
 
 ## Context
 
@@ -170,6 +170,11 @@ of the scope. For a list, the step shows one more line with the number of the se
 segments. When a list gives exactly one segment, the save dialog proposes a name with the
 number of that segment, and with its name when it has one. The scope goes with each step of
 the flow: the open step, the confirm step and Back (ADR 067).
+
+(Changed on 2026-11-26.) The open of a project makes an open step of the export that waits
+stale: that step then opens no dialog and reports nothing (ADR 072). `read_source_revision`
+gets an optional expected revision. With it, the command compares the file with that revision
+as the check of a source does, with no probe.
 
 ## Consequences
 

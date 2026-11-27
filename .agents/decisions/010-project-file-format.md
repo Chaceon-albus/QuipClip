@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 052, ADR 058, ADR 065, ADR 070
+- Amended by: ADR 052, ADR 058, ADR 065, ADR 070, ADR 072
 
 ## Context
 
@@ -123,6 +123,14 @@ belongs to the application, because no project document exists to hold one.
 (Changed on 2026-11-26.) The persisted source gets the optional field `audioStreamIndex`: the
 absolute index of the audio stream that the user chose for the source (ADR 070). A document
 without the field has no such choice. Version 1 still writes no project file.
+
+(Changed on 2026-11-26.) QuipClip writes and reads the project file (ADR 072). The statement
+of this record that version 1 writes no project file no longer holds, and the two commands
+have callers. Before the first write, the document changes: `renderSettings` goes, `relPath`
+is optional and the backend writes it at each save, and a source can have the fingerprint of
+an FLV. Each `id` of a document is a name inside the document only. An open needs the file of
+each source that a clip names, as the revision that the project saved. It keeps no segment of
+a source that is absent: the user locates the file, or the open stops.
 
 ## Consequences
 

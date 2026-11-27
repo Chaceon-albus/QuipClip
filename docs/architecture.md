@@ -93,6 +93,7 @@ document summarizes them and shows how the parts fit together.
 | [`069-export-one-frame-as-an-image.md`](../.agents/decisions/069-export-one-frame-as-an-image.md)                                                                       | Export Frame saves the frame that Mark In would mark as a PNG file                 |
 | [`070-choose-the-audio-stream-of-a-source.md`](../.agents/decisions/070-choose-the-audio-stream-of-a-source.md)                                                         | The user can choose which audio stream of a source QuipClip reads                  |
 | [`071-release-no-msi-package-for-windows.md`](../.agents/decisions/071-release-no-msi-package-for-windows.md)                                                           | The Windows build makes only the NSIS installer, and no MSI package                |
+| [`072-save-a-project-and-open-it-again.md`](../.agents/decisions/072-save-a-project-and-open-it-again.md)                                                               | The user saves a project file, and one Open action opens it and checks each source |
 
 ## Shape
 
@@ -777,6 +778,13 @@ and browser state do not enter the file.
 Version 1 writes no project file. The user imports the sources in each session, so the
 segments last for one session, and the export presets live in the settings file instead. Rust
 keeps `load_project` and `save_project` registered, and nothing calls them.
+
+ADR 072 changes this, and its code is not in yet. A save is an action of the user, with Save
+on `Cmd+S` or `Ctrl+S` and Save As…. One Open action takes videos and project files. The open
+of a project imports each source again and compares it with the revision that the project
+saved. An FLV that grew opens as the part that the project saved. For each other file that
+changed or is absent, the user locates the file, or the open stops. A project has a file only
+while the sequence has a clip, and QuipClip asks before it drops changes that are not saved.
 
 The unreleased schema remains version 1 after this direct replacement. Old frame-grid
 version 1 files fail normal structural validation. QuipClip has no migration or legacy

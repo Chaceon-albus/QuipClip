@@ -4,6 +4,7 @@
 - Date: 2026-11-09
 - Deciders: capric98
 - Amends: ADR 010, ADR 024, ADR 046, ADR 056
+- Amended by: ADR 072
 
 ## Context
 
@@ -117,6 +118,13 @@ the confirmation.
 - The identity of a source (ADR 010) does not change. A grown file that the user opens again is
   a new revision and a new source.
 - "Export anyway" sends no revision. The export then reads the file as it is at the preparation.
+
+(Changed on 2026-11-26.) The project file holds the fingerprint of an FLV (ADR 072).
+`import_media` and `read_source_revision` get an optional expected revision, and the answer of
+`import_media` gets the fingerprint that the import kept. With an expected revision, the
+command reads the fingerprint of the first `size` bytes again and compares it. So an FLV that
+grew after a save opens in a new session as the revision that the project saved. The session
+takes the end of the video of such a source from the project file.
 
 ## Rejected alternatives
 

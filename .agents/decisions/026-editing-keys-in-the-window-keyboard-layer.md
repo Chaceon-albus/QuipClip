@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 021
 - Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066, ADR 067,
-  ADR 069
+  ADR 069, ADR 072
 
 ## Context
 
@@ -312,6 +312,11 @@ until the popup closes.
 The table is the only source of the key names in the interface. A tooltip that names a key
 reads it from the table, and formats it for the platform: `⇧⌘Z` on macOS (the Apple order: ⌃ ⌥ ⇧ ⌘, then the key), `Ctrl+Shift+Z` on
 Windows.
+
+(Changed on 2026-11-26.) The key table gains Save on `primary` with `S`, and Save As with no
+binding (ADR 072). The Open action takes videos and project files, and its menu items have the
+label "Open…". Undo and Redo are available while the sequence has no clip, when the history
+has an entry for them.
 
 ## Consequences
 

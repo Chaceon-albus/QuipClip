@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 017
-- Amended by: ADR 038, ADR 049, ADR 052
+- Amended by: ADR 038, ADR 049, ADR 052, ADR 072
 
 ## Context
 
@@ -95,6 +95,14 @@ ADR 017 still cancels a running export on exit and waits at most 5 seconds. The 
 "It does not refuse the quit" no longer holds: a quit that would lose work is refused once,
 until the user confirms it. The handler also calls `prevent_exit` now, which ADR 017 did
 not.
+
+(Changed on 2026-11-26.) QuipClip can save a project (ADR 072). The test for one or more
+segments becomes the test for changes to save: a project with a file that is modified, or a
+project with no file and one or more segments. With such changes, the quit dialog is the save
+prompt, with Save, Don't Save and Cancel, and it lists each other loss of this record. When
+the user confirms a quit dialog, the quit reads the losses again, and the dialog shows again
+for a loss that it did not list. A request to quit stops an open of a project that has not
+changed the session yet.
 
 ## Consequences
 

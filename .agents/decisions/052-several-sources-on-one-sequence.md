@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 007, ADR 010, ADR 022, ADR 024, ADR 026, ADR 027, ADR 028,
   ADR 030, ADR 037, ADR 045, ADR 048
-- Amended by: ADR 056, ADR 063
+- Amended by: ADR 056, ADR 063, ADR 072
 
 ## Context
 
@@ -352,6 +352,12 @@ them larger.
 - **A preview with no pause.** A second media element can load the next clip in advance. This
   needs a preview lane for each source in Rust (ADR 046) and a calibration for an element that
   is hidden.
+
+(Changed on 2026-11-26.) A project has a file only while the sequence has a clip (ADR 072).
+Clear Timeline thus closes the project, and it shows the save prompt for a modified project
+with a file. All the files of one file dialog are one request in the line of the imports. An
+import of a revision that the session has as a source does not change the facts of that
+source. The open of a project gives each clip and each segment a new identifier.
 
 ## Consequences
 
