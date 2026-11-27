@@ -286,6 +286,13 @@ fn map_project_error(error: ProjectFileError, operation: IoOperation) -> Project
     }
 }
 
+/// The error of a project document that is not valid, with the codes and the facts of the
+/// project commands. The recovery commands report a refused or broken document with it
+/// (ADR 073).
+pub(crate) fn map_document_error(error: ProjectFileError) -> ProjectCommandError {
+    map_project_error(error, IoOperation::Read)
+}
+
 fn map_schema_version(
     code: ProjectCommandErrorCode,
     found: u64,

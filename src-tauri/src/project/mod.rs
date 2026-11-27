@@ -674,16 +674,46 @@ fn load_within(path: &Path, limit: u64) -> Result<ProjectFile, ProjectFileError>
     if bytes.len() as u64 > limit {
         return Err(ProjectFileError::TooLarge { limit });
     }
-    let envelope: SchemaEnvelope = serde_json::from_slice(&bytes)?;
+    check_schema_envelope(serde_json::from_slice(&bytes)?)?;
+    let project: ProjectFile = serde_json::from_slice(&bytes)?;
+    validate_project(&project)?;
+    Ok(project)
+}
+
+/// Refuses a schema version that is newer than this build reads, before the document is read
+/// with the fields of this build.
+fn check_schema_envelope(envelope: SchemaEnvelope) -> Result<(), ProjectFileError> {
     if envelope.schema_version > u64::from(CURRENT_SCHEMA_VERSION) {
         return Err(ProjectFileError::FutureSchemaVersion {
             found: envelope.schema_version,
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-    let project: ProjectFile = serde_json::from_slice(&bytes)?;
-    validate_project(&project)?;
-    Ok(project)
+    Ok(())
+}
+
+/// Reads a document from a JSON value with the steps of [`load`] before the validation: the
+/// schema version first, and then the fields. The caller validates the result with
+/// [`validate_project`]. The recovery file holds its document as such a value (ADR 073).
+pub(crate) fn document_from_value(
+    value: serde_json::Value,
+) -> Result<ProjectFile, ProjectFileError> {
+    check_schema_envelope(SchemaEnvelope::deserialize(&value)?)?;
+    Ok(ProjectFile::deserialize(value)?)
+}
+
+/// The bytes that a save writes for the document `written`: readable JSON with one final
+/// newline. A result of more than `limit` bytes is refused. This is the measure of a save, which
+/// the recovery file also applies to its document (ADR 073).
+pub(crate) fn serialize_for_save(
+    written: &ProjectFile,
+    limit: u64,
+) -> Result<Vec<u8>, ProjectFileError> {
+    let json = crate::fsutil::to_pretty_json_line(written)?;
+    if json.len() as u64 > limit {
+        return Err(ProjectFileError::TooLarge { limit });
+    }
+    Ok(json)
 }
 
 /// Save a project as readable UTF-8 JSON and atomically replace the destination.
@@ -700,7 +730,7 @@ pub fn save(
 }
 
 /// [`save`] with the limit `limit`, so a test can use a small one.
-fn save_within(
+pub(crate) fn save_within(
     path: &Path,
     project: &ProjectFile,
     limit: u64,
@@ -715,15 +745,14 @@ fn save_within(
         source.rel_path = relative_path(&directory, Path::new(&source.path));
     }
     validate_project(&written)?;
-    let json = crate::fsutil::to_pretty_json_line(&written)?;
-    if json.len() as u64 > limit {
-        return Err(ProjectFileError::TooLarge { limit });
-    }
+    let json = serialize_for_save(&written, limit)?;
     crate::fsutil::write_bytes_atomically(path, &json)?;
     Ok(written)
 }
 
-fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError> {
+/// Checks the rules of a project document (ADR 010, ADR 052, ADR 072). [`load`] and [`save`]
+/// apply them, and so does the recovery file (ADR 073).
+pub(crate) fn validate_project(project: &ProjectFile) -> Result<(), ProjectValidationError> {
     if project.schema_version != CURRENT_SCHEMA_VERSION {
         return Err(ProjectValidationError::SchemaVersion {
             found: project.schema_version,

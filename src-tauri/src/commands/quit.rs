@@ -77,8 +77,15 @@ pub fn should_prevent_exit(confirmed: bool, main_window_open: bool) -> bool {
 /// exit request for the event loop and returns, so the promise of the caller can resolve
 /// before the application ends. The exit then raises `RunEvent::ExitRequested`, and the
 /// handler in `lib.rs` cancels a running export and waits its bounded time (ADR 017).
+///
+/// `token` is the token of the recovery session of the page (ADR 073). With the token of the
+/// session, the recovery of the session ends first, and `current.json` of the session goes. That
+/// step returns within `recovery::END_BUDGET`, also when the file stays, so it holds the main
+/// thread for one second at most. With no token or another token, it removes nothing, and the
+/// quit is as before.
 #[tauri::command]
-pub fn confirm_quit(app: AppHandle, gate: State<'_, QuitGate>) {
+pub fn confirm_quit(app: AppHandle, gate: State<'_, QuitGate>, token: Option<String>) {
+    super::recovery::end_recovery(&app, token.as_deref());
     // The bit is set before the exit request, so the `ExitRequested` that the request raises
     // on the event loop thread always reads it as set.
     gate.confirm();

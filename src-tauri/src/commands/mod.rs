@@ -17,6 +17,7 @@ pub mod preset_test;
 pub mod preview;
 pub mod project;
 pub mod quit;
+pub mod recovery;
 pub mod settings;
 pub mod settings_window;
 pub mod waveform;

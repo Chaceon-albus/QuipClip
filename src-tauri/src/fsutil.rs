@@ -64,6 +64,21 @@ pub fn to_pretty_json_line<T: Serialize + ?Sized>(value: &T) -> serde_json::Resu
 /// (ADR 015), and a `path` that already exists keeps its permission bits across the replacement.
 /// [`replace_file_within`] holds both rules and the reasons for them.
 pub fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_bytes_atomically_unless(path, bytes, || false).map(|_| ())
+}
+
+/// [`write_bytes_atomically`] with one last test before the rename.
+///
+/// `stop` runs after the bytes are written and synced, directly before the rename that gives
+/// the file the name `path`. When it answers true, the temporary file is removed, `path` is
+/// untouched, and the result is `Ok(false)`. Otherwise the result is `Ok(true)` after the
+/// rename. The recovery file uses it: a quit that the user confirmed stops a write that has not
+/// reached its rename yet (ADR 073).
+pub fn write_bytes_atomically_unless(
+    path: &Path,
+    bytes: &[u8],
+    stop: impl FnOnce() -> bool,
+) -> io::Result<bool> {
     let (temporary_path, mut temporary_file) = create_temporary_file(path)?;
     let mut cleanup = TemporaryFileCleanup::new(temporary_path);
     let write_result = temporary_file
@@ -71,9 +86,13 @@ pub fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .and_then(|()| temporary_file.sync_all());
     drop(temporary_file);
     write_result?;
+    if stop() {
+        // The guard removes the temporary file.
+        return Ok(false);
+    }
     replace_file(cleanup.path(), path)?;
     cleanup.disarm();
-    Ok(())
+    Ok(true)
 }
 
 /// Create a fresh, exclusively-owned temporary file next to `path`.

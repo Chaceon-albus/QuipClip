@@ -8,6 +8,7 @@ pub mod fsutil;
 mod menu;
 pub mod procutil;
 pub mod project;
+pub mod recovery;
 pub mod settings;
 pub mod time;
 #[cfg(target_os = "macos")]
@@ -175,6 +176,13 @@ pub fn run() {
                 {
                     jobs.cancel_all(floor);
                 }
+                // The new page has a new recovery session, so each late command of the old page
+                // changes nothing (ADR 073). This only changes the token: it does not wait for a
+                // command that runs.
+                if let Some(recovery) = webview.app_handle().try_state::<Arc<recovery::Recovery>>()
+                {
+                    recovery.start_session();
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -220,6 +228,15 @@ pub fn run() {
         if let Ok(directory) = app.path().app_local_data_dir() {
             ffmpeg::locate::set_local_data_directory(directory);
         }
+        // The recovery of ADR 073, in the directory `recovery` of the data directory that holds
+        // the settings file (ADR 013). With no data directory, the process is never the owner.
+        // The commands and the page load share it, so the managed value is the `Arc`.
+        let recovery_directory = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|directory| directory.join("recovery"));
+        app.manage(Arc::new(recovery::Recovery::new(recovery_directory)));
         // The macOS configuration does not create the main window. This hook builds it with the
         // position of the window buttons that centres them on this macOS version (ADR 020). See
         // `traffic_lights`.
@@ -243,6 +260,13 @@ pub fn run() {
             commands::project::load_project,
             commands::project::save_project,
             commands::quit::confirm_quit,
+            commands::recovery::start_recovery,
+            commands::recovery::list_recovery_offers,
+            commands::recovery::write_recovery,
+            commands::recovery::clear_recovery,
+            commands::recovery::read_recovery,
+            commands::recovery::discard_recovery,
+            commands::recovery::finish_restore,
             commands::window_border::set_window_border_theme,
             commands::settings::load_settings,
             commands::settings::save_settings,
@@ -1132,6 +1156,15 @@ mod tests {
         "load_project",
         "save_project",
         "confirm_quit",
+        // The recovery after an exit that did not ask (ADR 073). No other window holds them.
+        // The clients are in `features/recovery/client.ts`.
+        "start_recovery",
+        "list_recovery_offers",
+        "write_recovery",
+        "clear_recovery",
+        "read_recovery",
+        "discard_recovery",
+        "finish_restore",
         "set_window_border_theme",
         "load_settings",
         "save_settings",
@@ -1216,8 +1249,19 @@ mod tests {
             assert!(!MAIN_WINDOW_COMMANDS.contains(command), "{command}");
             assert!(!SETTINGS_WINDOW_COMMANDS.contains(command), "{command}");
         }
-        // Only the main window reads and writes a project file (ADR 072).
-        for command in ["load_project", "save_project"] {
+        // Only the main window reads and writes a project file (ADR 072), and only the main
+        // window has the recovery (ADR 073).
+        for command in [
+            "load_project",
+            "save_project",
+            "start_recovery",
+            "list_recovery_offers",
+            "write_recovery",
+            "clear_recovery",
+            "read_recovery",
+            "discard_recovery",
+            "finish_restore",
+        ] {
             assert!(MAIN_WINDOW_COMMANDS.contains(&command), "{command}");
             assert!(!SETTINGS_WINDOW_COMMANDS.contains(&command), "{command}");
         }
