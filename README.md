@@ -23,6 +23,7 @@ QuipClip can do these things:
 - Change segments on the timeline. You can drag a segment edge, split a segment, and undo
   an edit.
 - Give a segment a name, and change the order in which the export joins the segments.
+- Export only the segments that you select.
 - Choose the audio track of a video file that has two or more. This does not apply to an FLV
   file.
 - Save one frame as a PNG image.
@@ -148,6 +149,16 @@ the order of the timeline. Click **Apply** to keep the new order.
 To give a segment a name, right-click the segment and select **Rename…**, or select the
 segment and press `F2`. The name shows in the Export Order dialog. It also shows on the
 segment when the segment has room for it. The export does not write the name into the file.
+
+To export only one segment, click the segment to select only that segment. Then right-click it
+and select **Export Segment…**. To export only some of the segments, click the first of them.
+Then `Cmd`-click each of the others (`Ctrl`-click on Windows), right-click one of the selected
+segments, and select **Export N Segments…**. The export then joins only the selected segments,
+in the export order. With **Export Segment…**, the save dialog proposes a file name that has the
+number of the segment. The file name can also have the name of the segment, changed where a
+file name needs it. For a file for each segment, use **Export Segment…** one time for each
+segment. If the export dialog shows an export in progress, click **Run in Background** before
+you right-click a segment.
 
 To save one frame as a PNG image, go to the frame and press `Cmd+Shift+S`, or click the
 Export Frame button below the preview. The image is the first frame of a segment whose In is
