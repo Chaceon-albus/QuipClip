@@ -94,6 +94,7 @@ document summarizes them and shows how the parts fit together.
 | [`070-choose-the-audio-stream-of-a-source.md`](../.agents/decisions/070-choose-the-audio-stream-of-a-source.md)                                                         | The user can choose which audio stream of a source QuipClip reads                  |
 | [`071-release-no-msi-package-for-windows.md`](../.agents/decisions/071-release-no-msi-package-for-windows.md)                                                           | The Windows build makes only the NSIS installer, and no MSI package                |
 | [`072-save-a-project-and-open-it-again.md`](../.agents/decisions/072-save-a-project-and-open-it-again.md)                                                               | The user saves a project file, and one Open action opens it and checks each source |
+| [`073-recover-the-work-after-an-exit-that-did-not-ask.md`](../.agents/decisions/073-recover-the-work-after-an-exit-that-did-not-ask.md)                                 | A recovery file keeps the work of a session, and the next start offers it          |
 
 ## Shape
 
@@ -785,6 +786,14 @@ of a project imports each source again and compares it with the revision that th
 saved. An FLV that grew opens as the part that the project saved. For each other file that
 changed or is absent, the user locates the file, or the open stops. A project has a file only
 while the sequence has a clip, and QuipClip asks before it drops changes that are not saved.
+
+ADR 073 adds the recovery, and its code is not in yet. The page writes a recovery file into
+the application data directory 1 second after a change, while the project has changes to
+save. A quit that the user confirmed removes it. After each other exit, the next start
+offers the file: Restore, Discard, or Not Now. A restore is an open that reads its document
+from the recovery file, and it leaves the project with no file. One process owns the
+recovery directory, so a second process of QuipClip that runs at the same time has no
+recovery.
 
 The unreleased schema remains version 1 after this direct replacement. Old frame-grid
 version 1 files fail normal structural validation. QuipClip has no migration or legacy

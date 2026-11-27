@@ -4,6 +4,7 @@
 - Date: 2026-11-26
 - Deciders: capric98
 - Amends: ADR 010, ADR 020, ADR 024, ADR 026, ADR 027, ADR 038, ADR 052, ADR 058, ADR 070
+- Amended by: ADR 073
 
 ## Context
 
@@ -467,5 +468,10 @@ belongs to a project with no file.
 - The pending In is not in the file. The quit dialog still names it (ADR 027).
 - The Dock Quit, a logout and the end of the Windows session cannot ask (ADR 027). They still
   lose the changes that are not saved, until the record for the recovery.
+
+  (Changed on 2026-11-27.) ADR 073 is that record. QuipClip writes a recovery file, and the
+  next start offers it. A restore is an open that reads its document from a recovery file. It
+  leaves the project with no file and with a proposed path: Save and Save As propose the name
+  and the directory of that path in the save dialog.
 - A double-click on a project file in the file manager does not open it. QuipClip registers no
   file type. It also keeps no list of the last projects.

@@ -4,7 +4,7 @@
 - Date: 2026-09-23
 - Deciders: capric98
 - Amends: ADR 017
-- Amended by: ADR 038, ADR 049, ADR 052, ADR 072
+- Amended by: ADR 038, ADR 049, ADR 052, ADR 072, ADR 073
 
 ## Context
 
@@ -103,6 +103,12 @@ prompt, with Save, Don't Save and Cancel, and it lists each other loss of this r
 the user confirms a quit dialog, the quit reads the losses again, and the dialog shows again
 for a loss that it did not list. A request to quit stops an open of a project that has not
 changed the session yet.
+
+(Changed on 2026-11-27.) QuipClip writes a recovery file (ADR 073). `confirm_quit` carries the
+token of the recovery session of the page, and it removes the recovery file of that session
+before it ends the application. Before the quit guard reads the losses for the last time, it
+waits until the recovery line of the page is empty, for 2 seconds at most. An exit that cannot
+ask removes nothing, so the next start offers its recovery file.
 
 ## Consequences
 
