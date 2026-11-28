@@ -16,6 +16,9 @@ import {
   createProjectOpenStep,
   type OpenProjectResult,
   type ProjectOpenStep,
+  type RestoreHooks,
+  type RestoreOffer,
+  type RestoreProjectResult,
 } from "@/features/project/openStep";
 import { held, mediaAt, type Held } from "@/features/project/projectTestSupport";
 import { createMediaStore } from "@/features/media/store";
@@ -35,18 +38,36 @@ import {
 } from "./quitGuard";
 import {
   createQuitGuard,
+  QUIT_RECOVERY_LINE_WAIT_MS,
   readQuitGuardInput,
   type QuitGuardDependencies,
   type QuitGuardQueueState,
+  type QuitGuardRecovery,
 } from "./quitGuardController";
+import { createRecoveryController } from "@/features/recovery/controller";
+import type {
+  RecoveryChangeResult,
+  RecoveryListResult,
+  RecoveryReadResult,
+} from "@/features/recovery/types";
 import { createPresetDraft } from "@/features/settings/presetDocument";
 import { createOpenAction } from "./openAction";
+import { canShowRecoveryPrompt } from "./recoveryPromptController";
+import {
+  isSystemFileDialogOpen,
+  subscribeSystemFileDialog,
+} from "@/lib/systemFileDialog";
 import { reportingSaveStep } from "./projectOpenStep";
 
 function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
   return {
     timeline: { segmentCount: 0, hasPendingIn: false },
-    project: { hasChangesToSave: false, isModifiedFile: false, fileName: null },
+    project: {
+      hasChangesToSave: false,
+      isModifiedFile: false,
+      fileName: null,
+      identity: 0,
+    },
     exportStatus: "idle",
     exportTracking: false,
     unsavedPresetName: null,
@@ -60,19 +81,34 @@ const TWO_SEGMENTS = { segmentCount: 2, hasPendingIn: false };
 /** A project with no file whose sequence has two segments: it has changes to save. */
 const WITH_SEGMENTS = createInput({
   timeline: TWO_SEGMENTS,
-  project: { hasChangesToSave: true, isModifiedFile: false, fileName: null },
+  project: {
+    hasChangesToSave: true,
+    isModifiedFile: false,
+    fileName: null,
+    identity: 0,
+  },
 });
 
 /** A project with a file that is modified, on a sequence with two segments (ADR 072). */
 const MODIFIED_FILE = createInput({
   timeline: TWO_SEGMENTS,
-  project: { hasChangesToSave: true, isModifiedFile: true, fileName: "cut.qcproj" },
+  project: {
+    hasChangesToSave: true,
+    isModifiedFile: true,
+    fileName: "cut.qcproj",
+    identity: 0,
+  },
 });
 
 /** The same project after a save: it has its file and no changes to save. */
 const SAVED_FILE = createInput({
   timeline: TWO_SEGMENTS,
-  project: { hasChangesToSave: false, isModifiedFile: false, fileName: "cut.qcproj" },
+  project: {
+    hasChangesToSave: false,
+    isModifiedFile: false,
+    fileName: "cut.qcproj",
+    identity: 0,
+  },
 });
 
 /** A loss other than the project: the quit dialog has its plain form. */
@@ -149,9 +185,43 @@ async function flush(): Promise<void> {
   }
 }
 
+/**
+ * A fake recovery controller (ADR 073). The line is empty until `setLineEmpty(false)`. Each
+ * `whenLineEmpty` gives a held promise that the test settles. `suspend` answers `resume`.
+ */
+function createRecoveryFake() {
+  let empty = true;
+  const lineWaits: Held<boolean>[] = [];
+  const resume = vi.fn();
+  const recovery = {
+    token: vi.fn((): string | null => "9"),
+    isLineEmpty: vi.fn(() => empty),
+    whenLineEmpty: vi.fn((_maxMs: number) => {
+      const wait = held<boolean>();
+      lineWaits.push(wait);
+      return wait.promise;
+    }),
+    suspend: vi.fn(() => resume),
+    close: vi.fn(),
+    readOffer: vi.fn((_id: string): Promise<RecoveryReadResult> =>
+      Promise.resolve({ owner: false, status: "notOwner" }),
+    ),
+    finishRestore: vi.fn((_id: string) => Promise.resolve(null)),
+  } satisfies QuitGuardRecovery;
+  return {
+    recovery,
+    resume,
+    lineWaits,
+    setLineEmpty: (next: boolean) => {
+      empty = next;
+    },
+  };
+}
+
 function setup(input: QuitGuardInput, overrides: QuitGuardDependencies = {}) {
   let current = input;
   const confirmQuit = vi.fn(neverSettles);
+  const recoveryFake = createRecoveryFake();
   const importPaths = vi.fn((_paths: readonly string[], _index: number | null) =>
     Promise.resolve<unknown>(IMPORT_RESULT),
   );
@@ -172,11 +242,13 @@ function setup(input: QuitGuardInput, overrides: QuitGuardDependencies = {}) {
     reportSaveError,
     readSaveError: () => shownError,
     focusWindow,
+    recovery: recoveryFake.recovery,
     ...overrides,
   });
   return {
     guard,
     confirmQuit,
+    recoveryFake,
     importPaths,
     clearTimeline,
     saveStep,
@@ -583,6 +655,7 @@ describe("readQuitGuardInput", () => {
       hasChangesToSave: false,
       isModifiedFile: false,
       fileName: null,
+      identity: projectStore.getState().identity,
     });
     // The test writes the public state. The located mark makes the project modified.
     projectStore.setState({
@@ -594,6 +667,7 @@ describe("readQuitGuardInput", () => {
         hasChangesToSave: true,
         isModifiedFile: true,
         fileName: "cut.qcproj",
+        identity: projectStore.getState().identity,
       });
       projectStore.setState({ located: false });
       // The empty sequence is the saved content, so the project is not modified.
@@ -601,6 +675,7 @@ describe("readQuitGuardInput", () => {
         hasChangesToSave: false,
         isModifiedFile: false,
         fileName: "cut.qcproj",
+        identity: projectStore.getState().identity,
       });
     } finally {
       projectStore.getState().closeProject(false);
@@ -617,7 +692,7 @@ describe("the save prompt of the quit (ADR 072)", () => {
     expect(guard.store.getState().prompt).toEqual({
       kind: "quit",
       loss: {
-        project: { fileName: "cut.qcproj" },
+        project: { fileName: "cut.qcproj", identity: 0 },
         pendingIn: false,
         exportActive: false,
         queuedExports: 0,
@@ -1268,6 +1343,7 @@ function createOpenStepFake() {
   let ask: () => Promise<DropContentAnswer> = () => Promise.resolve("cancel");
   let opening = false;
   const results: Held<OpenProjectResult>[] = [];
+  const restores: Held<RestoreProjectResult>[] = [];
   const step: ProjectOpenStep = {
     store: createOpenProjectStore(),
     open: vi.fn((_path: string) => {
@@ -1278,8 +1354,14 @@ function createOpenStepFake() {
         opening = false;
       });
     }),
-    // The guard starts no restore yet.
-    restore: vi.fn(() => Promise.resolve({ status: "canceled", by: "user" } as const)),
+    restore: vi.fn((_offer: RestoreOffer, _hooks: RestoreHooks) => {
+      opening = true;
+      const answer = held<RestoreProjectResult>();
+      restores.push(answer);
+      return answer.promise.finally(() => {
+        opening = false;
+      });
+    }),
     locate: vi.fn(() => Promise.resolve(false)),
     locateFile: vi.fn(() => Promise.resolve(false)),
     confirm: vi.fn(() => false),
@@ -1296,6 +1378,7 @@ function createOpenStepFake() {
     },
     ask: () => ask(),
     results,
+    restores,
   };
 }
 
@@ -1685,6 +1768,8 @@ describe("a quit stops an open (ADR 072, The open of a project)", () => {
     guard.requestQuit();
 
     expect(open.step.cancel).toHaveBeenCalledTimes(1);
+    // The reason tells a restore that a quit stopped it (ADR 073).
+    expect(open.step.cancel).toHaveBeenCalledWith("quit");
     expect(confirmQuit).toHaveBeenCalledTimes(1);
   });
 
@@ -2009,5 +2094,494 @@ describe("the open of a project waits for a trim that waits to commit (ADR 030, 
     await expect(request).resolves.toEqual({ status: "canceled" });
     expect(open.step.open).not.toHaveBeenCalled();
     expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+});
+
+describe("the quit and the recovery line (ADR 073)", () => {
+  it("gives confirm_quit the token, holds the recovery at the call, and closes it after", async () => {
+    let heldAtCall: number | null = null;
+    let suspendCalls = (): number => 0;
+    const confirmQuit = vi.fn((_token: string | null) => {
+      // The hold comes first: no command can go out between the last read and the call.
+      heldAtCall = suspendCalls();
+      return Promise.resolve();
+    });
+    const { guard, recoveryFake } = setup(createInput(), { confirmQuit });
+    suspendCalls = () => recoveryFake.recovery.suspend.mock.calls.length;
+
+    guard.requestQuit();
+
+    expect(confirmQuit).toHaveBeenCalledWith("9");
+    expect(heldAtCall).toBe(1);
+    expect(recoveryFake.recovery.suspend).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.recovery.whenLineEmpty).not.toHaveBeenCalled();
+    await flush();
+    expect(recoveryFake.recovery.close).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.resume).not.toHaveBeenCalled();
+  });
+
+  it("gives confirm_quit null when the recovery has no token", () => {
+    const { guard, confirmQuit, recoveryFake } = setup(createInput());
+    recoveryFake.recovery.token.mockReturnValue(null);
+
+    guard.requestQuit();
+
+    expect(confirmQuit).toHaveBeenCalledWith(null);
+  });
+
+  it("lets the recovery work again when confirm_quit fails", async () => {
+    const { guard, recoveryFake } = setup(createInput(), {
+      confirmQuit: () => Promise.reject(new Error("no shell")),
+    });
+
+    guard.requestQuit();
+    await flush();
+
+    expect(recoveryFake.resume).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.recovery.close).not.toHaveBeenCalled();
+    expect(guard.canOpen()).toBe(true);
+  });
+
+  it("waits for a line that is not empty, and then reads the losses again and quits", async () => {
+    const { guard, confirmQuit, recoveryFake } = setup(createInput());
+    recoveryFake.setLineEmpty(false);
+
+    guard.requestQuit();
+
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(recoveryFake.recovery.whenLineEmpty).toHaveBeenCalledWith(
+      QUIT_RECOVERY_LINE_WAIT_MS,
+    );
+    expect(guard.store.getState().prompt).toBeNull();
+    // The wait is a part of the quit flow.
+    expect(guard.canOpen()).toBe(false);
+    guard.requestQuit();
+    expect(recoveryFake.recovery.whenLineEmpty).toHaveBeenCalledTimes(1);
+
+    recoveryFake.lineWaits[0]?.resolve(true);
+    await flush();
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.recovery.suspend).toHaveBeenCalledTimes(1);
+  });
+
+  it("quits after the bound of the wait, also when the line is still not empty", async () => {
+    const { guard, confirmQuit, recoveryFake } = setup(createInput());
+    recoveryFake.setLineEmpty(false);
+
+    guard.requestQuit();
+    recoveryFake.lineWaits[0]?.resolve(false);
+    await flush();
+
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.recovery.whenLineEmpty).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the prompt for a loss that came during the wait, and quits on its confirm", async () => {
+    const { guard, confirmQuit, recoveryFake, setInput } = setup(createInput());
+    recoveryFake.setLineEmpty(false);
+
+    guard.requestQuit();
+    setInput(WITH_DRAFT);
+    recoveryFake.lineWaits[0]?.resolve(true);
+    await flush();
+
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+
+    // The confirmed read would quit, and the line is not empty again: the quit waits again.
+    guard.confirm();
+    expect(confirmQuit).not.toHaveBeenCalled();
+    recoveryFake.lineWaits[1]?.resolve(true);
+    await flush();
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not wait in front of a read that shows a prompt", () => {
+    const { guard, recoveryFake } = setup(WITH_SEGMENTS);
+    recoveryFake.setLineEmpty(false);
+
+    guard.requestQuit();
+
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+    expect(recoveryFake.recovery.whenLineEmpty).not.toHaveBeenCalled();
+  });
+
+  it("quits in the same call on the confirm of a prompt while the line is empty", () => {
+    const { guard, confirmQuit, recoveryFake } = setup(WITH_DRAFT);
+
+    guard.requestQuit();
+    guard.confirm();
+
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+    expect(recoveryFake.recovery.whenLineEmpty).not.toHaveBeenCalled();
+  });
+});
+
+const OFFER: RestoreOffer = { id: "00000000000000a1", projectPath: "/p/cut.qcproj" };
+
+describe("the restore is a flow of the guard (ADR 073)", () => {
+  it("restores with the open step and the hooks of the recovery", async () => {
+    const open = createOpenStepFake();
+    const { guard, recoveryFake } = setup(createInput(), {
+      createOpenStep: open.createOpenStep,
+    });
+
+    const request = guard.requestRestore(OFFER);
+    expect(open.step.restore).toHaveBeenCalledTimes(1);
+    const [offer, hooks] = vi.mocked(open.step.restore).mock.calls[0] ?? [];
+    expect(offer).toBe(OFFER);
+
+    await hooks?.readRecovery(OFFER.id);
+    expect(recoveryFake.recovery.readOffer).toHaveBeenCalledWith(OFFER.id);
+    hooks?.onRestored(OFFER.id);
+    expect(recoveryFake.recovery.finishRestore).toHaveBeenCalledWith(OFFER.id);
+
+    open.restores[0]?.resolve({ status: "restored" });
+    await expect(request).resolves.toEqual({ status: "restored" });
+    expect(guard.canOpen()).toBe(true);
+  });
+
+  it("takes no Clear Timeline and no Open while it runs", async () => {
+    const open = createOpenStepFake();
+    const { guard, importPaths, clearTimeline } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+    });
+
+    const request = guard.requestRestore(OFFER);
+    expect(guard.canOpen()).toBe(false);
+    guard.requestClear();
+    await guard.requestOpen("/v/a.mp4");
+    await guard.requestOpen("/p/other.qcproj");
+    await expect(guard.requestRestore(OFFER)).resolves.toEqual({ status: "blocked" });
+
+    expect(clearTimeline).not.toHaveBeenCalled();
+    expect(importPaths).not.toHaveBeenCalled();
+    expect(open.step.open).not.toHaveBeenCalled();
+    expect(open.step.restore).toHaveBeenCalledTimes(1);
+
+    open.restores[0]?.resolve({ status: "canceled", by: "user" });
+    await request;
+    expect(guard.canOpen()).toBe(true);
+  });
+
+  it("starts nothing while a prompt shows, or after the quit started", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(WITH_SEGMENTS, { createOpenStep: open.createOpenStep });
+
+    guard.requestClear();
+    await expect(guard.requestRestore(OFFER)).resolves.toEqual({ status: "blocked" });
+    guard.cancel();
+
+    const quitting = setup(createInput(), { createOpenStep: open.createOpenStep });
+    quitting.guard.requestQuit();
+    await expect(quitting.guard.requestRestore(OFFER)).resolves.toEqual({
+      status: "blocked",
+    });
+
+    expect(open.step.restore).not.toHaveBeenCalled();
+  });
+
+  it("shows the save prompt of a restore inside its flow", () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(MODIFIED_FILE, { createOpenStep: open.createOpenStep });
+
+    void guard.requestRestore(OFFER);
+    void open.ask();
+
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "open",
+      project: { fileName: "cut.qcproj" },
+      restore: true,
+    });
+  });
+
+  it("is stopped by a quit, which cancels the open step for the quit", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(MODIFIED_FILE, { createOpenStep: open.createOpenStep });
+
+    void guard.requestRestore(OFFER);
+    const answer = open.ask();
+    guard.requestQuit();
+
+    await expect(answer).resolves.toBe("cancel");
+    expect(open.step.cancel).toHaveBeenCalledWith("quit");
+    expect(guard.store.getState().prompt?.kind).toBe("quit");
+  });
+
+  it("waits for a trim that waits to commit, and a quit during that wait stops it", async () => {
+    const open = createOpenStepFake();
+    const trim = held<void>();
+    const { guard } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      waitForTrimCommit: () => trim.promise,
+    });
+
+    const request = guard.requestRestore(OFFER);
+    await flush();
+    expect(open.step.restore).not.toHaveBeenCalled();
+    expect(guard.canOpen()).toBe(false);
+    guard.requestQuit();
+
+    trim.resolve();
+    await expect(request).resolves.toEqual({ status: "canceled", by: "quit" });
+    expect(open.step.restore).not.toHaveBeenCalled();
+  });
+
+  it("starts the open step after the trim settled", async () => {
+    const open = createOpenStepFake();
+    const trim = held<void>();
+    const { guard } = setup(WITH_SEGMENTS, {
+      createOpenStep: open.createOpenStep,
+      waitForTrimCommit: () => trim.promise,
+    });
+
+    void guard.requestRestore(OFFER);
+    trim.resolve();
+    await flush();
+
+    expect(open.step.restore).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a quit stops a restore with the real open step (ADR 073)", () => {
+  it("answers canceled by quit while the offer is read", async () => {
+    const reading = held<RecoveryReadResult>();
+    const context = setup(WITH_SEGMENTS, {
+      createOpenStep: (ask) =>
+        createProjectOpenStep({
+          saveStep: { save: vi.fn(), whenIdle: () => Promise.resolve() },
+          ask,
+          isOtherDialogOpen: () => false,
+          pickFile: () => Promise.resolve(null),
+          staleExportOpenStep: () => undefined,
+          hasChangesToSave: () => false,
+          runInImportLine: (task) => task(),
+        }),
+    });
+    context.recoveryFake.recovery.readOffer.mockReturnValue(reading.promise);
+
+    const request = context.guard.requestRestore(OFFER);
+    await flush();
+    expect(context.recoveryFake.recovery.readOffer).toHaveBeenCalledWith(OFFER.id);
+    expect(context.guard.openStep.store.getState()).toMatchObject({
+      phase: { kind: "loading" },
+      mode: "restore",
+    });
+
+    context.guard.requestQuit();
+
+    await expect(request).resolves.toEqual({ status: "canceled", by: "quit" });
+    expect(context.guard.store.getState().prompt?.kind).toBe("quit");
+  });
+});
+
+describe("subscribe", () => {
+  it("tells a change of canOpen after the call, with no step in the middle", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(WITH_SEGMENTS, { createOpenStep: open.createOpenStep });
+    const heard: boolean[] = [];
+    const unsubscribe = guard.subscribe(() => {
+      heard.push(guard.canOpen());
+    });
+
+    guard.requestClear();
+    expect(heard).toEqual([]);
+    await flush();
+    expect(heard).toEqual([false]);
+
+    // The quit takes the place of the clear flow: no listener hears a free guard between them.
+    guard.requestQuit();
+    await flush();
+    expect(heard).toEqual([false]);
+
+    guard.cancel();
+    await flush();
+    expect(heard).toEqual([false, true]);
+
+    const request = guard.requestRestore(OFFER);
+    await flush();
+    open.restores[0]?.resolve({
+      status: "failed",
+      error: { kind: "entriesDiffer", entryIds: ["a", "b"] },
+    });
+    await request;
+    await flush();
+    expect(heard).toEqual([false, true, false, true]);
+
+    unsubscribe();
+    guard.requestClear();
+    await flush();
+    expect(heard).toHaveLength(4);
+  });
+
+  it("tells a quit that failed", async () => {
+    const { guard } = setup(createInput(), {
+      confirmQuit: () => Promise.reject(new Error("no shell")),
+    });
+    const heard: boolean[] = [];
+    guard.subscribe(() => {
+      heard.push(guard.canOpen());
+    });
+
+    guard.requestQuit();
+    await flush();
+
+    expect(heard).toEqual([false, true]);
+  });
+});
+
+describe("the quit covers only the project that the user answered for (ADR 073)", () => {
+  it("asks again when another project took the place of the listed one during the wait", async () => {
+    const { guard, confirmQuit, recoveryFake, setInput } = setup(MODIFIED_FILE);
+    guard.requestQuit();
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "quit",
+      loss: decideQuit(MODIFIED_FILE).loss,
+    });
+
+    // Don't Save. The line is not empty, so the quit waits for it.
+    recoveryFake.setLineEmpty(false);
+    guard.discard();
+    expect(confirmQuit).not.toHaveBeenCalled();
+
+    // During the wait the last clip goes and Undo brings it back: the session holds another
+    // project, with no file and with segments.
+    const other = createInput({
+      timeline: TWO_SEGMENTS,
+      project: {
+        hasChangesToSave: true,
+        isModifiedFile: false,
+        fileName: null,
+        identity: 1,
+      },
+    });
+    setInput(other);
+    recoveryFake.lineWaits[0]?.resolve(true);
+    await flush();
+
+    expect(confirmQuit).not.toHaveBeenCalled();
+    expect(guard.store.getState().prompt).toEqual({
+      kind: "quit",
+      loss: decideQuit(other).loss,
+    });
+  });
+
+  it("quits after Don't Save when the project is still the listed one", async () => {
+    const { guard, confirmQuit, recoveryFake } = setup(MODIFIED_FILE);
+    guard.requestQuit();
+    recoveryFake.setLineEmpty(false);
+    guard.discard();
+    recoveryFake.lineWaits[0]?.resolve(true);
+    await flush();
+
+    expect(confirmQuit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a hold of the recovery keeps its line through a quit that failed (ADR 073)", () => {
+  it("sends a finish_restore that waited when confirm_quit rejects", async () => {
+    vi.useFakeTimers();
+    try {
+      const listing = held<RecoveryListResult>();
+      const finishRestore = vi.fn((_token: string, _id: string, _state: unknown) =>
+        Promise.resolve<RecoveryChangeResult>({
+          owner: true,
+          status: "done",
+          current: "nothing",
+        }),
+      );
+      const recovery = createRecoveryController({
+        clients: {
+          startRecovery: () => Promise.resolve({ token: "5" }),
+          listRecoveryOffers: () => listing.promise,
+          finishRestore,
+        },
+      });
+      await recovery.start();
+      // The list runs, and a finish_restore waits behind it.
+      const finished = recovery.finishRestore(OFFER.id);
+      const order: string[] = [];
+      // The answer of confirm_quit stays pending until the test rejects it.
+      const confirming = held<unknown>();
+      const confirmQuit = vi.fn((_token: string | null) => {
+        order.push(`confirm ${String(recovery.isLineEmpty())}`);
+        return confirming.promise;
+      });
+      const { guard } = setup(createInput(), { recovery, confirmQuit });
+
+      guard.requestQuit();
+      expect(confirmQuit).not.toHaveBeenCalled();
+      // The wait for the line ends at its bound, and the quit holds the recovery.
+      await vi.advanceTimersByTimeAsync(QUIT_RECOVERY_LINE_WAIT_MS);
+      expect(order).toEqual(["confirm false"]);
+      expect(finishRestore).not.toHaveBeenCalled();
+
+      // The list answers while confirm_quit is pending: the hold, not the list, keeps the
+      // finish_restore in the line.
+      listing.resolve({ owner: true, status: "done", complete: true, offers: [] });
+      await flush();
+      expect(finishRestore).not.toHaveBeenCalled();
+      expect(recovery.isLineEmpty()).toBe(false);
+
+      // confirm_quit rejects: the hold ends, and the finish_restore goes out.
+      confirming.reject(new Error("no shell"));
+      await flush();
+      expect(finishRestore).toHaveBeenCalledWith("5", OFFER.id, null);
+      await expect(finished).resolves.toMatchObject({ status: "done" });
+      recovery.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a project from the Open dialog reaches the guard before the recovery prompt can show (ADR 073)", () => {
+  it("leaves no moment between the end of the dialog and the start of the open flow", async () => {
+    const open = createOpenStepFake();
+    const { guard } = setup(createInput(), { createOpenStep: open.createOpenStep });
+    const gate = () =>
+      canShowRecoveryPrompt({
+        guardFree: guard.canOpen(),
+        projectDialogOpen: false,
+        saveErrorOpen: false,
+        exportDialogOpen: false,
+        exportOpenStepWaiting: false,
+        nativeMenuOpen: false,
+        otherDialogOpen: isSystemFileDialogOpen(),
+      });
+    const answers: boolean[] = [];
+    const record = () => {
+      answers.push(gate());
+    };
+    const stopDialog = subscribeSystemFileDialog(record);
+    const stopGuard = guard.subscribe(record);
+    const dialog = held<string[] | null>();
+    try {
+      const action = createOpenAction({
+        canOpen: () => guard.canOpen(),
+        requestOpen: (paths) => guard.requestOpen(paths),
+        openDialog: vi.fn(() => dialog.promise) as never,
+        filterName: () => "Open",
+      })();
+      record();
+      dialog.resolve(["/p/cut.qcproj"]);
+      // Each microtask between the end of the dialog and the open flow is a moment in which the
+      // prompt can test the gate.
+      for (let index = 0; index < 20; index += 1) {
+        await Promise.resolve();
+        record();
+      }
+      expect(open.step.open).toHaveBeenCalledWith("/p/cut.qcproj");
+      expect(answers.length).toBeGreaterThan(2);
+      expect(answers.every((answer) => !answer)).toBe(true);
+
+      open.results[0]?.resolve({ status: "opened", path: "/p/cut.qcproj" });
+      await action;
+      await flush();
+      expect(gate()).toBe(true);
+    } finally {
+      stopDialog();
+      stopGuard();
+    }
   });
 });

@@ -41,6 +41,20 @@
  * appear while the dialog shows or while Save writes: an import that ended, or a preset draft of
  * the Settings window.
  *
+ * # The recovery (ADR 073)
+ *
+ * The restore of an offer (`requestRestore`) is an open: it runs as an open flow, with the save
+ * prompt of an open, and a quit stops it before its step 8 (`cancel("quit")` of the open step).
+ *
+ * Before the quit flow reads the losses for the last time, the read after which it calls
+ * `confirm_quit`, it waits until the recovery line is empty, for 2 seconds at most. With an empty
+ * line it does not wait, so the decision stays in the same call. When the line is not empty, the
+ * flow waits, and then it reads the losses again: a change that came during the wait is in that
+ * read. It calls `confirm_quit` with the token of the recovery session in the same step as that
+ * read. From that call the recovery puts no command in its line. When `confirm_quit` resolves,
+ * the recovery closes. When it fails, the quit did not happen: the guard and the recovery work
+ * again.
+ *
  * The guard runs in the main window. An unsaved preset draft lives in the Settings window,
  * which reports its name to this window (`settingsWindowDraft.ts`). A quit can start while
  * the Settings window has the focus, for example from `Cmd+Q`, so the quit prompt brings the
@@ -68,11 +82,18 @@ import {
 } from "@/features/project/dropContent";
 import { classifyOpenPaths } from "@/features/project/openPaths";
 import { hasProjectExtension } from "@/features/project/paths";
-import type { OpenProjectResult, ProjectOpenStep } from "@/features/project/openStep";
+import type {
+  OpenProjectResult,
+  ProjectOpenStep,
+  RestoreOffer,
+  RestoreProjectResult,
+} from "@/features/project/openStep";
 import { projectSaveStep } from "@/features/project/saveAction";
 import { projectSaveErrorStore } from "@/features/project/saveErrorStore";
 import type { ProjectSaveError, ProjectSaveStep } from "@/features/project/saveStep";
 import { isProjectModified, projectStore } from "@/features/project/store";
+import type { RecoveryController } from "@/features/recovery/controller";
+import { recoveryController } from "@/features/recovery/pageController";
 import { importClips, runInImportLine } from "@/features/sequence/importClips";
 import { settingsWindowDraftStore } from "@/features/settings/settingsWindowDraft";
 import { timelineStore } from "@/features/timeline";
@@ -94,8 +115,26 @@ import {
 export type QuitGuardPrompt =
   | { readonly kind: "quit"; readonly loss: QuitLoss }
   | { readonly kind: "clear"; readonly change: ClearPrompt }
-  /** The save prompt of the open of a project (ADR 072). */
-  | { readonly kind: "open"; readonly project: ProjectLoss };
+  /**
+   * The save prompt of the open of a project (ADR 072). `restore` is true for the save prompt of a
+   * restore (ADR 073), and absent for an open.
+   */
+  | { readonly kind: "open"; readonly project: ProjectLoss; readonly restore?: true };
+
+/** The longest wait of the quit for an empty recovery line, in milliseconds (ADR 073). */
+export const QUIT_RECOVERY_LINE_WAIT_MS = 2000;
+
+/** The parts of the recovery controller that the guard uses (ADR 073). */
+export type QuitGuardRecovery = Pick<
+  RecoveryController,
+  | "token"
+  | "isLineEmpty"
+  | "whenLineEmpty"
+  | "suspend"
+  | "close"
+  | "readOffer"
+  | "finishRestore"
+>;
 
 export interface QuitGuardState {
   readonly prompt: QuitGuardPrompt | null;
@@ -117,10 +156,17 @@ export interface QuitGuardDependencies {
   /** The export queue store that the default `readInput` reads. Defaults to `exportQueueStore`. */
   queueStore?: StoreApi<QuitGuardQueueState>;
   /**
-   * Asks Rust to end the application. The promise can resolve before the application ends,
+   * Asks Rust to end the application, with the token of the recovery session of the page, or
+   * null when the page has none (ADR 073). The promise can resolve before the application ends,
    * because Rust only queues the exit, and it can also never settle.
    */
-  confirmQuit?: () => Promise<unknown>;
+  confirmQuit?: (token: string | null) => Promise<unknown>;
+  /**
+   * The recovery controller of the page (ADR 073): the quit waits for its line and gives its token
+   * to `confirm_quit`, and a restore reads an offer and finishes through it. Defaults to
+   * `recoveryController`.
+   */
+  recovery?: QuitGuardRecovery;
   /**
    * Imports files as clips from a junction of the sequence, or at the end for null. Defaults to
    * `importClips` (ADR 052).
@@ -192,6 +238,23 @@ export interface QuitGuard {
    */
   canOpen: () => boolean;
   /**
+   * Calls `listener` after a change of `canOpen`: a prompt that opens or closes, a flow that
+   * starts or ends, and the quit that starts or fails. The guard tells it after the call that
+   * changed it, in a microtask, so a listener never sees a step in the middle of a change, such as
+   * the moment between the end of a flow and the start of the quit flow that takes its place.
+   * The recovery prompt waits for it (ADR 073). Answers the function that removes the listener.
+   */
+  subscribe: (listener: () => void) => () => void;
+  /**
+   * Restores `offer` (ADR 073, "The restore") with the open step, as an open flow until the step
+   * ends: the restore first waits for a released trim that waits for its commit, the save prompt
+   * of an open shows when the session has changes to save, Clear Timeline and each Open request
+   * do nothing while it runs, and a quit stops it before step 8 (`canceled` by `quit`). The save
+   * step of the page reports a save of the save prompt that failed. Answers `blocked`, and starts
+   * nothing, while a prompt is open, while a flow runs, or after the quit started.
+   */
+  requestRestore: (offer: RestoreOffer) => Promise<RestoreProjectResult>;
+  /**
    * The files of one Open action or one drop, as one request (ADR 072, "One Open action"):
    *
    * - No project file: it imports the files as clips of the sequence (ADR 052), from junction
@@ -258,6 +321,7 @@ export function readQuitGuardInput(
           projectContentOf(timeline, audioOverrideStore.getState().overrides),
         ),
       fileName: project.file?.name ?? null,
+      identity: project.identity,
     },
     exportStatus: exportState.status,
     exportTracking: exportState.tracking,
@@ -266,8 +330,9 @@ export function readQuitGuardInput(
   };
 }
 
-async function invokeConfirmQuit(): Promise<unknown> {
-  return await invokeCommand<unknown>(BACKEND_COMMANDS.CONFIRM_QUIT);
+/** Invokes `confirm_quit` with arguments `{ token }`. A null token removes no recovery file. */
+async function invokeConfirmQuit(token: string | null): Promise<unknown> {
+  return await invokeCommand<unknown>(BACKEND_COMMANDS.CONFIRM_QUIT, { token });
 }
 
 /**
@@ -300,12 +365,14 @@ interface ClearFlow {
 }
 
 /**
- * The open of a project, from the request until the open step ends. `answer` settles the
- * question of the save prompt while it shows (`confirmDropContent` acts on the answer itself),
- * and it is null otherwise.
+ * The open of a project, or the restore of an offer (ADR 073), from the request until the open
+ * step ends. `answer` settles the question of the save prompt while it shows
+ * (`confirmDropContent` acts on the answer itself), and it is null otherwise. `restore` is true
+ * for a restore.
  */
 interface OpenFlow {
   readonly kind: "open";
+  readonly restore: boolean;
   answer: ((answer: DropContentAnswer) => void) | null;
 }
 
@@ -336,6 +403,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
 
   const readSaveError =
     dependencies.readSaveError ?? (() => projectSaveErrorStore.getState().error);
+  const recovery = dependencies.recovery ?? recoveryController;
 
   const store = createStore<QuitGuardState>()(() => ({ prompt: null }));
 
@@ -345,8 +413,48 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
   let quitting = false;
 
   // The flow that runs, or null. A step that waits goes on only while its flow is still this
-  // value, so a flow that ended or that a quit dropped does nothing more.
+  // value, so a flow that ended or that a quit dropped does nothing more. Only `setFlow` changes
+  // it, so the listeners of `subscribe` hear each change.
   let flow: Flow | null = null;
+
+  /** The listeners of `subscribe`, the last value of `canOpen` they heard, and the queued check. */
+  const freeListeners = new Set<() => void>();
+  let heardFree = true;
+  let checkQueued = false;
+
+  /**
+   * Tells the listeners of `subscribe` when `canOpen` changed, in a microtask after the call that
+   * changed it, so they never see a step in the middle of a change.
+   */
+  function noteChange(): void {
+    if (checkQueued) {
+      return;
+    }
+    checkQueued = true;
+    queueMicrotask(() => {
+      checkQueued = false;
+      const free = isFree();
+      if (free === heardFree) {
+        return;
+      }
+      heardFree = free;
+      for (const listener of [...freeListeners]) {
+        listener();
+      }
+    });
+  }
+
+  store.subscribe(noteChange);
+
+  function setFlow(next: Flow | null): void {
+    flow = next;
+    noteChange();
+  }
+
+  function setQuitting(next: boolean): void {
+    quitting = next;
+    noteChange();
+  }
 
   /** Settles the save prompt of an open flow with `answer`, when it shows. */
   function answerOpen(current: OpenFlow, answer: DropContentAnswer): void {
@@ -361,7 +469,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
    */
   function dropFlow(): void {
     const dropped = flow;
-    flow = null;
+    setFlow(null);
     if (dropped?.kind === "open") {
       answerOpen(dropped, "cancel");
     }
@@ -390,8 +498,11 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
     }
     return new Promise<DropContentAnswer>((resolve) => {
       current.answer = resolve;
+      const project = { fileName: readInput().project.fileName };
       store.setState({
-        prompt: { kind: "open", project: { fileName: readInput().project.fileName } },
+        prompt: current.restore
+          ? { kind: "open", project, restore: true }
+          : { kind: "open", project },
       });
     });
   }
@@ -399,15 +510,20 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
   const openStep = (dependencies.createOpenStep ?? createPageOpenStep)(askBeforeOpen);
 
   /**
-   * Opens one project file with the open step, as an open flow until the step ends. The flow
-   * first waits for a released trim that waits for its commit (`waitForTrimCommit`). The save
-   * step of the page reports a save of the save prompt that failed itself
-   * (`createPageOpenStep`), so a `stopped` result shows nothing more here. The project dialog
-   * shows each other error.
+   * Runs `start` as an open flow until it ends: the open of a project file, or the restore of an
+   * offer. The flow first waits for a released trim that waits for its commit
+   * (`waitForTrimCommit`). Only a quit drops an open flow, so a drop during that wait answers
+   * `dropped` and `start` never runs. The save step of the page reports a save of the save prompt
+   * that failed itself (`createPageOpenStep`), so a `stopped` result shows nothing more here. The
+   * project dialog shows each other error.
    */
-  async function openProject(path: string): Promise<OpenProjectResult> {
-    const current: OpenFlow = { kind: "open", answer: null };
-    flow = current;
+  async function runOpenFlow<T>(
+    restore: boolean,
+    start: () => Promise<T>,
+    dropped: T,
+  ): Promise<T> {
+    const current: OpenFlow = { kind: "open", restore, answer: null };
+    setFlow(current);
     try {
       // A released trim that waits for its frame delays the open, and does not drop it. The
       // wait is a part of the flow, so a quit during it drops the flow, and the open does not
@@ -416,15 +532,39 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       if (trim !== null) {
         await trim;
         if (flow !== current) {
-          return { status: "canceled" };
+          return dropped;
         }
       }
-      return await openStep.open(path);
+      return await start();
     } finally {
       if (flow === current) {
-        flow = null;
+        setFlow(null);
       }
     }
+  }
+
+  /** Opens one project file with the open step, as an open flow until the step ends. */
+  function openProject(path: string): Promise<OpenProjectResult> {
+    return runOpenFlow(false, () => openStep.open(path), { status: "canceled" });
+  }
+
+  /**
+   * Restores one offer with the open step, as an open flow until the step ends (ADR 073). The
+   * open step reads the offer through the line of the recovery, and in its step 8 the recovery
+   * puts `finish_restore` in its line.
+   */
+  function restoreOffer(offer: RestoreOffer): Promise<RestoreProjectResult> {
+    return runOpenFlow<RestoreProjectResult>(
+      true,
+      () =>
+        openStep.restore(offer, {
+          readRecovery: (id) => recovery.readOffer(id),
+          onRestored: (id) => {
+            void recovery.finishRestore(id);
+          },
+        }),
+      { status: "canceled", by: "quit" },
+    );
   }
 
   /**
@@ -438,14 +578,27 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
     });
   }
 
+  /**
+   * Calls `confirm_quit` with the token of the recovery session (ADR 073). The caller read the
+   * losses in the same step. From this call the recovery puts no command in its line. When the
+   * call resolves, the application is ending, and the recovery closes.
+   */
   function quit(): void {
-    flow = null;
-    quitting = true;
-    confirmQuit().catch(() => {
-      // The application did not end, for example outside the Tauri shell. A later request
-      // runs the decision again.
-      quitting = false;
-    });
+    setFlow(null);
+    setQuitting(true);
+    const token = recovery.token();
+    const resume = recovery.suspend();
+    confirmQuit(token).then(
+      () => {
+        recovery.close();
+      },
+      () => {
+        // The application did not end, for example outside the Tauri shell. A later request
+        // runs the decision again, and the recovery works again.
+        setQuitting(false);
+        resume();
+      },
+    );
   }
 
   /**
@@ -486,7 +639,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       (result) => {
         if (result.status === "failed") {
           if (!ended()) {
-            flow = null;
+            setFlow(null);
           }
           reportSaveError(result.error);
           return;
@@ -495,7 +648,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
           return;
         }
         if (result.status === "canceled") {
-          flow = null;
+          setFlow(null);
           return;
         }
         next();
@@ -503,7 +656,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       () => {
         // The save step does not reject. A rejection ends the flow with no change.
         if (!ended()) {
-          flow = null;
+          setFlow(null);
         }
       },
     );
@@ -513,13 +666,18 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
    * Steps 1 to 3 of the quit flow: wait for the save step, read the losses, and quit or ask. The
    * quit continues when nothing would be lost, or when the last dialog that the user confirmed
    * listed each loss. A save error that was reported while the flow waited ends the flow.
+   *
+   * A read that would quit is the last read only with an empty recovery line (ADR 073). With a
+   * line that is not empty, the flow waits until the line is empty, for 2 seconds at most, and
+   * then runs these steps again with `lineWaited`: their read then decides, and a quit follows it
+   * in the same step. A read that shows a prompt is not the last read, so it waits for nothing.
    */
-  function runQuitFlow(current: QuitFlow): void {
+  function runQuitFlow(current: QuitFlow, lineWaited = false): void {
     afterSaveStep(current, (errorDuringWait) => {
       if (errorDuringWait) {
         // The save that the quit waited for failed, and its error shows. A quit now would hide
         // it, so the flow ends with no quit and no prompt. The user can quit again after it.
-        flow = null;
+        setFlow(null);
         return;
       }
       const decision = decideQuit(readInput());
@@ -527,6 +685,14 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         !decision.ask ||
         (current.confirmed !== null && isLossListed(decision.loss, current.confirmed))
       ) {
+        if (!lineWaited && !recovery.isLineEmpty()) {
+          void recovery.whenLineEmpty(QUIT_RECOVERY_LINE_WAIT_MS).then(() => {
+            if (flow === current) {
+              runQuitFlow(current, true);
+            }
+          });
+          return;
+        }
         store.setState({ prompt: null });
         quit();
         return;
@@ -549,13 +715,13 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
     afterSaveStep(current, () => {
       const input = readInput();
       if (current.saved && !input.project.hasChangesToSave) {
-        flow = null;
+        setFlow(null);
         clearTimeline();
         return;
       }
       const decision = decideClear(input);
       if (decision.form === "none") {
-        flow = null;
+        setFlow(null);
         clearTimeline();
         return;
       }
@@ -579,14 +745,29 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
     openStep,
     canOpen: isFree,
 
+    subscribe: (listener) => {
+      freeListeners.add(listener);
+      return () => {
+        freeListeners.delete(listener);
+      };
+    },
+
+    requestRestore: (offer) => {
+      if (!isFree()) {
+        return Promise.resolve({ status: "blocked" });
+      }
+      return restoreOffer(offer);
+    },
+
     requestQuit: () => {
       if (quitting) {
         return;
       }
       // ADR 072: a quit stops an open that is before step 8 first, as Cancel does. The project
-      // dialog closes, and nothing of the session changes.
+      // dialog closes, and nothing of the session changes. A restore that the quit stops answers
+      // `canceled` by `quit` (ADR 073).
       if (openStep.isOpening()) {
-        openStep.cancel();
+        openStep.cancel("quit");
       }
       if (flow?.kind === "quit") {
         return;
@@ -598,7 +779,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         store.setState({ prompt: null });
       }
       const current: QuitFlow = { kind: "quit", confirmed: null };
-      flow = current;
+      setFlow(current);
       runQuitFlow(current);
     },
 
@@ -636,7 +817,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       const current: ClearFlow = { kind: "clear", saved: false };
-      flow = current;
+      setFlow(current);
       runClearFlow(current);
     },
 
@@ -669,7 +850,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
       }
       if (prompt.kind === "clear" && current.kind === "clear") {
         if (prompt.change.form === "plain") {
-          flow = null;
+          setFlow(null);
           clearTimeline();
           return;
         }
@@ -707,7 +888,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         return;
       }
       if (shown.kind === "clear" && current.kind === "clear") {
-        flow = null;
+        setFlow(null);
         clearTimeline();
       }
     },
@@ -723,7 +904,7 @@ export function createQuitGuard(dependencies: QuitGuardDependencies = {}): QuitG
         answerOpen(flow, "cancel");
         return;
       }
-      flow = null;
+      setFlow(null);
     },
   };
 }

@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { isSystemFileDialogOpen, trackSystemFileDialog } from "./systemFileDialog";
+import {
+  isSystemFileDialogOpen,
+  subscribeSystemFileDialog,
+  trackSystemFileDialog,
+} from "./systemFileDialog";
+
+describe("subscribeSystemFileDialog", () => {
+  it("tells each open and each close of a dialog until the listener goes", async () => {
+    const seen: boolean[] = [];
+    const unsubscribe = subscribeSystemFileDialog(() => {
+      seen.push(isSystemFileDialogOpen());
+    });
+
+    await trackSystemFileDialog(() => Promise.resolve("a"));
+    await expect(
+      trackSystemFileDialog(() => Promise.reject(new Error("no dialog"))),
+    ).rejects.toThrow("no dialog");
+    expect(seen).toEqual([true, false, true, false]);
+
+    unsubscribe();
+    await trackSystemFileDialog(() => Promise.resolve("b"));
+    expect(seen).toHaveLength(4);
+  });
+});
 
 describe("trackSystemFileDialog", () => {
   it("counts each dialog until its call settles", async () => {

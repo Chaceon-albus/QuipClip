@@ -937,3 +937,96 @@ describe("createSegmentContextMenu", () => {
     });
   });
 });
+
+describe("the choice of a menu reaches its item before anything that waits for the menu (ADR 073)", () => {
+  const RENAME_B: ShortcutCommand = { kind: "renameSegment", segmentId: "b" };
+
+  it("keeps the choice pending from a popup reply that came first until a dialog item ran", async () => {
+    const harness = createHarness();
+    const pendingAtRun: boolean[] = [];
+    harness.runCommand.mockImplementation(() => {
+      pendingAtRun.push(harness.menuState.isChoicePending());
+    });
+    const closed = harness.open();
+    const show = harness.lastShow();
+    show.popup();
+    show.close();
+    await closed;
+    // The menu is closed, and its choice can still come.
+    expect(harness.menuState.isOpen()).toBe(false);
+    expect(harness.menuState.isChoicePending()).toBe(true);
+
+    show.select("renameSegment");
+    expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+    // The item ran while the choice was still pending, and the pending choice ended after it.
+    expect(pendingAtRun).toStrictEqual([true]);
+    expect(harness.menuState.isChoicePending()).toBe(false);
+  });
+
+  it("keeps the choice pending from a popup reply that came first until an ordinary item ran", async () => {
+    const harness = createHarness();
+    const pendingAtRun: boolean[] = [];
+    harness.runCommand.mockImplementation(() => {
+      pendingAtRun.push(harness.menuState.isChoicePending());
+    });
+    const closed = harness.open();
+    const show = harness.lastShow();
+    show.popup();
+    show.close();
+    await closed;
+
+    show.select("goToSegmentIn");
+    expect(pendingAtRun).toStrictEqual([true]);
+    expect(harness.menuState.isChoicePending()).toBe(false);
+  });
+
+  it("runs a dialog item at the close when the choice came first, and keeps nothing pending", async () => {
+    const harness = createHarness();
+    const stateAtRun: { open: boolean; pending: boolean }[] = [];
+    harness.runCommand.mockImplementation(() => {
+      stateAtRun.push({
+        open: harness.menuState.isOpen(),
+        pending: harness.menuState.isChoicePending(),
+      });
+    });
+    const closed = harness.open();
+    const heard: { open: boolean; pending: boolean }[] = [];
+    harness.menuState.subscribe(() => {
+      heard.push({
+        open: harness.menuState.isOpen(),
+        pending: harness.menuState.isChoicePending(),
+      });
+    });
+    const show = harness.lastShow();
+    show.popup();
+    show.select("renameSegment");
+    show.close();
+    await closed;
+
+    expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith(RENAME_B);
+    expect(stateAtRun).toStrictEqual([{ open: false, pending: false }]);
+    // The state tells the close after the item ran, and keeps no choice pending.
+    expect(heard).toStrictEqual([{ open: false, pending: false }]);
+  });
+
+  it("ends the pending choice after the grace period of a menu that the user dismissed", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness();
+      const closed = harness.open();
+      const show = harness.lastShow();
+      show.popup();
+      show.close();
+      await closed;
+      expect(harness.menuState.isChoicePending()).toBe(true);
+
+      vi.advanceTimersByTime(NATIVE_CONTEXT_MENU_GRACE_MS - 1);
+      expect(harness.menuState.isChoicePending()).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(harness.menuState.isChoicePending()).toBe(false);
+      expect(harness.runCommand).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

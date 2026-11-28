@@ -192,6 +192,7 @@ export const zhCN: TranslationCatalog = {
     },
     open: {
       saveTitle: "是否在打开其他项目前保存当前项目？",
+      restoreSaveTitle: "是否在恢复 QuipClip 保留的工作前保存当前项目？",
     },
     save: "保存",
     dontSave: "不保存",
@@ -1116,6 +1117,9 @@ export const zhCN: TranslationCatalog = {
   projectOpen: {
     title: "打开项目",
     failedTitle: "无法打开项目",
+    restoreTitle: "恢复项目",
+    restoreFailedTitle: "无法恢复项目",
+    restoreLoading: "正在读取恢复文件…",
     loading: "正在读取“{{name}}”…",
     loadingNoName: "正在读取项目…",
     checking: "正在检查第 {{current}} 个文件（共 {{total}} 个）：“{{name}}”",
@@ -1177,6 +1181,26 @@ export const zhCN: TranslationCatalog = {
         invalidSegment: "按视频文件当前的读取结果，项目中的某个片段不再适用。",
       },
       entriesDiffer: "项目文件两次列出同一个视频文件，但两处信息不同，因此未打开项目。",
+      recovery: {
+        notFound: "未找到恢复文件。",
+        readFailed: "无法读取恢复文件。",
+        renameFailed: "无法重命名恢复文件夹中的文件。",
+        invalidFile: "恢复文件已损坏，或者包含 QuipClip 不接受的值。",
+        unsupportedVersion:
+          "恢复文件缺少版本信息，或者其版本不受此版本的 QuipClip 支持。",
+        notOwner:
+          "另一个 QuipClip 进程正在使用恢复文件，或者找不到 QuipClip 的数据文件夹。",
+        staleSession: "此窗口的恢复已结束，因此无法读取恢复文件。",
+      },
     },
+  },
+  recovery: {
+    title: "是否恢复未保存的工作？",
+    file: "QuipClip 在保存对“{{name}}”的更改之前结束了运行，并保留了这些工作。",
+    noFile: "QuipClip 在保存一个没有文件的项目之前结束了运行，并保留了这些工作。",
+    savedAt: "恢复文件保存于：{{time}}",
+    restore: "恢复",
+    discard: "丢弃",
+    notNow: "以后再说",
   },
 };

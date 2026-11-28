@@ -29,6 +29,7 @@ const SAVED_PROJECT: ProjectWorkInput = {
   hasChangesToSave: false,
   isModifiedFile: false,
   fileName: null,
+  identity: 0,
 };
 
 /** A project with no file whose sequence has segments (the test of ADR 027). */
@@ -36,6 +37,7 @@ const UNSAVED_SEGMENTS: ProjectWorkInput = {
   hasChangesToSave: true,
   isModifiedFile: false,
   fileName: null,
+  identity: 0,
 };
 
 /** A project with a file that is modified (ADR 072). */
@@ -43,6 +45,7 @@ const MODIFIED_FILE: ProjectWorkInput = {
   hasChangesToSave: true,
   isModifiedFile: true,
   fileName: "interview.qcproj",
+  identity: 0,
 };
 
 function createInput(overrides: Partial<QuitGuardInput> = {}): QuitGuardInput {
@@ -166,11 +169,11 @@ describe("decideQuit", () => {
   it("asks when the project has changes to save, and names its file or no file (ADR 072)", () => {
     expect(decideQuit(createInput({ project: UNSAVED_SEGMENTS }))).toEqual({
       ask: true,
-      loss: { ...NOTHING_LOST, project: { fileName: null } },
+      loss: { ...NOTHING_LOST, project: { fileName: null, identity: 0 } },
     });
     expect(decideQuit(createInput({ project: MODIFIED_FILE }))).toEqual({
       ask: true,
-      loss: { ...NOTHING_LOST, project: { fileName: "interview.qcproj" } },
+      loss: { ...NOTHING_LOST, project: { fileName: "interview.qcproj", identity: 0 } },
     });
   });
 
@@ -183,6 +186,7 @@ describe("decideQuit", () => {
           hasChangesToSave: false,
           isModifiedFile: false,
           fileName: "cut.qcproj",
+          identity: 0,
         },
       }),
     );
@@ -258,7 +262,7 @@ describe("decideQuit", () => {
     expect(decision).toEqual({
       ask: true,
       loss: {
-        project: { fileName: "interview.qcproj" },
+        project: { fileName: "interview.qcproj", identity: 0 },
         pendingIn: true,
         exportActive: true,
         queuedExports: 2,
@@ -270,7 +274,7 @@ describe("decideQuit", () => {
 
 describe("isLossListed", () => {
   const ALL: QuitLoss = {
-    project: { fileName: "interview.qcproj" },
+    project: { fileName: "interview.qcproj", identity: 0 },
     pendingIn: true,
     exportActive: true,
     queuedExports: 2,
@@ -285,14 +289,51 @@ describe("isLossListed", () => {
 
   it("covers the project when the dialog listed the project, whatever its file", () => {
     expect(
-      isLossListed({ ...NOTHING_LOST, project: { fileName: null } }, NOTHING_LOST),
+      isLossListed(
+        { ...NOTHING_LOST, project: { fileName: null, identity: 0 } },
+        NOTHING_LOST,
+      ),
     ).toBe(false);
     expect(
       isLossListed(
-        { ...NOTHING_LOST, project: { fileName: "other.qcproj" } },
-        { ...NOTHING_LOST, project: { fileName: null } },
+        { ...NOTHING_LOST, project: { fileName: "other.qcproj", identity: 0 } },
+        { ...NOTHING_LOST, project: { fileName: null, identity: 0 } },
       ),
     ).toBe(true);
+  });
+
+  it("covers the project only when the dialog listed the project with the same identity (ADR 073)", () => {
+    const listed: QuitLoss = {
+      ...NOTHING_LOST,
+      project: { fileName: "cut.qcproj", identity: 4 },
+    };
+    expect(
+      isLossListed(
+        { ...NOTHING_LOST, project: { fileName: "cut.qcproj", identity: 4 } },
+        listed,
+      ),
+    ).toBe(true);
+    // The project closed and came back, as after the removal of the last clip and an Undo: the
+    // dialog did not show the project that the session holds now.
+    expect(
+      isLossListed(
+        { ...NOTHING_LOST, project: { fileName: null, identity: 5 } },
+        listed,
+      ),
+    ).toBe(false);
+    expect(
+      isLossListed(
+        { ...NOTHING_LOST, project: { fileName: "cut.qcproj", identity: 5 } },
+        listed,
+      ),
+    ).toBe(false);
+  });
+
+  it("puts the identity of the project into the loss", () => {
+    expect(
+      decideQuit(createInput({ project: { ...MODIFIED_FILE, identity: 7 } })).loss
+        .project,
+    ).toEqual({ fileName: "interview.qcproj", identity: 7 });
   });
 
   it("covers the pending In point and the live export only when the dialog listed them", () => {
@@ -365,6 +406,7 @@ describe("decideClear", () => {
             hasChangesToSave: false,
             isModifiedFile: false,
             fileName: "cut.qcproj",
+            identity: 0,
           },
         }),
       ),
@@ -424,7 +466,7 @@ describe("presentQuitPrompt", () => {
   it("is the save prompt when the project has changes to save (ADR 072)", () => {
     expect(
       presentQuitPrompt({
-        project: { fileName: "interview.qcproj" },
+        project: { fileName: "interview.qcproj", identity: 0 },
         pendingIn: true,
         exportActive: true,
         queuedExports: 2,
@@ -445,7 +487,8 @@ describe("presentQuitPrompt", () => {
       discard: { key: "quitGuard.dontSave" },
     });
     expect(
-      presentQuitPrompt({ ...NOTHING_LOST, project: { fileName: null } }).lines,
+      presentQuitPrompt({ ...NOTHING_LOST, project: { fileName: null, identity: 0 } })
+        .lines,
     ).toEqual([{ key: "quitGuard.project.noFile" }]);
   });
 
@@ -579,6 +622,14 @@ describe("presentOpenPrompt (ADR 072)", () => {
     expect(presentOpenPrompt({ fileName: null }).lines).toEqual([
       { key: "quitGuard.project.noFile" },
     ]);
+  });
+
+  it("has the title of a restore before a restore, and the same lines and buttons (ADR 073)", () => {
+    const open = presentOpenPrompt({ fileName: "interview.qcproj" });
+    expect(presentOpenPrompt({ fileName: "interview.qcproj" }, true)).toEqual({
+      ...open,
+      title: { key: "quitGuard.open.restoreSaveTitle" },
+    });
   });
 });
 

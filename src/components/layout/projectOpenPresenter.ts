@@ -24,6 +24,7 @@ import type {
   ProjectCommandError,
   ProjectCommandErrorCode,
 } from "@/features/project/types";
+import type { RecoveryErrorCode } from "@/features/recovery/types";
 import type { SequenceLoadProblem } from "@/features/timeline/sequenceLoad";
 
 /**
@@ -79,6 +80,28 @@ export const SEQUENCE_REFUSED_MESSAGE_KEYS = {
   invalidSegmentName: "projectOpen.error.document.invalidSegmentName",
   invalidSegment: "projectOpen.error.sequence.invalidSegment",
 } as const satisfies Record<SequenceLoadProblem["kind"], string>;
+
+/**
+ * The catalog key of the message of each code of `read_recovery` (ADR 073, restore step 4). A
+ * code whose message of `load_project` fits a restore reuses it. `read_recovery` never gives the
+ * codes of a write, a removal or a document that a write sends; they use the message of an
+ * unknown error. An offer id of the wrong form names no offer, so its message is that of a
+ * missing offer.
+ */
+export const RECOVERY_READ_MESSAGE_KEYS = {
+  invalidOfferId: "projectOpen.error.recovery.notFound",
+  offerNotFound: "projectOpen.error.recovery.notFound",
+  renameFailed: "projectOpen.error.recovery.renameFailed",
+  readFailed: "projectOpen.error.recovery.readFailed",
+  writeFailed: "projectOpen.error.load.unknown",
+  removeFailed: "projectOpen.error.load.unknown",
+  invalidRecoveryFile: "projectOpen.error.recovery.invalidFile",
+  unsupportedRecoveryVersion: "projectOpen.error.recovery.unsupportedVersion",
+  documentRefused: "projectOpen.error.load.unknown",
+  commandExecutionFailed: "projectOpen.error.load.commandExecutionFailed",
+  missingRestoreState: "projectOpen.error.load.unknown",
+  unknown: "projectOpen.error.load.unknown",
+} as const satisfies Record<RecoveryErrorCode, string>;
 
 /** The catalog key of each fact of a file that does not read as the project says. */
 export const SOURCE_FACT_MESSAGE_KEYS = {
@@ -161,6 +184,10 @@ export type ProjectOpenView =
 
 const TITLE: ProjectOpenMessage = { key: "projectOpen.title" };
 const FAILED_TITLE: ProjectOpenMessage = { key: "projectOpen.failedTitle" };
+const RESTORE_TITLE: ProjectOpenMessage = { key: "projectOpen.restoreTitle" };
+const RESTORE_FAILED_TITLE: ProjectOpenMessage = {
+  key: "projectOpen.restoreFailedTitle",
+};
 const UNUSABLE: ProjectOpenMessage = { key: "projectOpen.reason.unusable" };
 
 /** A text that is not empty, or null. */
@@ -209,13 +236,37 @@ export function presentOpenError(error: OpenProjectError): {
     case "entriesDiffer":
       return { message: { key: "projectOpen.error.entriesDiffer" }, detail: null };
     case "recoveryReadFailed":
-      // The read of the offer of a restore (ADR 073). Nothing starts a restore yet, and the
-      // catalogs have no message of its own for it, so it uses the message of an unknown error.
-      return {
-        message: { key: "projectOpen.error.load.unknown" },
-        detail: nonBlank(error.error?.detail),
-      };
+      return presentRecoveryReadError(error);
   }
+}
+
+/**
+ * The message and the details of a read of the offer of a restore that failed (ADR 073). A
+ * process that is not the owner and a session that ended have no error, and a message each. The
+ * details hold the text of the system and, for a recovery file whose document is not valid, the
+ * field of the document that the error names.
+ */
+function presentRecoveryReadError(
+  error: Extract<OpenProjectError, { kind: "recoveryReadFailed" }>,
+): { readonly message: ProjectOpenMessage; readonly detail: string | null } {
+  if (error.status === "notOwner") {
+    return { message: { key: "projectOpen.error.recovery.notOwner" }, detail: null };
+  }
+  if (error.status === "staleSession") {
+    return {
+      message: { key: "projectOpen.error.recovery.staleSession" },
+      detail: null,
+    };
+  }
+  const code = error.error?.code ?? "unknown";
+  const lines = [
+    nonBlank(error.error?.detail),
+    error.error?.project === undefined ? null : loadDiagnostic(error.error.project),
+  ].filter((line): line is string => line !== null);
+  return {
+    message: { key: RECOVERY_READ_MESSAGE_KEYS[code] },
+    detail: lines.length === 0 ? null : lines.join("\n"),
+  };
 }
 
 /** The status of a row that has no file, from its reason. */
@@ -287,18 +338,25 @@ export function presentOpenRow(row: OpenSourceRow, busy: boolean): ProjectOpenRo
 /**
  * The view of the project dialog for the state of the open step, or null while the dialog is
  * closed. A state with no path of a project file names no file in the read.
+ *
+ * A restore (ADR 073) has its own titles, and its read names the recovery file, which it reads,
+ * and not the project file of the offer, which can be absent. Each other text of a restore is the
+ * text of an open: no other text names the project file.
  */
 export function presentProjectOpen(state: OpenProjectState): ProjectOpenView | null {
   const phase = state.phase;
+  const restore = state.mode === "restore";
+  const title = restore ? RESTORE_TITLE : TITLE;
   switch (phase.kind) {
     case "idle":
       return null;
     case "loading":
       return {
         kind: "loading",
-        title: TITLE,
-        message:
-          state.projectPath === null
+        title,
+        message: restore
+          ? { key: "projectOpen.restoreLoading" }
+          : state.projectPath === null
             ? { key: "projectOpen.loadingNoName" }
             : {
                 key: "projectOpen.loading",
@@ -310,7 +368,7 @@ export function presentProjectOpen(state: OpenProjectState): ProjectOpenView | n
       const done = Math.min(Math.max(phase.current - 1, 0), total);
       return {
         kind: "checking",
-        title: TITLE,
+        title,
         message: {
           key:
             phase.stage === "sources"
@@ -324,7 +382,7 @@ export function presentProjectOpen(state: OpenProjectState): ProjectOpenView | n
     case "locating":
       return {
         kind: "locating",
-        title: TITLE,
+        title,
         // The line above the list follows the rows.
         message: {
           key: phase.rows.some((row) => row.foundPath === null)
@@ -336,7 +394,12 @@ export function presentProjectOpen(state: OpenProjectState): ProjectOpenView | n
       };
     case "failed": {
       const { message, detail } = presentOpenError(phase.error);
-      return { kind: "failed", title: FAILED_TITLE, message, detail };
+      return {
+        kind: "failed",
+        title: restore ? RESTORE_FAILED_TITLE : FAILED_TITLE,
+        message,
+        detail,
+      };
     }
   }
 }

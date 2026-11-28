@@ -4,6 +4,7 @@ import { startExportAttentionSync } from "@/components/layout/exportAttentionSyn
 import { ProjectOpenDialog } from "@/components/layout/ProjectOpenDialog";
 import { ProjectSaveErrorDialog } from "@/components/layout/ProjectSaveErrorDialog";
 import { QuitGuardDialog } from "@/components/layout/QuitGuardDialog";
+import { RecoveryPromptDialog } from "@/components/layout/RecoveryPromptDialog";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { TimelineArea } from "@/components/layout/TimelineArea";
 import { TitleBar } from "@/components/layout/TitleBar";
@@ -20,6 +21,7 @@ import { TimelinePanel } from "@/components/timeline/TimelinePanel";
 import { TransportBar } from "@/components/transport/TransportBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { startExportQueueRecovery } from "@/features/export/recovery";
+import { startPageRecovery } from "@/features/recovery/pageController";
 import { usePreferenceSync } from "@/features/settings/preferenceSync";
 import { useSettingsChangedSync } from "@/features/settings/settingsSync";
 import { useSettingsWindowDraftMirror } from "@/features/settings/settingsWindowDraft";
@@ -45,6 +47,13 @@ export function AppShell() {
   // Rebuild the export queue that the backend still runs after a page reload (ADR 049). It
   // runs once per page. The status views and the quit guard read the restored stores.
   useEffect(() => startExportQueueRecovery(), []);
+  // Start the recovery session of the page (ADR 073): the recovery file of the work that is not
+  // saved, and the offers of the work that an earlier exit kept. The start runs one time, also
+  // when StrictMode runs this effect two times, and nothing stops it: only a confirmed quit ends
+  // the session.
+  useEffect(() => {
+    startPageRecovery();
+  }, []);
   // Mirror the export progress on the Dock and the task bar (ADR 025).
   useEffect(() => startTaskbarProgressSync(), []);
   // Bounce the Dock icon or flash the task bar button when an export ends in the background.
@@ -94,6 +103,9 @@ export function AppShell() {
             the files to locate, and the error of an open. The open step of the quit guard
             drives it through its store. */}
         <ProjectOpenDialog />
+        {/* The one mount of the recovery prompt (ADR 073). It shows for the work that an exit
+            that did not ask kept, while no other dialog is open. A quit prompt opens above it. */}
+        <RecoveryPromptDialog />
         {/*
          * The one mount of the quit guard dialog. Its portal opens after any dialog that is
          * already open, so it draws above the export dialog and the project dialog.

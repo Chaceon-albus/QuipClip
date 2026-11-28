@@ -1034,6 +1034,162 @@ describe("for the quit", () => {
   });
 });
 
+describe("the hold of a quit", () => {
+  it("says whether the line is empty now", async () => {
+    const h = harness();
+    await h.started();
+    expect(h.controller.isLineEmpty()).toBe(true);
+    const write = held<RecoveryChangeResult>();
+    h.script.write.push(write);
+    h.markWork();
+    // The wait of 1 second is not in the line.
+    expect(h.controller.isLineEmpty()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.controller.isLineEmpty()).toBe(false);
+    write.resolve(WRITTEN);
+    await flush();
+    expect(h.controller.isLineEmpty()).toBe(true);
+  });
+
+  it("sends no command while it runs, and keeps the entries that wait", async () => {
+    const h = harness();
+    h.script.list.push(partial([]));
+    await h.started();
+    const write = held<RecoveryChangeResult>();
+    h.script.write.push(write);
+    h.markWork();
+    await vi.advanceTimersByTimeAsync(1000);
+    let discarded: RecoveryDiscardResult | null = null;
+    void h.controller.discard("0000000000000001").then((result) => {
+      discarded = result;
+    });
+    h.controller.suspend();
+    write.resolve(WRITTEN);
+    await flush();
+    h.rename("A");
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(h.changes()).toEqual(["write null"]);
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(1);
+    // The discard waits in the line, with no answer.
+    expect(discarded).toBeNull();
+    expect(h.controller.isLineEmpty()).toBe(false);
+    // No new entry goes in the line during the hold.
+    await expect(h.controller.finishRestore("0000000000000002")).resolves.toBeNull();
+  });
+
+  it("drops the entries that wait when close ends the hold", async () => {
+    const h = harness();
+    await h.started();
+    const write = held<RecoveryChangeResult>();
+    h.script.write.push(write);
+    h.markWork();
+    await vi.advanceTimersByTimeAsync(1000);
+    const discarded = h.controller.discard("0000000000000001");
+    const finished = h.controller.finishRestore("0000000000000002");
+    h.controller.suspend();
+    h.controller.close();
+    await expect(discarded).resolves.toEqual({ owner: false, status: "staleSession" });
+    await expect(finished).resolves.toBeNull();
+    write.resolve(WRITTEN);
+    await flush();
+    expect(h.changes()).toEqual(["write null"]);
+  });
+
+  it("sends the entries that waited in their order when the hold ends", async () => {
+    const h = harness();
+    await h.started();
+    const write = held<RecoveryChangeResult>();
+    h.script.write.push(write);
+    h.markWork();
+    await vi.advanceTimersByTimeAsync(1000);
+    const discarded = h.controller.discard("0000000000000001");
+    const finished = h.controller.finishRestore("0000000000000002");
+    const resume = h.controller.suspend();
+    write.resolve(WRITTEN);
+    await flush();
+    expect(h.changes()).toEqual(["write null"]);
+
+    resume();
+    await expect(discarded).resolves.toEqual({ owner: true, status: "done" });
+    await expect(finished).resolves.toEqual(WRITTEN);
+    expect(h.changes()).toEqual([
+      "write null",
+      "discard 0000000000000001",
+      "finish 0000000000000002 work",
+    ]);
+  });
+
+  it("lists and writes again at its end, as after a confirm_quit that failed", async () => {
+    const h = harness();
+    h.script.list.push(partial([]));
+    await h.started();
+    h.markWork();
+    const resume = h.controller.suspend();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(h.changes()).toEqual([]);
+
+    resume();
+    await flush();
+    // The list was not complete, so it goes in the line again at once.
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.changes()).toEqual(["write null"]);
+    // A second call of the same end does nothing.
+    resume();
+    await flush();
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(2);
+  });
+
+  it("adds no second list at its end while a list runs", async () => {
+    const h = harness();
+    const listing = held<RecoveryListResult>();
+    h.script.list.push(listing);
+    await h.controller.start();
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(1);
+
+    const resume = h.controller.suspend();
+    resume();
+    listing.resolve(COMPLETE);
+    await flush();
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not list again at its end after a complete list", async () => {
+    const h = harness();
+    await h.started();
+    const resume = h.controller.suspend();
+    resume();
+    await flush();
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists and compares at its end when it started before the token came", async () => {
+    const h = harness();
+    const resume = h.controller.suspend();
+    await h.started();
+    h.markWork();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.log).toEqual(["start"]);
+    resume();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.log).toEqual(["start", "list 7", "write null"]);
+  });
+
+  it("does nothing after close", async () => {
+    const h = harness();
+    await h.started();
+    const resume = h.controller.suspend();
+    h.controller.close();
+    resume();
+    h.markWork();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(h.changes()).toEqual([]);
+    expect(h.clients.listRecoveryOffers).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the recovery state reader", () => {
   it("builds no content while its inputs did not change, and compares by value", () => {
     const h = harness();

@@ -1210,8 +1210,42 @@ interface OpenStep {
   readonly mediaPath: string | null;
 }
 
-/** The newest OPEN step of `runExportFlow` that has not settled, or null. */
+/** The newest OPEN step of `runExportFlow` that has not settled, or null. Only `setOpenStep` sets it. */
 let openStep: OpenStep | null = null;
+
+/** The listeners of `subscribeExportOpenStep`. */
+const openStepListeners = new Set<() => void>();
+
+function setOpenStep(next: OpenStep | null): void {
+  if (openStep === next) {
+    return;
+  }
+  openStep = next;
+  for (const listener of [...openStepListeners]) {
+    listener();
+  }
+}
+
+/**
+ * True while an OPEN step of `runExportFlow` waits, before it opens the modal: it reads the
+ * settings or checks the source. A step that `staleExportOpenStep` made stale does not count,
+ * because it opens nothing. The recovery prompt (ADR 073) waits for it, so the export dialog
+ * never opens over the prompt.
+ */
+export function isExportOpenStepWaiting(): boolean {
+  return openStep !== null;
+}
+
+/**
+ * Calls `listener` after each change of `isExportOpenStepWaiting`: a step that starts, and a step
+ * that settles or goes stale. Answers the function that removes the listener.
+ */
+export function subscribeExportOpenStep(listener: () => void): () => void {
+  openStepListeners.add(listener);
+  return () => {
+    openStepListeners.delete(listener);
+  };
+}
 
 /**
  * Convenience helper to run the export flow OPEN step.
@@ -1244,7 +1278,7 @@ export async function runExportFlow(
     return false;
   }
   const step: OpenStep = { mediaPath };
-  openStep = step;
+  setOpenStep(step);
   const isCurrent = () => openStep === step;
 
   const reportError =
@@ -1283,7 +1317,7 @@ export async function runExportFlow(
     return isCurrent() && opened;
   } finally {
     if (isCurrent()) {
-      openStep = null;
+      setOpenStep(null);
     }
   }
 }
@@ -1295,7 +1329,7 @@ export async function runExportFlow(
  * no step waits.
  */
 export function staleExportOpenStep(): void {
-  openStep = null;
+  setOpenStep(null);
 }
 
 /**

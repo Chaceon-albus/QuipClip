@@ -35,6 +35,16 @@
  * of the hand-off ends the wait after that grace period. The item plans again at that moment, so
  * it checks its target when the dialog opens. The backend binds the event of such an item to the
  * show that it came from, and a later menu cancels the hand-off of the menu before it.
+ *
+ * The item event reports the choice to the mark (`NativeContextMenuMark.chosen`). A mark that
+ * closes with no choice keeps a choice pending for the grace period (`isChoicePending`), so the
+ * recovery prompt (ADR 073) does not show between the popup reply and a late item event:
+ *
+ * - Item event first: the item runs at once, or the hand-off keeps it, and the mark records the
+ *   choice. At the close, the item of the hand-off runs in the close listeners, and no choice is
+ *   pending.
+ * - Popup reply first: the mark closes with a pending choice. The item event then runs the item,
+ *   and only after that ends the pending choice. With no item event, the grace period ends it.
  */
 
 import type { StoreApi } from "zustand/vanilla";
@@ -249,9 +259,13 @@ export function createSegmentContextMenu(
           onSelect: (action) => {
             if (SEGMENT_MENU_DIALOG_ACTIONS.has(action)) {
               handoff.choose(action);
-              return;
+            } else {
+              select(action, target, entries);
             }
-            select(action, target, entries);
+            // The choice came: the mark keeps no choice pending after its close (ADR 073). The
+            // call comes after the item ran, or after the hand-off took the choice, so nothing
+            // that waits for the menu, such as the recovery prompt, shows before the item.
+            mark.chosen();
           },
           onPopup: mark.showing,
         });

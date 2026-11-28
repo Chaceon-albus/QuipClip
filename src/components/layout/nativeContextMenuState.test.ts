@@ -99,6 +99,103 @@ describe("createNativeContextMenuState", () => {
   });
 });
 
+/** A state whose timers of a pending choice the test runs. */
+function withTimers() {
+  const timers: { callback: () => void; delayMs: number; stopped: boolean }[] = [];
+  const state = createNativeContextMenuState({
+    schedule: (callback, delayMs) => {
+      const entry = { callback, delayMs, stopped: false };
+      timers.push(entry);
+      return () => {
+        entry.stopped = true;
+      };
+    },
+  });
+  const fire = () => {
+    for (const entry of [...timers]) {
+      if (!entry.stopped) {
+        entry.stopped = true;
+        entry.callback();
+      }
+    }
+  };
+  return { state, timers, fire };
+}
+
+describe("the subscribers of the state (ADR 073)", () => {
+  it("tells each open and each close of a mark one time, until the listener goes", () => {
+    const { state } = withTimers();
+    const seen: boolean[] = [];
+    const unsubscribe = state.subscribe(() => {
+      seen.push(state.isOpen());
+    });
+
+    const mark = state.open();
+    mark.chosen();
+    mark.close();
+    mark.close();
+    expect(seen).toEqual([true, false]);
+
+    unsubscribe();
+    state.open().close();
+    expect(seen).toEqual([true, false]);
+  });
+});
+
+describe("the pending choice of a mark that closed (ADR 073)", () => {
+  it("keeps a choice pending after a close with no choice, until the item event", () => {
+    const { state, timers } = withTimers();
+    const seen: boolean[] = [];
+    state.subscribe(() => {
+      seen.push(state.isChoicePending());
+    });
+
+    const mark = state.open();
+    mark.close();
+    expect(state.isOpen()).toBe(false);
+    expect(state.isChoicePending()).toBe(true);
+    expect(timers[0]?.delayMs).toBe(NATIVE_CONTEXT_MENU_GRACE_MS);
+
+    mark.chosen();
+    expect(state.isChoicePending()).toBe(false);
+    expect(timers[0]?.stopped).toBe(true);
+    // The open, the close, and the end of the pending choice.
+    expect(seen).toEqual([false, true, false]);
+    mark.chosen();
+    expect(seen).toHaveLength(3);
+  });
+
+  it("ends the pending choice after the grace period when no item event comes", () => {
+    const { state, fire } = withTimers();
+    const heard = vi.fn();
+    state.subscribe(heard);
+
+    state.open().close();
+    expect(state.isChoicePending()).toBe(true);
+    heard.mockClear();
+    fire();
+    expect(state.isChoicePending()).toBe(false);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps no choice pending when the item event came before the close", () => {
+    const { state, timers } = withTimers();
+    const mark = state.open();
+    mark.chosen();
+    mark.close();
+    expect(state.isChoicePending()).toBe(false);
+    expect(timers).toHaveLength(0);
+  });
+
+  it("stops the timers at dispose", () => {
+    const { state, timers } = withTimers();
+    state.open().close();
+    state.dispose();
+    expect(state.isChoicePending()).toBe(false);
+    expect(timers[0]?.stopped).toBe(true);
+  });
+});
+
 describe("the close listeners of a mark (ADR 065)", () => {
   it("runs each listener once when the mark closes", () => {
     const state = createNativeContextMenuState();

@@ -302,8 +302,12 @@ export const en = {
       file: "“{{name}}” has changes that are not saved.",
       noFile: "The project has no file, so its segments are not saved.",
     },
+    // `restoreSaveTitle` is the title of the save prompt before the restore of the work that
+    // QuipClip kept after an exit that did not ask (ADR 073).
     open: {
       saveTitle: "Save the project before you open another one?",
+      restoreSaveTitle:
+        "Save the project before you restore the work that QuipClip kept?",
     },
     save: "Save",
     dontSave: "Don’t Save",
@@ -1570,6 +1574,11 @@ export const en = {
   projectOpen: {
     title: "Open Project",
     failedTitle: "QuipClip could not open the project",
+    // The same dialog for the restore of the work that QuipClip kept after an exit that did not
+    // ask (ADR 073). The restore reads the recovery file, not the project file.
+    restoreTitle: "Restore Project",
+    restoreFailedTitle: "QuipClip could not restore the project",
+    restoreLoading: "Reading the recovery file…",
     loading: "Reading “{{name}}”…",
     loadingNoName: "Reading the project…",
     checking: "Checking file {{current}} of {{total}}: “{{name}}”",
@@ -1661,6 +1670,39 @@ export const en = {
       },
       entriesDiffer:
         "The project file lists the same video file two times with different information, so QuipClip did not open it.",
+      // The errors of the read of the recovery file of a restore (ADR 073). The other codes of
+      // that read use the messages of `load`. `notOwner`: another QuipClip process owns the
+      // recovery files, or the data folder of QuipClip is not known. `staleSession`: the
+      // recovery of this window ended, as after a reload of the window.
+      recovery: {
+        notFound: "QuipClip did not find the recovery file.",
+        readFailed: "QuipClip could not read the recovery file.",
+        renameFailed: "QuipClip could not rename a file in its recovery folder.",
+        invalidFile:
+          "The recovery file is damaged, or it has a value that QuipClip does not accept.",
+        unsupportedVersion:
+          "The recovery file has no version, or it has a version that this version of QuipClip does not read.",
+        notOwner:
+          "Another QuipClip process uses the recovery files, or QuipClip cannot find its data folder.",
+        staleSession:
+          "The recovery of this window ended, so QuipClip cannot read the recovery file.",
+      },
     },
+  },
+  // The recovery prompt (ADR 073). It shows at the start after QuipClip ended with no confirmed
+  // quit, such as after a crash, and offers the work that QuipClip kept. {{name}} is the name of
+  // the project file of that work, such as "interview.qcproj". `noFile` is for work whose project
+  // had no file. {{time}} is the date and the time of the write of the recovery file, in the format of the
+  // language of the interface, such as "11/27/26, 3:04 PM". Restore is the primary button,
+  // Discard deletes the kept work, and Not Now keeps it for the next start.
+  recovery: {
+    title: "Restore the work that was not saved?",
+    file: "QuipClip ended before the changes to “{{name}}” were saved. It kept that work.",
+    noFile:
+      "QuipClip ended before a project with no file was saved. It kept that work.",
+    savedAt: "Saved for recovery: {{time}}",
+    restore: "Restore",
+    discard: "Discard",
+    notNow: "Not Now",
   },
 } as const;

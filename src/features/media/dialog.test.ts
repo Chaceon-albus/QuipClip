@@ -5,7 +5,10 @@ import {
   VIDEO_FILE_EXTENSIONS,
 } from "./dialog";
 import { ImportMediaError, type ImportMediaResult } from "./types";
-import { isSystemFileDialogOpen } from "@/lib/systemFileDialog";
+import {
+  isSystemFileDialogOpen,
+  subscribeSystemFileDialog,
+} from "@/lib/systemFileDialog";
 import type { FrameCount, Pts, TickCount } from "@/types/project";
 
 function createFakeMediaResult(fileName: string): ImportMediaResult {
@@ -386,6 +389,61 @@ describe("Media Dialog Orchestration", () => {
         openDialog,
         reportError: vi.fn(),
       });
+      expect(isSystemFileDialogOpen()).toBe(false);
+    });
+
+    it("is true while openPaths takes the request, and false while the request runs (ADR 073)", async () => {
+      // The quit guard takes the request in the call of `openPaths`, so a reader of the count
+      // sees the dialog or the flow of the guard, with no moment between them.
+      const work = pendingDialog();
+      let openAtHandoff: boolean | null = null;
+      const openPaths = vi.fn((_paths: readonly string[]): Promise<unknown> => {
+        openAtHandoff = isSystemFileDialogOpen();
+        return work.openDialog() as Promise<unknown>;
+      });
+      const closes: boolean[] = [];
+      const unsubscribe = subscribeSystemFileDialog(() => {
+        closes.push(isSystemFileDialogOpen());
+      });
+      try {
+        const running = openMediaFileDialog({
+          filterName: defaultFilterName,
+          openDialog: vi.fn().mockResolvedValue(["/p/cut.qcproj"]),
+          openPaths,
+        });
+        await vi.waitFor(() => {
+          expect(openPaths).toHaveBeenCalledTimes(1);
+        });
+        expect(openAtHandoff).toBe(true);
+        await vi.waitFor(() => {
+          expect(isSystemFileDialogOpen()).toBe(false);
+        });
+        // The count ended after the handoff, and the request still runs.
+        expect(closes).toEqual([true, false]);
+        let ended = false;
+        void running.then(() => {
+          ended = true;
+        });
+        await Promise.resolve();
+        expect(ended).toBe(false);
+        work.resolve(null);
+        await running;
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it("passes on a request that rejects, and reports no dialog error", async () => {
+      const reportError = vi.fn();
+      await expect(
+        openMediaFileDialog({
+          filterName: defaultFilterName,
+          openDialog: vi.fn().mockResolvedValue("/media/clip.mp4"),
+          openPaths: () => Promise.reject(new Error("request failed")),
+          reportError,
+        }),
+      ).rejects.toThrow("request failed");
+      expect(reportError).not.toHaveBeenCalled();
       expect(isSystemFileDialogOpen()).toBe(false);
     });
 

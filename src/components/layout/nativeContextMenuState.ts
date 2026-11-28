@@ -96,13 +96,33 @@ export interface NativeContextMenuMark {
    * the menu has gone, such as an item that opens a dialog (ADR 065), waits for this.
    */
   readonly onClose: (listener: () => void) => void;
+  /**
+   * Reports that the item event of the menu arrived, after the item ran when it runs at once. A
+   * mark that closes with no choice keeps its choice pending (`isChoicePending`) until this call
+   * or for the grace period, because the item event can come after the popup reply. A second
+   * call does nothing.
+   */
+  readonly chosen: () => void;
 }
 
 export interface NativeContextMenuState {
   /** True while at least one native context menu is open. */
   readonly isOpen: () => boolean;
+  /**
+   * True while a menu closed with no choice, for the grace period from its close
+   * (`NATIVE_CONTEXT_MENU_GRACE_MS`), unless its item event comes first (`chosen`). The popup
+   * reply and the item event reach the page on two channels, in either order, so a choice can
+   * still come then. The recovery prompt (ADR 073) waits for it, so the item that the user chose
+   * never finds the prompt. The keyboard layer does not read it.
+   */
+  readonly isChoicePending: () => boolean;
   /** Marks a native context menu as open. */
   readonly open: () => NativeContextMenuMark;
+  /**
+   * Calls `listener` after each mark that opens and each mark that closes. The recovery prompt
+   * (ADR 073) waits for the close of each menu. Answers the function that removes the listener.
+   */
+  readonly subscribe: (listener: () => void) => () => void;
   /** Removes the input listeners, for a hot reload of this module. */
   readonly dispose: () => void;
 }
@@ -113,7 +133,19 @@ export interface NativeContextMenuStateOptions {
   readonly input?: NativeContextMenuInputTarget | null;
   /** The clock of the grace period, in milliseconds. `performance.now` by default. */
   readonly now?: () => number;
+  /**
+   * Starts the timer of a pending choice, and answers the function that stops it. `setTimeout`
+   * by default.
+   */
+  readonly schedule?: (callback: () => void, delayMs: number) => () => void;
 }
+
+const defaultSchedule = (callback: () => void, delayMs: number): (() => void) => {
+  const handle = globalThis.setTimeout(callback, delayMs);
+  return () => {
+    globalThis.clearTimeout(handle);
+  };
+};
 
 /** Creates an empty state. */
 export function createNativeContextMenuState(
@@ -121,23 +153,50 @@ export function createNativeContextMenuState(
 ): NativeContextMenuState {
   const input = options.input ?? null;
   const now = options.now ?? (() => performance.now());
+  const schedule = options.schedule ?? defaultSchedule;
   // The open marks. A set, and not a flag, so a menu that closes after a newer one opened does
   // not clear the state of the newer one.
   const open = new Set<object>();
+  // The open marks whose item event arrived.
+  const chosenMarks = new Set<object>();
+  // The marks that closed with no choice, with the function that stops the timer of each.
+  const pending = new Map<object, () => void>();
   // The marks whose popup call was sent, with the time of the call.
   const showing = new Map<object, number>();
   // The close listeners of each open mark.
   const listeners = new Map<object, (() => void)[]>();
+  // The listeners of `subscribe`.
+  const subscribers = new Set<() => void>();
+
+  const notify = (): void => {
+    for (const subscriber of [...subscribers]) {
+      subscriber();
+    }
+  };
 
   /** Closes a mark and runs its close listeners once. */
   const finish = (mark: object): void => {
-    open.delete(mark);
+    if (!open.delete(mark)) {
+      return;
+    }
     showing.delete(mark);
     const waiting = listeners.get(mark) ?? [];
     listeners.delete(mark);
     for (const listener of waiting) {
       listener();
     }
+    // A choice can still come after the close. The choice ends the wait, or the grace period.
+    if (!chosenMarks.delete(mark)) {
+      pending.set(
+        mark,
+        schedule(() => {
+          if (pending.delete(mark)) {
+            notify();
+          }
+        }, NATIVE_CONTEXT_MENU_GRACE_MS),
+      );
+    }
+    notify();
   };
 
   const onInput = (event: NativeContextMenuInputEvent): void => {
@@ -158,9 +217,17 @@ export function createNativeContextMenuState(
 
   return {
     isOpen: () => open.size > 0,
+    isChoicePending: () => pending.size > 0,
+    subscribe: (listener) => {
+      subscribers.add(listener);
+      return () => {
+        subscribers.delete(listener);
+      };
+    },
     open: () => {
       const mark = {};
       open.add(mark);
+      notify();
       return {
         close: () => {
           finish(mark);
@@ -177,12 +244,28 @@ export function createNativeContextMenuState(
           }
           listeners.set(mark, [...(listeners.get(mark) ?? []), listener]);
         },
+        chosen: () => {
+          if (open.has(mark)) {
+            chosenMarks.add(mark);
+            return;
+          }
+          const stop = pending.get(mark);
+          if (stop !== undefined) {
+            pending.delete(mark);
+            stop();
+            notify();
+          }
+        },
       };
     },
     dispose: () => {
       for (const type of NATIVE_CONTEXT_MENU_INPUT_EVENTS) {
         input?.removeEventListener(type, onInput, { capture: true });
       }
+      for (const stop of pending.values()) {
+        stop();
+      }
+      pending.clear();
     },
   };
 }

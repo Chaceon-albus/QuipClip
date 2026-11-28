@@ -9,13 +9,14 @@ import {
   PROJECT_COMMAND_ERROR_CODES,
   ProjectCommandError,
 } from "@/features/project/types";
-import { RecoveryCommandError } from "@/features/recovery/types";
+import { RECOVERY_ERROR_CODES, RecoveryCommandError } from "@/features/recovery/types";
 import { createI18nInstance } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
 import {
   DOCUMENT_REFUSED_MESSAGE_KEYS,
   PROJECT_LOAD_MESSAGE_KEYS,
+  RECOVERY_READ_MESSAGE_KEYS,
   SEQUENCE_REFUSED_MESSAGE_KEYS,
   SOURCE_FACT_MESSAGE_KEYS,
   presentOpenError,
@@ -336,17 +337,176 @@ describe("presentOpenError", () => {
     );
   });
 
-  it("gives a read of a recovery offer that failed the message of an unknown error, with its detail", () => {
+  it("gives each code of read_recovery a message, and the text of the system as the detail", () => {
+    for (const code of RECOVERY_ERROR_CODES) {
+      const view = presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "failed",
+        error: new RecoveryCommandError({ code, detail: "os error 5" }),
+      });
+      expect(view.message).toEqual({ key: RECOVERY_READ_MESSAGE_KEYS[code] });
+      expect(view.detail).toBe("os error 5");
+    }
+  });
+
+  it("says that the recovery file was not found, or that it cannot be read (ADR 073)", () => {
+    expect(
+      presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "failed",
+        error: new RecoveryCommandError({ code: "offerNotFound" }),
+      }),
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.notFound" },
+      detail: null,
+    });
     expect(
       presentOpenError({
         kind: "recoveryReadFailed",
         status: "failed",
         error: new RecoveryCommandError({ code: "readFailed", detail: "EIO" }),
       }),
-    ).toEqual({ message: { key: "projectOpen.error.load.unknown" }, detail: "EIO" });
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.readFailed" },
+      detail: "EIO",
+    });
+  });
+
+  it("says that the version of the recovery file is absent or not read (ADR 073)", async () => {
+    expect(
+      presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "failed",
+        error: new RecoveryCommandError({ code: "unsupportedRecoveryVersion" }),
+      }),
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.unsupportedVersion" },
+      detail: null,
+    });
+    const english = await createI18nInstance({
+      initialPreference: "en",
+      storage: null,
+    });
+    const chinese = await createI18nInstance({
+      initialPreference: "zh-CN",
+      storage: null,
+    });
+    expect(english.t("projectOpen.error.recovery.unsupportedVersion")).toBe(
+      "The recovery file has no version, or it has a version that this version of QuipClip does not read.",
+    );
+    expect(chinese.t("projectOpen.error.recovery.unsupportedVersion")).toBe(
+      "恢复文件缺少版本信息，或者其版本不受此版本的 QuipClip 支持。",
+    );
+  });
+
+  it("puts the field of a document that is not valid in the detail of a recovery file", () => {
+    expect(
+      presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "failed",
+        error: new RecoveryCommandError({
+          code: "invalidRecoveryFile",
+          project: new ProjectCommandError({
+            code: "invalidProject",
+            field: "clips[0].sourceId",
+            value: "x",
+          }),
+        }),
+      }),
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.invalidFile" },
+      detail: "clips[0].sourceId: x",
+    });
+  });
+
+  it("gives a process that is not the owner and a session that ended a message each", () => {
     expect(
       presentOpenError({ kind: "recoveryReadFailed", status: "notOwner", error: null }),
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.notOwner" },
+      detail: null,
+    });
+    expect(
+      presentOpenError({
+        kind: "recoveryReadFailed",
+        status: "staleSession",
+        error: null,
+      }),
+    ).toEqual({
+      message: { key: "projectOpen.error.recovery.staleSession" },
+      detail: null,
+    });
+    // A failure with no error, which the open step never gives, has the message of an unknown
+    // error.
+    expect(
+      presentOpenError({ kind: "recoveryReadFailed", status: "failed", error: null }),
     ).toEqual({ message: { key: "projectOpen.error.load.unknown" }, detail: null });
+  });
+});
+
+describe("presentProjectOpen for a restore (ADR 073)", () => {
+  function restoreState(
+    phase: OpenProjectState["phase"],
+    projectPath: string | null = null,
+  ): OpenProjectState {
+    return { phase, projectPath, mode: "restore" };
+  }
+
+  it("has the title of a restore, and reads the recovery file with or without a name", () => {
+    for (const path of [null, "/p/cut.qcproj"]) {
+      expect(presentProjectOpen(restoreState({ kind: "loading" }, path))).toEqual({
+        kind: "loading",
+        title: { key: "projectOpen.restoreTitle" },
+        message: { key: "projectOpen.restoreLoading" },
+      });
+    }
+  });
+
+  it("keeps the title of a restore while it checks and while it lists the files", () => {
+    expect(
+      presentProjectOpen(
+        restoreState({
+          kind: "checking",
+          stage: "sources",
+          current: 1,
+          total: 2,
+          fileName: "a.mp4",
+        }),
+      ),
+    ).toMatchObject({ title: { key: "projectOpen.restoreTitle" } });
+    expect(
+      presentProjectOpen(
+        restoreState({
+          kind: "locating",
+          rows: [MISSING],
+          busy: false,
+          canOpen: false,
+        }),
+      ),
+    ).toMatchObject({
+      title: { key: "projectOpen.restoreTitle" },
+      message: { key: "projectOpen.locateIntro" },
+    });
+  });
+
+  it("shows the error of a restore with its own title", () => {
+    expect(
+      presentProjectOpen(
+        restoreState({
+          kind: "failed",
+          error: {
+            kind: "recoveryReadFailed",
+            status: "failed",
+            error: new RecoveryCommandError({ code: "offerNotFound" }),
+          },
+        }),
+      ),
+    ).toEqual({
+      kind: "failed",
+      title: { key: "projectOpen.restoreFailedTitle" },
+      message: { key: "projectOpen.error.recovery.notFound" },
+      detail: null,
+    });
   });
 });
 
@@ -357,9 +517,15 @@ describe("the catalog messages of the project dialog", () => {
       ...Object.values(DOCUMENT_REFUSED_MESSAGE_KEYS),
       ...Object.values(SEQUENCE_REFUSED_MESSAGE_KEYS),
       ...Object.values(SOURCE_FACT_MESSAGE_KEYS),
+      ...Object.values(RECOVERY_READ_MESSAGE_KEYS),
       ...IMPORT_MEDIA_ERROR_CODES.map((code) => `mediaError.${code}`),
       "projectOpen.title",
       "projectOpen.failedTitle",
+      "projectOpen.restoreTitle",
+      "projectOpen.restoreFailedTitle",
+      "projectOpen.restoreLoading",
+      "projectOpen.error.recovery.notOwner",
+      "projectOpen.error.recovery.staleSession",
       "projectOpen.loading",
       "projectOpen.loadingNoName",
       "projectOpen.checking",
@@ -403,5 +569,12 @@ describe("the catalog messages of the project dialog", () => {
     expect(english.t("projectOpen.title")).toBe("Open Project");
     expect(chinese.t("projectOpen.title")).toBe("打开项目");
     expect(english.t("projectOpen.locate")).toBe("Locate…");
+    // The texts of a restore (ADR 073).
+    expect(english.t("projectOpen.restoreTitle")).toBe("Restore Project");
+    expect(chinese.t("projectOpen.restoreTitle")).toBe("恢复项目");
+    expect(english.t("projectOpen.error.recovery.notFound")).toBe(
+      "QuipClip did not find the recovery file.",
+    );
+    expect(chinese.t("projectOpen.error.recovery.notFound")).toBe("未找到恢复文件。");
   });
 });

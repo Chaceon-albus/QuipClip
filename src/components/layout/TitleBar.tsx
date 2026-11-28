@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { presentExportAction, type ExportActionLabel } from "./exportActionPresenter";
 import { openExportFlow } from "./exportFlowController";
 import { quitGuard } from "./quitGuardController";
+import { recoveryPrompt } from "./recoveryPromptController";
 import type { ShortcutAction } from "./shortcutBindings";
 import {
   isMenuItemAvailable,
@@ -142,6 +143,10 @@ export function TitleBar() {
     quitGuard.openStep.store,
     (state) => state.phase.kind !== "idle",
   );
+  const recoveryPromptOpen = useStore(
+    recoveryPrompt.store,
+    (state) => state.offer !== null,
+  );
   // While a dialog of this window is open, the bar takes the pointer for the window drag and
   // the window buttons, and the File menu and Export do not (`titleBarModal.ts`).
   const modal = presentTitleBarModal({
@@ -149,6 +154,7 @@ export function TitleBar() {
     quitPromptOpen,
     saveErrorOpen,
     projectOpenOpen,
+    recoveryPromptOpen,
   });
   // The key names come from the binding table (ADR 026). Save As has no key (ADR 072).
   const shortcutOf = useShortcutLabels();

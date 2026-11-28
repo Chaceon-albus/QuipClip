@@ -39,6 +39,8 @@ export interface TitleBarModalInput {
   readonly saveErrorOpen: boolean;
   /** The project dialog of an open is open (`ProjectOpenDialog`, ADR 072). */
   readonly projectOpenOpen: boolean;
+  /** The recovery prompt is open (`RecoveryPromptDialog`, ADR 073). */
+  readonly recoveryPromptOpen: boolean;
 }
 
 /** What the title bar changes while a modal dialog is open. */
@@ -57,8 +59,15 @@ export function presentTitleBarModal({
   quitPromptOpen,
   saveErrorOpen,
   projectOpenOpen,
+  recoveryPromptOpen,
 }: TitleBarModalInput): TitleBarModalView {
-  if (exportDialogOpen || quitPromptOpen || saveErrorOpen || projectOpenOpen) {
+  if (
+    exportDialogOpen ||
+    quitPromptOpen ||
+    saveErrorOpen ||
+    projectOpenOpen ||
+    recoveryPromptOpen
+  ) {
     return {
       modalOpen: true,
       barClass: "pointer-events-auto",

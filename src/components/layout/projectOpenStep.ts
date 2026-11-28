@@ -94,6 +94,9 @@ export interface OtherDialogTests {
  * The project dialog of the open that asks does not count: the step tests this before it sets
  * its first phase, so the dialog is not mounted then. The save prompt of the open shows only
  * after the first test, and the step tests again only after a save, when the prompt is closed.
+ *
+ * The recovery prompt (ADR 073) closes its store before it starts a restore, and the step tests
+ * only after a wait of its own, so React has drawn that prompt closed by then.
  */
 export function isOtherDialogOpen(tests: OtherDialogTests = {}): boolean {
   const hasPageOverlay = tests.hasPageOverlay ?? (() => isPageOverlayOpen());

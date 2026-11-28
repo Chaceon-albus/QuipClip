@@ -84,6 +84,18 @@ export interface OpenMediaFileDialogOptions {
 }
 
 /**
+ * What the file dialog of `openMediaFileDialog` gave: a dialog that failed, or the chosen paths
+ * with the request that `openPaths` started, or null when it started none.
+ */
+type DialogOutcome =
+  | { readonly kind: "failed" }
+  | {
+      readonly kind: "chosen";
+      readonly paths: readonly string[];
+      readonly handoff: Promise<unknown> | null;
+    };
+
+/**
  * Opens a native file dialog to select one or more video files and imports them (ADR 052).
  *
  * Requirements:
@@ -102,14 +114,20 @@ export async function openMediaFileDialog(
   const importPathFn = options.importPath ?? mediaStore.getState().importPath;
   const reportErrorFn = options.reportError ?? mediaStore.getState().reportError;
 
-  let selected: unknown;
-  try {
-    // The page receives no key press and no click while the dialog is open, because it is
-    // modal to the window. The macOS application menu still works then, so its command items
-    // read the shared count (`isSystemFileDialogOpen`) and do nothing while it is true. Without
-    // it, Open Media in the menu would queue a second dialog behind the first one.
-    selected = await trackSystemFileDialog(() =>
-      openDialogFn({
+  const openPaths = options.openPaths;
+  // The page receives no key press and no click while the dialog is open, because it is modal to
+  // the window. The macOS application menu still works then, so its command items read the shared
+  // count (`isSystemFileDialogOpen`) and do nothing while it is true. Without it, Open Media in
+  // the menu would queue a second dialog behind the first one.
+  //
+  // The dialog counts as open until `openPaths` took the request, so a reader of the count, such
+  // as the recovery prompt (ADR 073), sees the dialog or the flow of the quit guard that the
+  // request starts, with no moment between them. The count ends at a Cancel, at an error of the
+  // dialog, and when `openPaths` returned: its work goes on after the count.
+  const outcome = await trackSystemFileDialog(async (): Promise<DialogOutcome> => {
+    let selected: unknown;
+    try {
+      selected = await openDialogFn({
         multiple: true,
         directory: false,
         filters: [
@@ -118,9 +136,30 @@ export async function openMediaFileDialog(
             extensions: [...(options.extensions ?? VIDEO_FILE_EXTENSIONS)],
           },
         ],
-      }),
+      });
+    } catch {
+      return { kind: "failed" };
+    }
+    // Cancel or empty selection is a strict no-op
+    const paths = (Array.isArray(selected) ? selected : [selected]).filter(
+      (path): path is string => typeof path === "string" && path.trim().length > 0,
     );
-  } catch {
+    if (openPaths === undefined || paths.length === 0) {
+      return { kind: "chosen", paths, handoff: null };
+    }
+    try {
+      return { kind: "chosen", paths, handoff: openPaths(paths) };
+    } catch (error) {
+      return {
+        kind: "chosen",
+        paths,
+        handoff: Promise.reject(
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      };
+    }
+  });
+  if (outcome.kind === "failed") {
     reportErrorFn(
       new ImportMediaError({
         code: "dialogFailed",
@@ -128,17 +167,13 @@ export async function openMediaFileDialog(
     );
     return;
   }
-
-  // Cancel or empty selection is a strict no-op
-  const paths = (Array.isArray(selected) ? selected : [selected]).filter(
-    (path): path is string => typeof path === "string" && path.trim().length > 0,
-  );
-  if (options.openPaths !== undefined) {
-    if (paths.length > 0) {
-      await options.openPaths(paths);
+  if (openPaths !== undefined) {
+    if (outcome.handoff !== null) {
+      await outcome.handoff;
     }
     return;
   }
+  const paths = outcome.paths;
   // One after another, so the files join the sequence in the order of the selection.
   for (const path of paths) {
     await importPathFn(path);

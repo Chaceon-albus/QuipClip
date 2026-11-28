@@ -23,7 +23,8 @@
  * - The offers: `list_recovery_offers` goes in the line after the start, and again after 2
  *   seconds and then each 30 seconds while the list is not complete. `offers` is the store of the
  *   offers to show.
- * - For the quit: `whenLineEmpty`, `close` and `token`.
+ * - For the quit: `whenLineEmpty`, `isLineEmpty`, `token`, `suspend` (the hold from the call of
+ *   `confirm_quit`, which a `confirm_quit` that failed ends) and `close`.
  * - An answer that says that the token is not the token of the session (`staleSession`) stops the
  *   controller: it sends no more command.
  *
@@ -210,6 +211,22 @@ export interface RecoveryController {
    * of the list) is not in the line.
    */
   readonly whenLineEmpty: (maxMs: number) => Promise<boolean>;
+  /**
+   * True when no command runs and none waits in the line, now. The quit reads it to decide in the
+   * same call when the line is empty.
+   */
+  readonly isLineEmpty: () => boolean;
+  /**
+   * Holds the controller from the call of `confirm_quit` (ADR 073, "A quit that the user
+   * confirmed"): it stops each timer, sends no command, and puts no new entry in the line. A
+   * command that runs ends as it is. The entries that wait, such as a `finish_restore` or a
+   * discard, stay in the line: `close` drops them and answers them as it does, and the function
+   * that `suspend` answers ends the hold, for a `confirm_quit` that failed, and sends them in
+   * their order. The controller then lists the offers again when the list was not complete, and
+   * compares. A second hold while one runs, and a hold after `close` or a stale token, does
+   * nothing and answers a function that does nothing.
+   */
+  readonly suspend: () => () => void;
   /**
    * Stops each timer and each subscription. The controller then puts no more command in the line,
    * and the entries that wait there are dropped. A command that runs ends as it is.
@@ -429,6 +446,8 @@ export function createRecoveryController(
   let closed = false;
   /** True after an answer that refused the token. */
   let stopped = false;
+  /** True while a hold of `suspend` runs. */
+  let suspended = false;
 
   let written: RecoveryWrittenState = NOTHING;
   /**
@@ -458,13 +477,20 @@ export function createRecoveryController(
   let retryCount = 0;
   let listTimer: unknown = null;
   let listRepeats = 0;
+  /** True after a list answer that was complete. */
+  let listComplete = false;
+  /**
+   * True while a `list_recovery_offers` runs. The end of a hold adds no second list then: the
+   * answer of the list that runs starts its own repeat when it is not complete.
+   */
+  let listRunning = false;
 
   /** The ids of the offers that an answer of this life of the page gave. */
   const knownOffers = new Set<string>();
   const emptyWaiters = new Set<() => void>();
   let releases: (() => void)[] = [];
 
-  const active = (): boolean => token !== null && !closed && !stopped;
+  const active = (): boolean => token !== null && !closed && !stopped && !suspended;
 
   const snapshot = () => ({
     project: project.getState(),
@@ -764,6 +790,7 @@ export function createRecoveryController(
 
   const runList = async (current: string): Promise<void> => {
     let result: RecoveryListResult;
+    listRunning = true;
     try {
       result = await clients.listRecoveryOffers(current);
     } catch (error) {
@@ -774,12 +801,17 @@ export function createRecoveryController(
         offers: [],
         error: normalizeRecoveryCommandError(error),
       };
+    } finally {
+      listRunning = false;
     }
     if (result.status === "staleSession") {
       stop();
       return;
     }
     addOffers(result.offers);
+    if (result.complete) {
+      listComplete = true;
+    }
     if (!result.complete && active() && listTimer === null) {
       const wait =
         listRepeats === 0 ? RECOVERY_LIST_FIRST_REPEAT_MS : RECOVERY_LIST_REPEAT_MS;
@@ -861,9 +893,9 @@ export function createRecoveryController(
     }
   };
 
-  /** Starts the next entry of the line when none runs. */
+  /** Starts the next entry of the line when none runs. A hold keeps the entries that wait. */
   function pump(): void {
-    if (running) {
+    if (running || suspended) {
       return;
     }
     const entry = queue.shift();
@@ -918,7 +950,7 @@ export function createRecoveryController(
       return;
     }
     token = answer.token;
-    if (!active()) {
+    if (closed || stopped) {
       return;
     }
     releases = [
@@ -927,7 +959,33 @@ export function createRecoveryController(
       project.subscribe(onStoreChange),
     ];
     seen = observe();
+    // A hold that started before the token came lists and compares at its end.
+    if (suspended) {
+      return;
+    }
     enqueue({ kind: "list" });
+    compare();
+  };
+
+  /**
+   * Ends a hold of `suspend`: sends the entries that waited, in their order, lists again when the
+   * list was not complete, and compares.
+   */
+  const resume = (): void => {
+    suspended = false;
+    pump();
+    if (!active()) {
+      return;
+    }
+    if (
+      !listComplete &&
+      !listRunning &&
+      listTimer === null &&
+      !queue.some((entry) => entry.kind === "list")
+    ) {
+      enqueue({ kind: "list" });
+    }
+    seen = observe();
     compare();
   };
 
@@ -981,6 +1039,28 @@ export function createRecoveryController(
           resolve(false);
         }, maxMs);
       });
+    },
+    isLineEmpty: () => !running && queue.length === 0,
+    suspend: () => {
+      if (closed || stopped || suspended) {
+        return () => undefined;
+      }
+      suspended = true;
+      // The subscriptions stay, so the end of the hold needs no new one. While the hold runs,
+      // `compare` and each timer do nothing, because the controller is not active, and the line
+      // starts no entry. The entries that wait stay in the line: `close` drops them, and the end
+      // of the hold sends them in their order.
+      workTimer = clearTimer(workTimer);
+      retryTimer = clearTimer(retryTimer);
+      listTimer = clearTimer(listTimer);
+      let ended = false;
+      return () => {
+        if (ended || closed || stopped) {
+          return;
+        }
+        ended = true;
+        resume();
+      };
     },
     close: () => {
       if (closed) {

@@ -8,6 +8,8 @@ import {
   measurementScope,
   runExportFlow,
   staleExportOpenStep,
+  isExportOpenStepWaiting,
+  subscribeExportOpenStep,
   SOURCE_REVISION_CHECK_TIMEOUT_MS,
   type MediaFlowDescriptor,
 } from "./exportFlowController";
@@ -1032,6 +1034,44 @@ describe("ExportFlowController", () => {
         expect(publishScope).not.toHaveBeenCalled();
         // With no step waiting, the call does nothing.
         staleExportOpenStep();
+      });
+
+      it("says while a step waits, and tells each start and each end (ADR 073)", async () => {
+        const heard: boolean[] = [];
+        const unsubscribe = subscribeExportOpenStep(() => {
+          heard.push(isExportOpenStepWaiting());
+        });
+        try {
+          expect(isExportOpenStepWaiting()).toBe(false);
+          const first = startPendingStep("/media/video.mp4");
+          expect(isExportOpenStepWaiting()).toBe(true);
+          expect(heard).toEqual([true]);
+          first.finishLoad();
+          await vi.waitFor(() => {
+            expect(first.readSourceRevision).toHaveBeenCalled();
+          });
+          // The check of the source still waits.
+          expect(isExportOpenStepWaiting()).toBe(true);
+          first.answerCheck(false);
+          await expect(first.step).resolves.toBe(true);
+          expect(isExportOpenStepWaiting()).toBe(false);
+          expect(heard).toEqual([true, false]);
+
+          // A step that goes stale does not wait any more.
+          const second = startPendingStep("/media/video.mp4");
+          staleExportOpenStep();
+          expect(isExportOpenStepWaiting()).toBe(false);
+          expect(heard).toEqual([true, false, true, false]);
+          second.finishLoad();
+          await vi.waitFor(() => {
+            expect(second.readSourceRevision).toHaveBeenCalled();
+          });
+          second.answerCheck(false);
+          await second.step;
+          expect(heard).toEqual([true, false, true, false]);
+        } finally {
+          unsubscribe();
+        }
       });
 
       it("opens the setup step when the source check does not answer in time", async () => {

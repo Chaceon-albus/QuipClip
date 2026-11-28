@@ -121,7 +121,8 @@ function OpenRow({
  * The project dialog (ADR 072, "The open of a project"). It shows the store of the open step of
  * the page: the read of the project file, the check of each file with a progress, the list of
  * the files to locate with Open and Cancel, and the error of an open that failed with one button
- * that closes it. Mount it once, in the application shell.
+ * that closes it. Mount it once, in the application shell. The restore of an offer (ADR 073) uses
+ * the same dialog, with its own titles (`presentProjectOpen`).
  *
  * It is a modal dialog of the main window: the title bar knows it (`titleBarModal.ts`), and the
  * test "a dialog of the window is open" sees its `role="dialog"` (`MODAL_LAYER_SELECTOR`). A

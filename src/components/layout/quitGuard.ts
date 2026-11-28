@@ -43,6 +43,12 @@ export interface ProjectWorkInput {
   readonly isModifiedFile: boolean;
   /** The name of the file of the project, or null for a project with no file. */
   readonly fileName: string | null;
+  /**
+   * The identity of the project (`ProjectState.identity`). It changes when the project closes and
+   * when an open or a restore changes the session, so a dialog that listed one project does not
+   * cover another one.
+   */
+  readonly identity: number;
 }
 
 /** Everything that the quit decision and the clear decision read. */
@@ -67,10 +73,16 @@ export interface ProjectLoss {
   readonly fileName: string | null;
 }
 
+/** The changes of the project that a quit would lose, with the identity of that project. */
+export interface QuitProjectLoss extends ProjectLoss {
+  /** The identity of the project whose changes these are (`ProjectWorkInput.identity`). */
+  readonly identity: number;
+}
+
 /** What a quit would lose now. */
 export interface QuitLoss {
   /** The changes of the project that are not saved, or null when it has no changes to save. */
-  readonly project: ProjectLoss | null;
+  readonly project: QuitProjectLoss | null;
   /** True when the timeline stores a pending In point. */
   readonly pendingIn: boolean;
   /**
@@ -185,7 +197,7 @@ export function timelineWorkOf(
 export function decideQuit(input: QuitGuardInput): QuitDecision {
   const loss: QuitLoss = {
     project: input.project.hasChangesToSave
-      ? { fileName: input.project.fileName }
+      ? { fileName: input.project.fileName, identity: input.project.identity }
       : null,
     pendingIn: input.timeline.hasPendingIn,
     exportActive: isExportRunLive({
@@ -209,14 +221,17 @@ export function decideQuit(input: QuitGuardInput): QuitDecision {
  * already accepted in that dialog (ADR 072). The quit reads the losses again after the user
  * confirms, and it asks again for a loss that the dialog did not list.
  *
- * - The project is covered when the dialog listed the project.
+ * - The project is covered when the dialog listed the project with the same identity (ADR 073).
+ *   A project that closed and came back, as after the removal of the last clip and an Undo, or
+ *   that an open or a restore gave, is another project, and the dialog did not show it.
  * - The pending In point and the live export are covered when the dialog listed them.
  * - The queued exports are covered when their number is not larger than the listed number.
  * - The preset draft is covered when no draft holds edits, or the draft has the listed name.
  */
 export function isLossListed(next: QuitLoss, listed: QuitLoss): boolean {
   return (
-    (next.project === null || listed.project !== null) &&
+    (next.project === null ||
+      (listed.project !== null && listed.project.identity === next.project.identity)) &&
     (!next.pendingIn || listed.pendingIn) &&
     (!next.exportActive || listed.exportActive) &&
     next.queuedExports <= listed.queuedExports &&
@@ -305,10 +320,17 @@ export function presentQuitPrompt(loss: QuitLoss): QuitGuardPromptView {
  * The open asks only when the project has changes to save, so the prompt has only the save form:
  * its own title, the line that names the file of the project or says that the project has no
  * file, Save as the primary button and "Don't Save" as the discard button.
+ *
+ * A restore is an open (ADR 073, "The restore"), with the same prompt and its own title.
  */
-export function presentOpenPrompt(project: ProjectLoss): QuitGuardPromptView {
+export function presentOpenPrompt(
+  project: ProjectLoss,
+  restore = false,
+): QuitGuardPromptView {
   return {
-    title: { key: "quitGuard.open.saveTitle" },
+    title: {
+      key: restore ? "quitGuard.open.restoreSaveTitle" : "quitGuard.open.saveTitle",
+    },
     lines: [projectLine(project.fileName)],
     confirm: { key: "quitGuard.save" },
     destructive: false,
