@@ -795,13 +795,19 @@ content value (`document.ts`), the project of the session (`store.ts`), the save
 (`src/components/layout/quitGuardController.ts`) runs the save prompt for a quit, for Clear
 Timeline and for an open, and it owns the open step of the page.
 
-ADR 073 adds the recovery, and its code is not in yet. The page writes a recovery file into
-the application data directory 1 second after a change, while the project has changes to
-save. A quit that the user confirmed removes it. After each other exit, the next start
-offers the file: Restore, Discard, or Not Now. A restore is an open that reads its document
-from the recovery file, and it leaves the project with no file. One process owns the
-recovery directory, so a second process of QuipClip that runs at the same time has no
-recovery.
+ADR 073 adds the recovery. While the project has changes to save, the page writes a recovery
+file into the application data directory, 1 second after a change. A quit that the user
+confirmed removes the file of its session. At each start, the page lists the recovery files of
+earlier sessions and offers them: Restore, Discard, or Not Now. A restore is an open that reads
+its document from the recovery file, and it leaves the project with no file. One process owns
+the recovery directory, so a second process of QuipClip that runs at the same time has no
+recovery until the owner ends.
+
+The backend of the recovery is `src-tauri/src/recovery/`: the owner lock, the token of the
+page, `current.json` and the offers. The page parts are in `src/features/recovery/`: the
+clients of the commands, and the controller that writes `current.json` from the state of the
+session when its sync runs (`controller.ts`). The recovery prompt is `src/components/layout/RecoveryPromptDialog.tsx`
+with its controller, and the quit guard passes the token of the page to `confirm_quit`.
 
 The unreleased schema remains version 1 after this direct replacement. Old frame-grid
 version 1 files fail normal structural validation. QuipClip has no migration or legacy

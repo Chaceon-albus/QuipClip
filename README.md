@@ -180,7 +180,7 @@ The title bar shows the name of the project file, with a dot before the name whe
 has changes that are not saved. QuipClip asks before you quit, open a project, or clear the
 timeline when a project file has changes that are not saved, or when the timeline has segments
 and the project has no file. It cannot ask when the Dock of macOS, a logout, or the end of a
-Windows session ends QuipClip.
+Windows session ends QuipClip. A recovery file can keep the work then.
 
 To open a project, press `Cmd+O` and select the project file, or drop the file on the window.
 The project replaces the timeline. If you select or drop a project file together with a video
@@ -196,6 +196,26 @@ that the project file holds.
 
 If you remove all the videos from the timeline, the project closes. After that, **Save** asks
 for a file name again.
+
+While a project file has changes that are not saved, QuipClip keeps a recovery file of the
+work. For a project with no file, it keeps one while the timeline has one or more segments.
+QuipClip writes the recovery file about 1 second after a change, so the last edits before an
+exit can be absent from it. At each start, QuipClip looks for recovery files of earlier
+sessions. When it finds one, it asks whether to restore the work. That can be so after a
+crash, a forced quit, the Dock Quit of macOS, a logout, or the end of a Windows session.
+
+**Restore** opens the work as a project with no file. QuipClip looks for each video at its
+saved path, and it checks each video as the open of a project does. Until you save the
+restored project, **Save** and **Save As…** propose the name and the folder of the project file
+that the work had. The restored work can be older than that project file. To keep both, save
+it under a different name. Restored work with no segment has no recovery file, so save it
+before you quit. **Discard** removes the recovery file of the work that the prompt shows.
+**Not Now** closes the prompt and keeps each recovery file for a later start.
+
+When you confirm a quit, QuipClip removes the recovery file of that session. A recovery file
+does not hold an In point with no Out point, the selection, or the history of Undo. When two
+copies of QuipClip run at the same time, only one of them has a recovery file: the copy that
+started first, until it quits.
 
 One export joins at most 256 parts and uses at most 85 source files. A segment that crosses
 the end of a video on the timeline gives one part for each video.
