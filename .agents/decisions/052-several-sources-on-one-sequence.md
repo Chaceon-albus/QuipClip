@@ -315,6 +315,11 @@ Older records name "the active source". On the sequence, the general rule is thi
 ADR 074 builds it: Play Program and Play Joins play the pieces of the segments of the export,
 each on its own clip, one after another.
 
+(Changed on 2026-11-27.) The playback goes on at the next clip only when the element played
+to its end. That is also so for a Play Segment that crosses a junction: when its clip ends
+with no playback, as after a scrub that the system made to the end, the playback stays on that
+clip and the play intent of the segment is dropped (ADR 074).
+
 (Changed on 2026-11-02.) The drag trim of ADR 030 on a sequence whose clips share no frame grid:
 
 - The trim uses the frame grid and the nominal rate of the clip that holds the moving edge. For

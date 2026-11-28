@@ -124,6 +124,7 @@ import {
   type PreviewPath,
 } from "./previewPath";
 import { audioStreamChangeEffect } from "./audioStreamChange";
+import { dispatchEndedEvent, dispatchPauseEvent } from "./pauseEndedEvents";
 import {
   addMediaSourceNotice,
   clearMediaSourceNotice,
@@ -1580,20 +1581,28 @@ export function PreviewPane() {
                     }}
                     onPause={(e) => {
                       if (acceptsEventsOf(e.currentTarget)) {
+                        const element = e.currentTarget;
                         // The element pauses before it ends, and the sequence needs to know that
-                        // it was playing then (ADR 052).
-                        sequencePlayback.notePause(e.currentTarget.ended);
-                        syncPause(sourceRevisionKey, e.currentTarget);
+                        // it was playing then (ADR 052). A pause during a seek is no pause at
+                        // the end (ADR 074).
+                        dispatchPauseEvent(element, {
+                          notePause: sequencePlayback.notePause,
+                          syncPause: () => syncPause(sourceRevisionKey, element),
+                        });
                       }
                     }}
                     onEnded={(e) => {
                       if (acceptsEventsOf(e.currentTarget)) {
+                        const element = e.currentTarget;
                         // At the end of a clip that another clip follows, playback goes on at
                         // the first frame of that clip (ADR 052), and the end of this element is
-                        // no end of the playback.
-                        if (!sequencePlayback.handleEnded()) {
-                          syncEnded(sourceRevisionKey, e.currentTarget);
-                        }
+                        // no end of the playback. An event that finds the element away from its
+                        // end is late, and neither consumer reads it (ADR 074).
+                        dispatchEndedEvent(element, {
+                          handleEnded: sequencePlayback.handleEnded,
+                          syncEnded: () => syncEnded(sourceRevisionKey, element),
+                          dropEnded: sequencePlayback.forgetPauseAtEnd,
+                        });
                       }
                     }}
                     onTimeUpdate={handleTimeUpdate}

@@ -644,8 +644,13 @@ where the indicator showed.
 number, and it says of the last one whether it reached its stop (ADR 074): the store itself
 ended the playback because of the stop point. The frame test and the clock test of the stop
 do nothing for an element that something else paused away from the end of the media. An
-`ended` event that comes when the element is not at its end is dropped. Play Segment does
-not change.
+`ended` event that comes when the element is not at its end is dropped. Play Segment changes
+in one point. After each seek, the store first confirms the playback: a frame that lies at
+most 0.1 seconds after the position of the element confirms it. Until then, the frame test of
+the stop does nothing for one frame that lies more than 0.1 seconds after that position,
+because such a frame can come from before the seek to the In. A frame with another time than
+that frame confirms the playback too. After the playback is confirmed, each frame counts as
+before (ADR 074).
 
 ## Consequences
 

@@ -255,6 +255,96 @@ describe("sequence playback", () => {
     expect(element.paused).toBe(false);
   });
 
+  it("does not go on at the next clip after the pause of a scrub from the system", () => {
+    const h = harness([a1, b1]);
+    const { element: first, key } = attach(h.playback, A);
+    h.playback.getState().play();
+    h.playback.getState().syncPlay(key, first);
+    // The scrub of the system pauses the element during a seek to its end. The element reports
+    // `ended` while the seek runs, so the preview notes no pause at the end.
+    first.paused = true;
+    h.sequence.notePause(false);
+    h.playback.getState().syncPause(key, first);
+    expect(h.playback.getState().isPlaying).toBe(false);
+    // The seek ends at the end of the element, and its `ended` event comes.
+    expect(h.sequence.handleEnded()).toBe(false);
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+  });
+
+  it("drops the play intent of a Play Segment across a junction at an end with no playback", () => {
+    const h = harness([a1, b1]);
+    const { element: first, key } = attach(h.playback, A);
+    h.sequence.store
+      .getState()
+      .playSegment(h.virtual("a1", "200"), h.virtual("b1", "50"));
+    h.playback.getState().syncPlay(key, first);
+    // The scrub of the system pauses the element during its seek to the end: no pause at the end.
+    first.paused = true;
+    h.sequence.notePause(false);
+    h.playback.getState().syncPause(key, first);
+    // The seek settles, and the `ended` event comes with no pause at the end before it.
+    expect(h.sequence.handleEnded()).toBe(false);
+    expect(h.timeline.getState().attachedClipId).toBe("a1");
+
+    // A later play to the end of a1 goes on at b1 as a plain play, with no stop point.
+    h.playback.getState().play();
+    h.playback.getState().syncPlay(key, first);
+    h.sequence.notePause(true);
+    h.playback.getState().syncPause(key, first);
+    expect(h.sequence.handleEnded()).toBe(true);
+    expect(h.timeline.getState().attachedClipId).toBe("b1");
+    attach(h.playback, B);
+    expect(h.playback.getState().playbackStop).toBeNull();
+  });
+
+  describe("an `ended` event that the preview drops (ADR 074)", () => {
+    it("forgets the pause at the end, so a later `ended` event with no pause does not go on", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      h.playback.getState().play();
+      h.playback.getState().syncPlay(key, first);
+      // The element pauses at its end, and a seek leaves the end before its `ended` event runs.
+      // The preview drops that event.
+      first.paused = true;
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      expect(h.playback.getState().isPlaying).toBe(false);
+      h.sequence.forgetPauseAtEnd();
+      // A later seek moves the paused element to its end, and its `ended` event comes with no
+      // `pause` before it. Nothing played.
+      expect(h.sequence.handleEnded()).toBe(false);
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+    });
+
+    it("keeps the play intent of a Play Segment across a junction, whose own end goes on", () => {
+      const h = harness([a1, b1]);
+      const { element: first, key } = attach(h.playback, A);
+      // The segment starts at 8 s of a1 and ends at 2 s of b1.
+      h.sequence.store
+        .getState()
+        .playSegment(h.virtual("a1", "200"), h.virtual("b1", "50"));
+      expect(h.playback.getState().isPlaying).toBe(true);
+      h.playback.getState().syncPlay(key, first);
+      // A late `ended` event of an earlier end of a1: the preview drops it, and the playback of
+      // the segment goes on in a1.
+      h.sequence.forgetPauseAtEnd();
+      expect(h.timeline.getState().attachedClipId).toBe("a1");
+      expect(h.playback.getState().isPlaying).toBe(true);
+
+      // The playback reaches the end of a1, and goes on in b1 up to the Out.
+      h.sequence.notePause(true);
+      h.playback.getState().syncPause(key, first);
+      expect(h.sequence.handleEnded()).toBe(true);
+      expect(h.timeline.getState().attachedClipId).toBe("b1");
+      attach(h.playback, B);
+      expect(h.playback.getState().playbackStop).toEqual({
+        inPts: "0",
+        outPts: "50",
+        phase: "playing",
+      });
+    });
+  });
+
   it("does not go on after the last clip, or while paused", () => {
     const h = harness([a1, b1]);
     attach(h.playback, A);

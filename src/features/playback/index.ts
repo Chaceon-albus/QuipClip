@@ -4,6 +4,7 @@
 
 export * from "./types";
 export * from "./store";
+export * from "./mediaEnd";
 export * from "./presentation";
 export * from "./refOwnership";
 export * from "./cue";

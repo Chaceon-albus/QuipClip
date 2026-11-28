@@ -38,7 +38,12 @@ import {
   type PlaybackStore,
 } from "./store";
 import { resolveTimecodeDisplay } from "./timecodeDisplay";
-import type { PlaybackMediaElement, PlaybackSource } from "./types";
+import type {
+  PlaybackMediaElement,
+  PlaybackSource,
+  PlaybackStop,
+  SegmentPlayback,
+} from "./types";
 
 /** How a web view turns a time into whole microseconds. */
 type MicrosecondClock = "round" | "truncate";
@@ -11268,6 +11273,1199 @@ describe("Play Segment (ADR 026)", () => {
         rFrameRate: { n: 25, d: 1 },
       };
       expect(canPlaySegment(ms25, "400" as Pts, "401" as Pts)).toBe(true);
+    });
+  });
+
+  describe("the number of a segment playback and its stop (ADR 074)", () => {
+    /** One write of the store, with the count of the calls of the element before it. */
+    interface Write {
+      readonly playback: SegmentPlayback | null;
+      readonly stop: PlaybackStop | null;
+      readonly isPlaying: boolean;
+      readonly pauses: number;
+      readonly seeks: number;
+    }
+
+    /**
+     * Records each write of the store from now on, and the writes that published "reached": a new
+     * value of segmentPlayback with `reached` true.
+     */
+    function watch(h: Harness): { writes: Write[]; published: Write[] } {
+      const writes: Write[] = [];
+      const published: Write[] = [];
+      h.store.subscribe((state, prev) => {
+        const write: Write = {
+          playback: state.segmentPlayback,
+          stop: state.playbackStop,
+          isPlaying: state.isPlaying,
+          pauses: h.video.pauseCalls,
+          seeks: h.video.seeks,
+        };
+        writes.push(write);
+        if (
+          state.segmentPlayback !== prev.segmentPlayback &&
+          state.segmentPlayback?.reached === true
+        ) {
+          published.push(write);
+        }
+      });
+      return { writes, published };
+    }
+
+    /**
+     * Expects one publication of "reached" for `id`, as the last write of the store so far, and
+     * returns it.
+     */
+    function expectReachedLast(w: ReturnType<typeof watch>, id: number): Write {
+      expect(w.published).toHaveLength(1);
+      const write = w.published[0];
+      expect(write.playback).toEqual({ id, reached: true });
+      expect(w.writes[w.writes.length - 1]).toBe(write);
+      return write;
+    }
+
+    /** 25 fps on 1/1000: 40 ticks for each frame, with the extent `extent` in ticks. */
+    const msSource = (extent: string): PlaybackSource => ({
+      path: `/media/reached-${extent}.mp4`,
+      size: 4096,
+      mtime: 1724978600,
+      videoTimeBase: { n: 1, d: 1000 },
+      videoStartPts: "0" as Pts,
+      videoDurationTicks: extent as TickCount,
+      approximateDurationSeconds: Number(extent) / 1000,
+      avgFrameRate: { n: 25, d: 1 },
+      rFrameRate: { n: 25, d: 1 },
+    });
+    const msFrame = (k: number): string => String(k * 40);
+
+    /** Attaches a new element of `source` to `store` and calibrates it on its first frame. */
+    function attachAgain(store: PlaybackStore, source: PlaybackSource): PlayingVideo {
+      const video = createPlayingVideo(10);
+      const key = getSourceRevisionKey(source);
+      store.getState().attach(source, video);
+      store.getState().syncReady(key, video);
+      store.getState().syncPresentedFrame(key, 0, 1, video);
+      expect(store.getState().calibrationStatus).toBe("ready");
+      return video;
+    }
+
+    describe("the number", () => {
+      it("gives an accepted playback a new number, not reached, in the write of its stop point", () => {
+        const h = attachPlaying(gridSource);
+        expect(h.store.getState().segmentPlayback).toBeNull();
+        const w = watch(h);
+        h.store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        const first = w.writes.findIndex((write) => write.stop !== null);
+        expect(first).toBeGreaterThanOrEqual(0);
+        expect(w.writes[first].playback).toEqual({ id: 1, reached: false });
+        expect(w.writes.slice(0, first).every((write) => write.playback === null)).toBe(
+          true,
+        );
+      });
+
+      it("gives a second segment a new number, and no write pairs a stop point with the other number", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        h.store.getState().playSegment("150" as Pts, "160" as Pts);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+        h.seeked("150");
+        playFrames(h, 151, 159);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: true });
+        expect(w.published).toHaveLength(1);
+        for (const write of w.writes) {
+          if (write.stop?.inPts === "50") {
+            expect(write.playback?.id).toBe(1);
+          }
+          if (write.stop?.inPts === "150") {
+            expect(write.playback?.id).toBe(2);
+          }
+        }
+      });
+
+      it("gives a new number, not reached, to a playback after one that reached its stop", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 99);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: true });
+        startSegment(h, "150", "160");
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+        const w = watch(h);
+        playFrames(h, 151, 159);
+        expectReachedLast(w, 2);
+      });
+
+      it("gives no number for each call that returns early", () => {
+        const key = getSourceRevisionKey(gridSource);
+        const play = (store: PlaybackStore): void => {
+          store.getState().playSegment("50" as Pts, "100" as Pts);
+          expect(store.getState().playbackStop).toBeNull();
+          expect(store.getState().segmentPlayback).toBeNull();
+        };
+
+        // No element.
+        play(createPlaybackStore());
+
+        // An element with no metadata.
+        const unready = createPlaybackStore();
+        unready.getState().attach(gridSource, createPlayingVideo(10));
+        play(unready);
+
+        // A calibration that is open, and then unavailable.
+        const uncalibrated = createPlaybackStore();
+        const video = createPlayingVideo(10);
+        uncalibrated.getState().attach(gridSource, video);
+        uncalibrated.getState().syncReady(key, video);
+        expect(uncalibrated.getState().calibrationStatus).toBe("calibrating");
+        play(uncalibrated);
+        uncalibrated.getState().syncPresentationUnavailable(key, video);
+        play(uncalibrated);
+
+        // A decode stall.
+        const stalled = attachPlaying(gridSource);
+        expect(
+          stalled.store.getState().syncDecodeStall(stalled.key, stalled.video),
+        ).toBe(true);
+        play(stalled.store);
+
+        // A segment that holds no frame.
+        const empty = attachPlaying(gridSource);
+        empty.store.getState().playSegment("100" as Pts, "50" as Pts);
+        expect(empty.store.getState().segmentPlayback).toBeNull();
+
+        // A seek to the In that fails: PTS 0 lies before the start of the browser timeline.
+        const failed = attachPlaying({ ...gridSource, videoStartPts: "100" as Pts });
+        failed.store.getState().playSegment("0" as Pts, "150" as Pts);
+        expect(failed.store.getState().error).toBe("seekFailed");
+        expect(failed.store.getState().segmentPlayback).toBeNull();
+      });
+
+      it("gives no number when the play does not start, and keeps the last number", () => {
+        const store = createPlaybackStore();
+        let refuse = false;
+        const video = createFakeVideo({
+          playImpl: () => {
+            if (refuse) {
+              throw new DOMException("blocked", "NotAllowedError");
+            }
+            return Promise.resolve();
+          },
+        });
+        const key = getSourceRevisionKey(gridSource);
+        store.getState().attach(gridSource, video);
+        store.getState().syncReady(key, video);
+        store.getState().syncPresentedFrame(key, 0, 1, video);
+        store.getState().playSegment("50" as Pts, "100" as Pts);
+        const accepted = store.getState().segmentPlayback;
+        expect(accepted).toEqual({ id: 1, reached: false });
+
+        refuse = true;
+        store.getState().playSegment("150" as Pts, "160" as Pts);
+        expect(store.getState().isPlaying).toBe(false);
+        expect(store.getState().error).toBe("playbackFailed");
+        expect(store.getState().playbackStop).toBeNull();
+        expect(store.getState().segmentPlayback).toBe(accepted);
+      });
+
+      it("keeps the last number for a call that it refuses or whose seek fails", () => {
+        const h = attachPlaying({ ...gridSource, videoStartPts: "100" as Pts });
+        startSegment(h, "110", "150");
+        playFrames(h, 111, 149);
+        const reached = h.store.getState().segmentPlayback;
+        expect(reached).toEqual({ id: 1, reached: true });
+
+        h.store.getState().playSegment("200" as Pts, "150" as Pts);
+        expect(h.store.getState().segmentPlayback).toBe(reached);
+        h.store.getState().playSegment("0" as Pts, "150" as Pts);
+        expect(h.store.getState().error).toBe("seekFailed");
+        expect(h.store.getState().segmentPlayback).toBe(reached);
+      });
+
+      it("keeps the number through a detach and a reset, and never gives it again", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 99);
+        const reached = h.store.getState().segmentPlayback;
+        expect(reached).toEqual({ id: 1, reached: true });
+
+        h.store.getState().detach(h.key, h.video);
+        expect(h.store.getState().segmentPlayback).toBe(reached);
+        attachAgain(h.store, gridSource);
+        h.store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+
+        h.store.getState().reset();
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+        attachAgain(h.store, gridSource);
+        h.store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 3, reached: false });
+      });
+
+      it("counts on from the number of an initial state", () => {
+        const store = createPlaybackStore({
+          segmentPlayback: { id: 7, reached: true },
+        });
+        attachAgain(store, gridSource);
+        store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(store.getState().segmentPlayback).toEqual({ id: 8, reached: false });
+      });
+    });
+
+    describe("reached, one time, as the last write of the handler that made the stop", () => {
+      it("the pause on the last frame, after the pause", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        const pauses = h.video.pauseCalls;
+        h.frame("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.pauses).toBe(pauses + 1);
+        expect(write.seeks).toBe(1);
+        expect(write.isPlaying).toBe(false);
+        expect(write.stop?.phase).toBe("stopped");
+
+        // The pause event of the stop, the same frame again and a later timeupdate add nothing.
+        h.store.getState().syncPause(h.key, h.video);
+        h.present("99");
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: true });
+      });
+
+      it("the seek back from a frame after the last frame, after the pause and the start of the seek", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        const pauses = h.video.pauseCalls;
+        h.frame("100");
+        const write = expectReachedLast(w, 1);
+        // The stop pauses, and the frame step of the seek back pauses again.
+        expect(write.pauses).toBeGreaterThan(pauses);
+        expect(write.seeks).toBe(2);
+        expect(write.stop).toBeNull();
+        expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+
+        // The events of the seek back add nothing.
+        h.store.getState().syncSeeking(h.key, h.video);
+        h.seeked("99");
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("no second time for a frame in the seek-back window after the stop", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 99);
+        const reached = h.store.getState().segmentPlayback;
+        expect(reached).toEqual({ id: 1, reached: true });
+        const w = watch(h);
+        h.present("100");
+        expect(h.video.seeks).toBe(2);
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(w.published).toHaveLength(0);
+        expect(h.store.getState().segmentPlayback).toBe(reached);
+      });
+
+      it("the stop of the clock with a seek back, after the pause and the start of the seek", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        const w = watch(h);
+        const pauses = h.video.pauseCalls;
+        h.video.advanceTo(h.timeOf("100") + 0.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.pauses).toBeGreaterThan(pauses);
+        expect(write.seeks).toBe(2);
+        expect(write.stop).toBeNull();
+        h.store.getState().syncPause(h.key, h.video);
+        h.seeked("99");
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("the stop of the clock with the pause alone, when the segment ends with the video", () => {
+        const h = attachPlaying(msSource("10000"), { duration: 10.5 });
+        startSegment(h, msFrame(240), "10000");
+        const w = watch(h);
+        const pauses = h.video.pauseCalls;
+        h.video.advanceTo(10.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.pauses).toBe(pauses + 1);
+        expect(write.seeks).toBe(1);
+        expect(write.stop).toBeNull();
+        h.store.getState().syncPause(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("the end of the media with a seek back, at an `ended` event with no `pause` before it", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.store.getState().syncEnded(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.seeks).toBe(2);
+        expect(write.stop).toBeNull();
+        expect(write.isPlaying).toBe(false);
+      });
+
+      it("the end of the media with no seek when the segment ends with the video, at its `pause` event", () => {
+        const h = attachPlaying(msSource("10000"), { duration: 10.5 });
+        startSegment(h, msFrame(240), "10000");
+        for (let k = 241; k <= 248; k++) {
+          h.frame(msFrame(k));
+        }
+        h.video.advanceTo(10.5);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.store.getState().syncPause(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.seeks).toBe(1);
+        expect(write.stop).toBeNull();
+        expect(write.isPlaying).toBe(false);
+        // The `ended` event that follows adds nothing.
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("the end of the media with no seek when the Out lies at the position where the element ended", () => {
+        // The extent claims frames 250 and 251 that the file does not have, so the element ends
+        // at 10 s, exactly at the Out. The last frame of the segment, 249, is not the last frame
+        // of the extent, so the store compares the Out with the position (not endsWithVideo). The
+        // callback of frame 249 does not run before the end.
+        const h = attachPlaying(msSource("10080"), { duration: 10 });
+        startSegment(h, msFrame(240), "10000");
+        for (let k = 241; k <= 248; k++) {
+          h.frame(msFrame(k));
+        }
+        expect(h.store.getState().isPlaying).toBe(true);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.store.getState().syncPause(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.seeks).toBe(1);
+        expect(write.stop).toBeNull();
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("the end of the media with no seek when the extent ends after the last frame of the file", () => {
+        // The extent claims a frame 250 that the file does not have, so the element ends first.
+        // The Out is the end of the extent, so the segment ends with the video (endsWithVideo).
+        const h = attachPlaying(msSource("10040"), { duration: 10 });
+        startSegment(h, msFrame(240), "10040");
+        for (let k = 241; k <= 249; k++) {
+          h.frame(msFrame(k));
+        }
+        expect(h.store.getState().isPlaying).toBe(true);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.store.getState().syncPause(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.seeks).toBe(1);
+        expect(write.stop).toBeNull();
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+    });
+
+    describe("nothing for each other end of a segment playback", () => {
+      const ends: readonly (readonly [string, (h: Harness) => void])[] = [
+        ["pause", (h) => h.store.getState().pause()],
+        ["Space", (h) => h.store.getState().togglePlayback()],
+        ["play", (h) => h.store.getState().play()],
+        ["a click", (h) => h.store.getState().seekToPts("20" as Pts)],
+        [
+          "a scrub seek",
+          (h) => h.store.getState().seekToPts("20" as Pts, { scrub: true }),
+        ],
+        [
+          "a click that keeps playing",
+          (h) => h.store.getState().seekToPts("60" as Pts, { keepPlaying: true }),
+        ],
+        ["an approximate seek", (h) => h.store.getState().seekApproximate(1)],
+        ["a jump to a frame", (h) => h.store.getState().seekToFrameIndex(249)],
+        ["a frame step", (h) => h.store.getState().seekNominal(1)],
+        ["a decode stall", (h) => h.store.getState().syncDecodeStall(h.key, h.video)],
+        ["a detach", (h) => h.store.getState().detach(h.key, h.video)],
+        ["a reset", (h) => h.store.getState().reset()],
+        ["a loss of readiness", (h) => h.store.getState().syncUnready(h.key, h.video)],
+        [
+          "an attach of another source",
+          (h) => h.store.getState().attach(otherSource, createPlayingVideo(10)),
+        ],
+        [
+          "a new element on the path of a recalibration",
+          (h) => h.store.getState().replacePreviewElement(h.key),
+        ],
+        [
+          "a loss of the calibration",
+          (h) => h.store.getState().syncPresentationUnavailable(h.key, h.video),
+        ],
+        [
+          "a pause from the system",
+          (h) => {
+            h.video.pause();
+            h.store.getState().syncPause(h.key, h.video);
+          },
+        ],
+      ];
+
+      it.each(ends)("%s", (_name, end) => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        end(h);
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        // Nothing later reads as the stop of that playback.
+        playFrames(h, 71, 110);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expect(w.published).toHaveLength(0);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+      });
+
+      it("a play that fails", async () => {
+        const store = createPlaybackStore();
+        const video = createFakeVideo({
+          playImpl: () =>
+            Promise.reject(new DOMException("blocked", "NotAllowedError")),
+        });
+        const key = getSourceRevisionKey(gridSource);
+        store.getState().attach(gridSource, video);
+        store.getState().syncReady(key, video);
+        store.getState().syncPresentedFrame(key, 0, 1, video);
+        store.getState().playSegment("50" as Pts, "100" as Pts);
+        expect(store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        await flushAsync();
+        expect(store.getState().error).toBe("playbackFailed");
+        expect(store.getState().playbackStop).toBeNull();
+        expect(store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+      });
+
+      it("a seek that fails", () => {
+        const h = attachPlaying({ ...gridSource, videoStartPts: "100" as Pts });
+        startSegment(h, "110", "150");
+        playFrames(h, 111, 120);
+        const w = watch(h);
+        h.store.getState().seekToPts("0" as Pts);
+        expect(h.store.getState().error).toBe("seekFailed");
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      });
+
+      it("a seek that the store did not make, while the segment plays and after its stop", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        // While the segment plays, the store cannot tell the event from the late one of the seek
+        // to the In: it keeps the stop point and publishes nothing.
+        h.store.getState().syncSeeking(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(w.published).toHaveLength(0);
+
+        // After the stop, the event drops the stop point and publishes nothing more.
+        playFrames(h, 71, 99);
+        expect(w.published).toHaveLength(1);
+        const reached = h.store.getState().segmentPlayback;
+        h.video.currentTime = h.timeOf("150");
+        h.store.getState().syncSeeking(h.key, h.video);
+        expect(h.store.getState().playbackStop).toBeNull();
+        h.seeked("150");
+        expect(w.published).toHaveLength(1);
+        expect(h.store.getState().segmentPlayback).toBe(reached);
+      });
+
+      it("a late `ended` event of an earlier end keeps the stop point and the number, and ends the play session", () => {
+        const h = attachPlaying(gridSource);
+        h.store.getState().seekToPts("240" as Pts);
+        h.seeked("240");
+        h.store.getState().play();
+        playFrames(h, 241, 249);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+
+        // The user plays a segment before the `pause` and `ended` events of the end run.
+        h.store.getState().playSegment("50" as Pts, "100" as Pts);
+        h.video.ended = false;
+        const w = watch(h);
+        // The `pause` event finds the element playing again, and it changes nothing.
+        h.store.getState().syncPause(h.key, h.video);
+        expect(h.store.getState().isPlaying).toBe(true);
+        // The preview drops such an `ended` event (dispatchEndedEvent). When the store gets it,
+        // the stop point and the number stay, but the event ends the play session: the store
+        // reports no playback while the element plays.
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(h.store.getState().isPlaying).toBe(false);
+        expect(h.video.paused).toBe(false);
+        expect(w.published).toHaveLength(0);
+
+        // The element plays on, and the stop still ends the segment playback.
+        h.seeked("50");
+        playFrames(h, 51, 99);
+        expectReachedLast(w, 1);
+      });
+    });
+
+    describe("an element that something else paused", () => {
+      it("is no stop for the frame test away from the end of the media", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        // The system pauses the element. The callbacks of the last frame and of a frame after it
+        // run before its `pause` event.
+        h.video.pause();
+        const pauses = h.video.pauseCalls;
+        h.present("99");
+        h.present("100");
+        expect(h.video.pauseCalls).toBe(pauses);
+        expect(h.video.seeks).toBe(1);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(w.published).toHaveLength(0);
+
+        // The `pause` event then drops the stop point, as for any pause from the system.
+        h.store.getState().syncPause(h.key, h.video);
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().isPlaying).toBe(false);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      });
+
+      it("is no stop for the clock test away from the end of the media", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        const w = watch(h);
+        // A hidden window: the system pauses the element past the Out, and a `timeupdate` runs
+        // before the `pause` event.
+        h.video.advanceTo(h.timeOf("100") + 0.2);
+        h.video.pause();
+        const pauses = h.video.pauseCalls;
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expect(h.video.pauseCalls).toBe(pauses);
+        expect(h.video.seeks).toBe(1);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+
+        h.store.getState().syncPause(h.key, h.video);
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      });
+
+      it("still stops in the frame test at the end of the media, where the browser paused it", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "240", "250");
+        playFrames(h, 241, 248);
+        // The element reaches its end before the callback of its last frame runs.
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.present("249");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop?.phase).toBe("stopped");
+        expect(h.video.seeks).toBe(1);
+        h.store.getState().syncPause(h.key, h.video);
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+
+      it("still stops in the clock test at the end of the media, where the browser paused it", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        // A hidden window: the `timeupdate` of the end runs before its `pause` and `ended`.
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.seeks).toBe(2);
+        expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+        h.store.getState().syncPause(h.key, h.video);
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(1);
+      });
+    });
+
+    describe("a frame that leads the position before the playback is confirmed", () => {
+      /**
+       * A seek toward frame 200 runs when Play Segment starts. The play of Play Segment flushes
+       * its seek to the In over it, and that seek ends. Only then does the frame callback of
+       * frame 200 run (ADR 022). The element stands at the In.
+       */
+      function lateFrameAfterSeekToIn(late: string, inPts: string, outPts: string) {
+        const h = attachPlaying(gridSource);
+        h.store.getState().seekToPts(late as Pts);
+        expect(h.video.seeking).toBe(true);
+        h.store.getState().playSegment(inPts as Pts, outPts as Pts);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.video.currentTime).toBe(h.timeOf(inPts));
+        const w = watch(h);
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        const seeks = h.video.seeks;
+        const pauses = h.video.pauseCalls;
+        h.present(late);
+        expect(h.shown()).toBe(late);
+        expect(h.video.paused).toBe(false);
+        expect(h.video.pauseCalls).toBe(pauses);
+        expect(h.video.seeks).toBe(seeks);
+        expect(h.store.getState().isPlaying).toBe(true);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+        return { h, w };
+      }
+
+      it("does not stop a segment playback for a frame of the seek before its seek to the In", () => {
+        const { h, w } = lateFrameAfterSeekToIn("200", "50", "100");
+        // The frames of the segment come, and the stop on frame 99 publishes "reached" one time.
+        h.present("50");
+        playFrames(h, 51, 98);
+        expect(h.store.getState().isPlaying).toBe(true);
+        h.frame("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop?.phase).toBe("stopped");
+        expect(h.video.paused).toBe(true);
+      });
+
+      it("does not take a late frame that is the last frame of a long segment as its rest", () => {
+        const { h, w } = lateFrameAfterSeekToIn("99", "50", "100");
+        expect(h.store.getState().playbackStop).toEqual({
+          inPts: "50",
+          outPts: "100",
+          phase: "playing",
+        });
+        h.present("50");
+        playFrames(h, 51, 99);
+        expectReachedLast(w, 1);
+      });
+
+      it("stops by the clock when no frame comes after the late frame", () => {
+        const { h, w } = lateFrameAfterSeekToIn("200", "50", "100");
+        // A hidden window: no frame of the segment comes.
+        h.video.advanceTo(h.timeOf("100") + 0.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toBeNull();
+        expect(h.video.paused).toBe(true);
+        expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      });
+
+      it("still stops on a last frame that leads the position by less than the tolerance", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        // The web view samples the position a little before the frame on screen.
+        h.video.advanceTo(h.timeOf("99") - 0.05);
+        h.present("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop?.phase).toBe("stopped");
+        expect(h.video.seeks).toBe(1);
+      });
+
+      it("stops at once on the last frame of a confirmed playback whose clock trails", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        // The callback of frame 99 at 3.96 s, with the position at 3.84 s: 0.12 s behind.
+        h.video.advanceTo(3.84);
+        h.present("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop?.phase).toBe("stopped");
+        expect(write.isPlaying).toBe(false);
+        expect(h.video.seeks).toBe(1);
+      });
+
+      /**
+       * Starts segment `inPts` to `outPts`, and lets its seek to the In end with no frame, as a
+       * web view that has not presented the In yet. The playback is not confirmed.
+       */
+      function startUnconfirmed(h: Harness, inPts: string, outPts: string): void {
+        h.store.getState().playSegment(inPts as Pts, outPts as Pts);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+      }
+
+      /** Presents frames `from` to `to` with a position that trails each one by 0.2 s. */
+      function trailFrames(h: Harness, from: number, to: number): void {
+        for (let k = from; k <= to; k++) {
+          h.video.advanceTo(h.timeOf(String(k)) - 0.2);
+          h.present(String(k));
+        }
+      }
+
+      /** Expects that the segment playback 1 still plays, with nothing published. */
+      function expectStillPlaying(h: Harness, w: ReturnType<typeof watch>): void {
+        expect(h.video.paused).toBe(false);
+        expect(h.store.getState().isPlaying).toBe(true);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      }
+
+      it("does not stop for a late frame of the last frame before any new frame, and stops on it later", () => {
+        // A seek toward frame 53 runs, and Play Segment 50 to 53 starts. Its seek to the In ends
+        // at 2.00 s, and only then does the old callback of frame 53 (2.12 s) run: it is in doubt.
+        const { h, w } = lateFrameAfterSeekToIn("53", "50", "54");
+        // A `timeupdate` at 2.035 s, before the callback of frame 50.
+        h.video.advanceTo(2.035);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expectStillPlaying(h, w);
+        // The frames of the segment come, and the stop on frame 53 publishes one time.
+        playFrames(h, 50, 52);
+        expectStillPlaying(h, w);
+        h.frame("53");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toMatchObject({ phase: "stopped", restPts: "53" });
+      });
+
+      it("lets the clock test stop a playback whose only frame is in doubt, with its seek back", () => {
+        const { h, w } = lateFrameAfterSeekToIn("53", "50", "54");
+        // A hidden window: no newer frame, and a `timeupdate` at 2.30 s, past the clock test at
+        // 2.26 s.
+        h.video.advanceTo(2.3);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toBeNull();
+        expect(h.video.seeks).toBe(3);
+        expect(h.video.currentTime).toBeCloseTo(53.5 / 25, 9);
+      });
+
+      it("confirms by the second frame while the clock trails, and stops on the last frame at once", () => {
+        const h = attachPlaying(gridSource);
+        const w = watch(h);
+        startUnconfirmed(h, "50", "100");
+        // The frame of the In leads the position by 0.2 s: it is in doubt.
+        trailFrames(h, 50, 50);
+        // The second frame, with another media time, confirms the playback.
+        trailFrames(h, 51, 98);
+        expectStillPlaying(h, w);
+        trailFrames(h, 99, 99);
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toMatchObject({ phase: "stopped", restPts: "99" });
+        expect(h.video.seeks).toBe(1);
+      });
+
+      it("keeps the same frame in doubt when it is reported two times", () => {
+        const { h, w } = lateFrameAfterSeekToIn("99", "50", "100");
+        h.present("99");
+        expectStillPlaying(h, w);
+        expect(h.video.seeks).toBe(2);
+      });
+
+      it("stops at once on a last frame that is the first frame after the seek and leads by less than the tolerance", () => {
+        const h = attachPlaying(gridSource);
+        const w = watch(h);
+        startUnconfirmed(h, "50", "100");
+        h.video.advanceTo(h.timeOf("99") - 0.05);
+        h.present("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toMatchObject({ phase: "stopped", restPts: "99" });
+      });
+
+      it("confirms by a frame after the last frame when the last frame was in doubt, and seeks back", () => {
+        const h = attachPlaying(gridSource);
+        const w = watch(h);
+        startUnconfirmed(h, "50", "100");
+        h.video.advanceTo(h.timeOf("99") - 0.2);
+        h.present("99");
+        expectStillPlaying(h, w);
+        h.video.advanceTo(h.timeOf("100") - 0.2);
+        h.present("100");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop).toBeNull();
+        expect(h.video.seeks).toBe(2);
+        expect(h.video.currentTime).toBeCloseTo(99.5 / 25, 9);
+      });
+
+      it("opens the doubt again at a seek of the system during a confirmed playback", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        h.video.seeking = true;
+        h.store.getState().syncSeeking(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        // A late frame that meets the stop and leads the position does nothing.
+        h.present("99");
+        expectStillPlaying(h, w);
+        expect(h.video.seeks).toBe(1);
+
+        // The frames of the playback come again, and the stop on frame 99 publishes one time.
+        playFrames(h, 71, 99);
+        expectReachedLast(w, 1);
+      });
+
+      it("opens the doubt at a seek of the store over a gap before its `seeking` event runs", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 55);
+        const w = watch(h);
+        // The seek over a gap keeps the stop point and the playback (ADR 046).
+        h.store.getState().seekApproximate(2.4, { keepPlaying: true, overGap: true });
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.video.seeks).toBe(2);
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        // The `seeking` event of that seek has not run. A late frame that meets the stop and
+        // leads the position does nothing.
+        h.present("99");
+        expectStillPlaying(h, w);
+        h.store.getState().syncSeeking(h.key, h.video);
+        expectStillPlaying(h, w);
+
+        playFrames(h, 61, 99);
+        expectReachedLast(w, 1);
+      });
+
+      it("holds a frame in doubt again after a seek that keeps the stop point", () => {
+        // The late frame 99 is in doubt, and the playback is not confirmed.
+        const { h, w } = lateFrameAfterSeekToIn("99", "50", "100");
+        // A seek of the system keeps the stop point in the "playing" phase.
+        h.video.seeking = true;
+        h.store.getState().syncSeeking(h.key, h.video);
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        // A frame with another media time leads the position and meets the stop. The frame in
+        // doubt from before the seek is gone, so this frame is in doubt, and it does not confirm.
+        h.present("100");
+        expectStillPlaying(h, w);
+        expect(h.video.seeks).toBe(2);
+      });
+
+      it("opens the doubt at a repair seek before its `seeking` event runs", () => {
+        // A grid on 1/1000, where a frame holds a seek 3 ms from its target.
+        const h = attachPlaying(msSource("10000"));
+        startSegment(h, msFrame(50), msFrame(100));
+        for (let k = 51; k <= 55; k++) {
+          h.frame(msFrame(k));
+        }
+        const w = watch(h);
+        // The element stands at the target that the repair names, so the repair seeks 3 ms from
+        // it while the segment playback runs (ADR 046).
+        h.store.getState().repairSeek(h.key, h.video, h.video.currentTime);
+        expect(h.video.seeks).toBe(2);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        // The `seeking` event of the repair has not run. A late frame that meets the stop and
+        // leads the position does nothing.
+        h.present(msFrame(99));
+        expectStillPlaying(h, w);
+        h.store.getState().syncSeeking(h.key, h.video);
+
+        for (let k = 56; k <= 99; k++) {
+          h.frame(msFrame(k));
+        }
+        expectReachedLast(w, 1);
+      });
+
+      it("drops the frame in doubt with its stop point at a new Play Segment", () => {
+        const { h, w } = lateFrameAfterSeekToIn("99", "50", "100");
+        h.store.getState().playSegment("150" as Pts, "160" as Pts);
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        // The first frame of the new playback leads the position and meets its stop. The frame in
+        // doubt of the old playback does not confirm the new one, so this frame is in doubt.
+        h.present("159");
+        expect(h.store.getState().playbackStop).toEqual({
+          inPts: "150",
+          outPts: "160",
+          phase: "playing",
+        });
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+        expect(h.store.getState().isPlaying).toBe(true);
+        expect(w.published).toHaveLength(0);
+      });
+
+      it("takes the first frame when the position is not a finite number", () => {
+        const h = attachPlaying(gridSource);
+        const w = watch(h);
+        startUnconfirmed(h, "50", "100");
+        h.video.advanceTo(Number.NaN);
+        h.present("99");
+        const write = expectReachedLast(w, 1);
+        expect(write.stop?.phase).toBe("stopped");
+      });
+
+      it("does nothing for a second frame when something else paused the element", () => {
+        const { h, w } = lateFrameAfterSeekToIn("200", "50", "100");
+        h.video.pause();
+        const pauses = h.video.pauseCalls;
+        const seeks = h.video.seeks;
+        h.present("99");
+        expect(h.video.pauseCalls).toBe(pauses);
+        expect(h.video.seeks).toBe(seeks);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      });
+    });
+
+    describe("an element that reports its end during a seek", () => {
+      it("is no end of the media: the scrub of the system drops the stop point and publishes nothing", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        const seeks = h.video.seeks;
+        // The scrub of the system in WebKit: a seek to the end, which pauses the element, and the
+        // element reports `ended` from the target of that seek while it runs.
+        h.video.advanceTo(10);
+        h.video.seeking = true;
+        h.video.paused = true;
+        h.video.ended = true;
+        h.store.getState().syncSeeking(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        h.store.getState().syncPause(h.key, h.video);
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(h.store.getState().isPlaying).toBe(false);
+        expect(h.video.seeks).toBe(seeks);
+        expect(w.published).toHaveLength(0);
+
+        // The seek ends at the end of the media. No seek back waited for it, and nothing is
+        // published.
+        h.video.seeking = false;
+        h.store.getState().syncSeeked(h.key, h.video);
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(h.video.seeks).toBe(seeks);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      });
+
+      it("is no end of the media for an `ended` call during the seek", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 70);
+        const w = watch(h);
+        h.video.advanceTo(10);
+        h.video.seeking = true;
+        h.video.ended = true;
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(h.store.getState().playbackStop?.phase).toBe("playing");
+        expect(w.published).toHaveLength(0);
+      });
+    });
+
+    describe("a listener that starts a new segment playback inside the stop", () => {
+      /**
+       * Starts segment playback 2 from the write of the stop of playback 1 that reports the
+       * pause, one time.
+       */
+      function startSecondOnPause(h: Harness): void {
+        let started = false;
+        h.store.subscribe((state, prev) => {
+          if (
+            !started &&
+            prev.isPlaying &&
+            !state.isPlaying &&
+            state.segmentPlayback?.id === 1
+          ) {
+            started = true;
+            h.store.getState().playSegment("150" as Pts, "160" as Pts);
+          }
+        });
+      }
+
+      function expectSecondPlays(h: Harness, w: ReturnType<typeof watch>): void {
+        expect(h.store.getState().playbackStop).toEqual({
+          inPts: "150",
+          outPts: "160",
+          phase: "playing",
+        });
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 2, reached: false });
+        expect(h.store.getState().isPlaying).toBe(true);
+        expect(w.published).toHaveLength(0);
+        // The seek to the In of playback 2 is the last seek: no seek back of playback 1.
+        expect(h.video.seeks).toBe(2);
+        expect(h.video.currentTime).toBe(h.timeOf("150"));
+        for (const write of w.writes) {
+          if (write.stop?.inPts === "50") {
+            expect(write.playback?.id).toBe(1);
+          }
+        }
+      }
+
+      it("keeps playback 2 in the frame test", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        startSecondOnPause(h);
+        // A frame after the last frame: the stop of playback 1 would seek back from it.
+        h.frame("100");
+        expectSecondPlays(h, w);
+      });
+
+      it("keeps playback 2 in the frame test on the last frame", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        startSecondOnPause(h);
+        h.frame("99");
+        expectSecondPlays(h, w);
+      });
+
+      it("keeps playback 2 in the clock test", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        const w = watch(h);
+        startSecondOnPause(h);
+        h.video.advanceTo(h.timeOf("100") + 0.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expectSecondPlays(h, w);
+      });
+
+      /**
+       * Starts segment playback 2 from the write that drops the stop point of playback 1, one
+       * time: the first write of the end of the media.
+       */
+      function startSecondOnDrop(h: Harness): void {
+        let started = false;
+        h.store.subscribe((state, prev) => {
+          if (
+            !started &&
+            prev.playbackStop !== null &&
+            state.playbackStop === null &&
+            state.segmentPlayback?.id === 1
+          ) {
+            started = true;
+            h.store.getState().playSegment("150" as Pts, "160" as Pts);
+          }
+        });
+      }
+
+      /** Plays segment 50 to 100 past its Out with no frame, to the end of the media. */
+      function endWithoutFrames(h: Harness): void {
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+      }
+
+      it("keeps playback 2, and its play session, at the `pause` event of the end", () => {
+        const h = attachPlaying(gridSource);
+        endWithoutFrames(h);
+        const w = watch(h);
+        startSecondOnDrop(h);
+        h.store.getState().syncPause(h.key, h.video);
+        expectSecondPlays(h, w);
+      });
+
+      it("keeps playback 2, and its play session, at an `ended` event with no `pause` before it", () => {
+        const h = attachPlaying(gridSource);
+        endWithoutFrames(h);
+        const w = watch(h);
+        startSecondOnDrop(h);
+        h.store.getState().syncEnded(h.key, h.video);
+        expectSecondPlays(h, w);
+      });
+    });
+
+    describe("a seek back that does not start", () => {
+      /** Makes each later assignment of the position throw, as a seek that cannot start. */
+      function failSeeks(video: PlaybackMediaElement): void {
+        const descriptor = Object.getOwnPropertyDescriptor(video, "currentTime");
+        Object.defineProperty(video, "currentTime", {
+          get: () => descriptor?.get?.call(video) as number,
+          set: () => {
+            throw new DOMException("The element cannot seek.", "InvalidStateError");
+          },
+          configurable: true,
+        });
+      }
+
+      function expectNothingPublished(h: Harness, w: ReturnType<typeof watch>): void {
+        expect(h.store.getState().error).toBe("seekFailed");
+        expect(h.store.getState().playbackStop).toBeNull();
+        expect(h.store.getState().isPlaying).toBe(false);
+        expect(h.store.getState().segmentPlayback).toEqual({ id: 1, reached: false });
+        expect(w.published).toHaveLength(0);
+      }
+
+      it("publishes nothing in the frame test", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        const w = watch(h);
+        failSeeks(h.video);
+        h.frame("100");
+        expectNothingPublished(h, w);
+      });
+
+      it("publishes nothing in the clock test", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        const w = watch(h);
+        failSeeks(h.video);
+        h.video.advanceTo(h.timeOf("100") + 0.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expectNothingPublished(h, w);
+      });
+
+      it("publishes nothing in the clock test off the grid", () => {
+        const vfr: PlaybackSource = {
+          path: "/media/phone-failed.mp4",
+          size: 4096,
+          mtime: 1724978700,
+          videoTimeBase: { n: 1, d: 90000 },
+          videoStartPts: "0" as Pts,
+          videoDurationTicks: "900000" as TickCount,
+          approximateDurationSeconds: 10,
+          avgFrameRate: { n: 2997, d: 100 },
+          rFrameRate: { n: 30, d: 1 },
+        };
+        const h = attachPlaying(vfr);
+        startSegment(h, "90000", "180000");
+        const w = watch(h);
+        failSeeks(h.video);
+        h.video.advanceTo(2.1);
+        h.store.getState().syncBrowserTime(h.key, h.video);
+        expectNothingPublished(h, w);
+      });
+
+      it("publishes nothing at the end of the media", () => {
+        const h = attachPlaying(gridSource);
+        startSegment(h, "50", "100");
+        playFrames(h, 51, 98);
+        h.video.advanceTo(10);
+        h.video.paused = true;
+        h.video.ended = true;
+        const w = watch(h);
+        failSeeks(h.video);
+        h.store.getState().syncPause(h.key, h.video);
+        expectNothingPublished(h, w);
+        h.store.getState().syncEnded(h.key, h.video);
+        expect(w.published).toHaveLength(0);
+      });
     });
   });
 });

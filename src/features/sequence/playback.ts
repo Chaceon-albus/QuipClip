@@ -121,10 +121,20 @@ export interface SequencePlayback {
   readonly handleEnded: () => boolean;
   /**
    * The preview calls this at each `pause` event of its element, before the playback store syncs
-   * it, with `element.ended`. The element sends `pause` before `ended` at its end, and the pause
-   * ends the playing state, so this records that the element was playing when it reached the end.
+   * it, with true when the element is at its end: it reports `ended` and no seek (isAtMediaEnd,
+   * ADR 074). The element sends `pause` before `ended` at its end, and the pause ends the playing
+   * state, so this records that the element was playing when it reached the end.
    */
   readonly notePause: (ended: boolean) => void;
+  /**
+   * The preview calls this when it drops an `ended` event of its element: an event that finds the
+   * element away from its end (ADR 074). It forgets what `notePause` recorded of the pause before
+   * that event, so a later `ended` event that no pause came before, as at the end of a seek of a
+   * paused element, does not go on at the next clip. It does not change the play intent of a Play
+   * Segment that crosses a junction: that playback goes on, and its own end goes on at the next
+   * clip.
+   */
+  readonly forgetPauseAtEnd: () => void;
   /**
    * True during a cold switch: from a navigation to another clip until the source of that clip is
    * calibrated, unless the playback store reports an error. A navigation that waits for an element
@@ -170,6 +180,7 @@ function stateOf(real: PlaybackState): PlaybackState {
     seekTargetSeconds: real.seekTargetSeconds,
     hasDeferredNavigation: real.hasDeferredNavigation,
     playbackStop: real.playbackStop,
+    segmentPlayback: real.segmentPlayback,
     isPlaying: real.isPlaying,
     isAttached: real.isAttached,
     attachedSourceRevisionKey: real.attachedSourceRevisionKey,
@@ -968,6 +979,11 @@ export function createSequencePlayback(
     endedInSegment = ended && real.playbackStop?.phase === "playing";
   };
 
+  const forgetPauseAtEnd = (): void => {
+    endedWhilePlaying = false;
+    endedInSegment = false;
+  };
+
   const handleEnded = (): boolean => {
     const state = timeline.getState();
     const mapping = mappingOf(state);
@@ -975,11 +991,15 @@ export function createSequencePlayback(
     const segmentEnded = endedInSegment;
     endedWhilePlaying = false;
     endedInSegment = false;
-    if (
-      mapping === null ||
-      (!played && playingTo === null) ||
-      (segmentEnded && playingTo === null)
-    ) {
+    // The continuation on the next clip needs an element that played to its end. An end with no
+    // playback, as after a scrub of the system to the end, continues nothing, and the play intent
+    // of a Play Segment across the junction goes with it (ADR 074). The play intent only gives
+    // the Out on the next clip.
+    if (!played) {
+      playingTo = null;
+      return false;
+    }
+    if (mapping === null || (segmentEnded && playingTo === null)) {
       return false;
     }
     const next = mapping.timeline.clips[mapping.clip.index + 1];
@@ -1030,6 +1050,7 @@ export function createSequencePlayback(
     store,
     handleEnded,
     notePause,
+    forgetPauseAtEnd,
     isSwitching,
     seekToClipFrame,
     dropNavigation,

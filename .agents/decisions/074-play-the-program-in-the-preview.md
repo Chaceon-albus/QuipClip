@@ -115,7 +115,59 @@ stop**.
   play on the next clip, and it ends the play session of a playback that started after that
   end.
 
-Play Segment itself does not change.
+Play Segment itself does not change, but for the first rule of the note below.
+
+(Changed on 2026-11-27, with the code of this section.) The review of the code found cases
+that the rules above did not cover. These rules apply to them:
+
+- **A frame from before a seek.** The callback of a frame that the browser presented before
+  the seek to the In can arrive after that seek ended (ADR 022). Before, such a frame at or
+  after the last frame stopped a segment playback that had not started. So after each seek,
+  the store is in doubt until it has **confirmed** the playback. A frame that lies at most 0.1
+  seconds after the position that the element reports confirms it. A frame from before the
+  seek that can stop the playback lies after that position, because the element is at the
+  target of the seek.
+  - While the playback is not confirmed, the frame test of the stop does nothing for the
+    first frame that lies more than 0.1 seconds after the position, also when that frame meets
+    the stop. That frame is **in doubt**.
+  - A second frame, with another time than the frame in doubt, confirms the playback whatever
+    the position is. At most one callback of a frame from before the seek comes after the
+    seek ended. And a web view can report a position that trails the picture (ADR 046), which
+    must not make the store miss the last frame.
+  - After the playback is confirmed, each frame counts as before, with no test of the
+    position.
+  - Each seek on the element, also one that the system makes, opens the doubt again.
+  - The clock does nothing with the frame in doubt. The store cannot know that this frame is
+    still on screen.
+
+  Three limits stay. A frame from before the seek that lies at most 0.1 seconds after the
+  position counts. A second frame from before the seek counts. And when the first frame after
+  a seek is a frame of the playback that meets the stop, and it lies more than 0.1 seconds
+  after the position, it does nothing: the next frame, the clock test, or the end of the
+  media then stops the playback, one frame later or up to the length of the stop window
+  later.
+- **At its end.** An element is at its end only when it reports `ended` and reports no seek.
+  A scrub that the system makes can pause the element during its seek, and WebKit then reports
+  `ended` from the target of that seek. Such a pause is a pause from outside: it drops the
+  stop point and publishes nothing. The preview uses the same test for an `ended` event, and
+  for the pause that comes before it (ADR 052). One limit stays: when the media ends, and a
+  seek of the system to that same end starts before the page reads the `pause` and `ended`
+  events of that end, the page takes the end as a pause from outside. The playback then stops
+  there and does not go on at the next clip.
+- **A dropped `ended` event.** When the preview drops an `ended` event, the playback of the
+  sequence forgets what it noted at the pause before that event. A later `ended` event that
+  no pause came before then cannot continue a play on the next clip. That is also so while a
+  Play Segment crosses a junction: the playback goes on at the next clip only when the element
+  played to its end, and an end with no playback drops the play intent of that segment
+  (ADR 052).
+- **A seek back that did not start.** When the stop needs a seek back and the store cannot
+  start it, the store publishes nothing. The stop point goes, and the store reports the seek
+  that failed. A seek back that is not necessary, because the element is already at the
+  position of the last frame, is a stop reached. A web view can then keep the picture of the
+  frame after the last frame (ADR 022), as before this record.
+- **A change inside the stop.** A handler that makes a stop reads the stop point again after
+  each of its own writes. When a listener of such a write replaced or dropped the stop point,
+  the handler ends there and publishes nothing.
 
 ### How a program play runs
 

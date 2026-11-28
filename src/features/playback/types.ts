@@ -54,11 +54,16 @@ export interface PlaybackMediaElement {
    * started from outside the store, before its `play` event ran. syncPause reads it to keep the
    * playback state at the late `pause` event of a pause that a play followed, and a seek with
    * `keepPlaying` reads it to pause an element that already paused on its own (SeekOptions).
+   * In the "playing" phase, the frame test and the clock test of the stop do nothing for an
+   * element that reports `paused` and is not at its end (isAtMediaEnd, ADR 074).
    */
   paused?: boolean;
   /**
    * `HTMLMediaElement.ended`. The element sends `pause` before `ended` when it reaches its end,
-   * and the stop of a segment playback reads the end at the first of the two.
+   * and the stop of a segment playback reads the end at the first of the two. The element is at
+   * its end only when it reports `ended` and reports no seek (isAtMediaEnd, ADR 074): WebKit
+   * reports `ended` from the target of a pending seek. The preview drops an `ended` event of an
+   * element that is not at its end.
    */
   ended?: boolean;
   /**
@@ -125,6 +130,40 @@ export type PlaybackStop =
        */
       readonly windowEndSeconds: number | null;
     };
+
+/**
+ * The last segment playback that the store accepted (ADR 074), and whether it reached its stop.
+ *
+ * - `id` is a number that the store gives to each segment playback that it accepts: each call of
+ *   `playSegment` that sets the stop point. A store never gives the same number two times.
+ * - `reached` is false when the store accepts the playback. It becomes true one time, when the
+ *   store itself ends that playback because of its stop point: the pause on the last frame, the
+ *   seek back from a frame after the last frame, the stop of the clock for a playback that
+ *   presents no frame, or the end of the media inside the playback. The store writes it as the
+ *   last step of the handler that made the stop, after that handler paused the element and
+ *   started its seek back or left it out. A handler whose seek back did not start writes
+ *   nothing: the stop point goes with `reached` still false.
+ *
+ * After a seek, the first frame that leads the position of the element by more than a small
+ * distance can come from before the seek to the In. It is in doubt, and it does not stop the
+ * playback. A frame that does not lead the position, or a second frame, confirms the playback,
+ * and a confirmed playback stops on its frames whatever the position says. When no second frame
+ * comes, the backstop of the clock or the end of the media stops it.
+ *
+ * The end of the media counts only when the element is at its end: it reports `ended` and no
+ * seek (isAtMediaEnd). A pause during a seek whose target is the end is a pause from the system.
+ *
+ * Each other end of a segment playback writes nothing: a pause, a play, a seek, an error, a
+ * decode stall, a detach, a reset, a recalibration, and a loss of the calibration. The stop point
+ * then goes with `reached` still false. A later frame in the seek-back window (ADR 022) does not
+ * write it again.
+ *
+ * It is display and transport state only. It never enters the project, and no edit reads it.
+ */
+export interface SegmentPlayback {
+  readonly id: number;
+  readonly reached: boolean;
+}
 
 /**
  * Options for seek actions (ADR 022).
@@ -332,6 +371,13 @@ export interface PlaybackState {
    * display target: the playhead and the timecode never read it (ADR 022).
    */
   readonly playbackStop: PlaybackStop | null;
+  /**
+   * The last segment playback that the store accepted, or null when it accepted none (see
+   * SegmentPlayback, ADR 074). A new accepted segment playback replaces it with a new number.
+   * Nothing else clears it: a detach and a reset keep it, and a reader compares the number with
+   * the number that it got when the store accepted its playback.
+   */
+  readonly segmentPlayback: SegmentPlayback | null;
   /** True when video is currently playing. */
   readonly isPlaying: boolean;
   /** True when a media element is attached. */
@@ -647,6 +693,10 @@ export interface PlaybackActions {
    * It needs an attached, ready element, a ready calibration, no decode stall, and a segment
    * that holds a frame (canPlaySegment): on the frame grid, a last frame at or after the frame
    * of the In. Otherwise it does nothing. When the seek to `inPts` fails, it does not play.
+   *
+   * When it sets the stop point, it also gives the playback a new number in `segmentPlayback`,
+   * with `reached` false, in the same write (ADR 074). A call that sets no stop point leaves
+   * `segmentPlayback` as it is.
    */
   playSegment: (inPts: Pts, outPts: Pts) => void;
 

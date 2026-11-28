@@ -171,11 +171,13 @@ const MEDIA_ONLY_ACTIONS: readonly ShortcutAction[] = [
 
 /**
  * A media element that records each seek and reports `seeking` until the test settles it. A seek
- * past `duration` stops at it, as it does in a browser.
+ * past `duration` stops at it, as it does in a browser. `advanceTo` moves the position as playback
+ * does, with no seek.
  */
 interface FakeElement extends PlaybackMediaElement {
   seeking: boolean;
   readonly currentTimeSets: number;
+  advanceTo: (time: number) => void;
 }
 
 function createFakeElement(duration = 10): FakeElement {
@@ -195,6 +197,9 @@ function createFakeElement(duration = 10): FakeElement {
     },
     get currentTimeSets() {
       return sets;
+    },
+    advanceTo: (value: number) => {
+      time = value;
     },
     play: () => Promise.resolve(),
     pause: () => {},
@@ -3413,9 +3418,9 @@ describe("planShortcutCommand", () => {
 
     describe("Play Segment", () => {
       /**
-       * The playback reaches frame k: the browser presents it. On the harness source PTS k is
-       * frame k, at k / 25 s. The element position stays where the seek to the In left it, inside
-       * the segment.
+       * The playback reaches frame k: the position of the element moves to the start of the frame,
+       * as a playing element moves it, with no seek, and the browser presents the frame. On the
+       * harness source PTS k is frame k, at k / 25 s.
        */
       const playTo = (
         h: ReturnType<typeof createStoreHarness>,
@@ -3423,6 +3428,7 @@ describe("planShortcutCommand", () => {
         to: number,
       ) => {
         for (let k = from; k <= to; k++) {
+          h.element.advanceTo(k / 25);
           h.anchor(k / 25);
         }
       };

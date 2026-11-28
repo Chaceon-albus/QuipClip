@@ -28,6 +28,7 @@ import {
 import type { Pts, Rational } from "@/types/project";
 import { scrubCue } from "./cue";
 import { realFrameStep, type FrameTable } from "./frameTable";
+import { isAtMediaEnd } from "./mediaEnd";
 import type {
   CalibrationStatus,
   FrameIndexSeekOptions,
@@ -391,6 +392,57 @@ function isPredictedLastFrame(
  */
 const PLAYBACK_STOP_BACKSTOP_SECONDS = 0.1;
 
+/**
+ * The distance in seconds after the position of the element past which a presented frame leads
+ * the position, while a segment playback is not yet confirmed after a seek (ADR 074). A frame
+ * leads the position when the position is a finite number and the media time of the frame lies
+ * more than this distance after it. A position that is not a finite number never makes a frame
+ * lead.
+ *
+ * WKWebView can run the frame callback of an earlier seek after the `seeked` of a later one (ADR
+ * 022). After the seek to the In, a frame from before that seek can then meet the stop of a
+ * segment that never played. The element of a segment playback plays forward from the In, so its
+ * own frames do not lie far after the position. But a web view can also report a position that
+ * trails the picture by more than this distance: a cached position, the first frames after a
+ * seek, a gap of the media (ADR 046). So the position decides only for the first frame after a
+ * seek, and only a frame callback tells which frame is on screen:
+ *
+ * - After each seek and for each new stop point, the playback is not confirmed.
+ * - A settled frame that does not lead the position confirms it.
+ * - A frame that leads the position, while no frame is in doubt or the frame in doubt has the
+ *   same media time, is in doubt: it does nothing, also when it meets the stop.
+ * - A frame that leads the position, while a frame with another media time is in doubt, confirms
+ *   the playback. At most one callback of a frame from before the seek comes after the seek
+ *   ended, so a second, different frame is a frame of the playback, whatever the clock says.
+ * - Once the playback is confirmed, each frame is tested with no test of the position, so the
+ *   stop on the last frame does not wait for a clock that trails.
+ *
+ * The clock does nothing with the frame in doubt.
+ *
+ * The distance covers how the web view samples and rounds the position that it reports. With the
+ * media in another process, WKWebView reports that position as an estimate (see
+ * stopWindowEndSeconds), so a tolerance at the microsecond, as SEEKED_FRAME_TOLERANCE_SECONDS, is
+ * too tight. The value is that of PLAYBACK_STOP_BACKSTOP_SECONDS, the distance that the stop
+ * already accepts between the picture and the clock.
+ *
+ * The limits:
+ *
+ * - A frame from before the seek that does not lead the position counts, and it confirms the
+ *   playback. When it lies at most this distance after the position, it meets the stop only when
+ *   the last frame of the segment lies at most this distance after the position too: with the
+ *   position at the In, a segment shorter than this distance. When it lies before the position, as
+ *   a frame of a seek toward an earlier time, it meets the stop only when the last frame of the
+ *   segment lies before the position too: the playback has then passed the last frame, and the
+ *   stop is due.
+ * - After a frame that confirmed the playback, or after one frame in doubt, a second frame from
+ *   before the seek counts, with no test of the position. When it meets the stop, the playback
+ *   stops early.
+ * - When the first frame after a seek leads the position and meets the stop, it does nothing. A
+ *   second frame, the backstop of the clock, or the end of the media then stops the playback: one
+ *   frame later, or up to the stop window later.
+ */
+const PLAYBACK_STOP_FRAME_LEAD_SECONDS = 0.1;
+
 /** The distance past the Out of the seek-back window and of the backstop, in seconds. */
 function playbackStopWindowSeconds(fps: Rational | null): number {
   return Math.max(PLAYBACK_STOP_BACKSTOP_SECONDS, fps === null ? 0 : fps.d / fps.n);
@@ -550,6 +602,18 @@ export function createPlaybackStore(
   let attachedElement: PlaybackMediaElement | null = null;
   let activeSourceRevisionKey: string | null = null;
   let playSessionId = 0;
+  // The number of the last segment playback that the store accepted (ADR 074). It only goes up,
+  // and no detach or reset sets it back, so the store never gives one number two times.
+  let lastSegmentPlaybackId = initialState?.segmentPlayback?.id ?? 0;
+  // The stop point of the segment playback whose own frame the store saw since the last seek
+  // (PLAYBACK_STOP_FRAME_LEAD_SECONDS, ADR 074). It is keyed by the identity of the stop point
+  // object, so a new segment playback starts not confirmed. Each seek clears it.
+  let confirmedStop: PlaybackStop | null = null;
+  // The one frame in doubt of the stop point that is not confirmed: a frame that led the position
+  // (applyPlaybackStop, PLAYBACK_STOP_FRAME_LEAD_SECONDS). It is keyed by the identity of the stop
+  // point object, as the confirmation is, so a new segment playback starts with none.
+  let frameInDoubt: { readonly stop: PlaybackStop; readonly mediaTime: number } | null =
+    null;
   let calibratedMediaTime: number | null = null;
   let lastPresentedMediaTime: number | null = null;
   let lastInferredPts: Pts | null = null;
@@ -1029,6 +1093,9 @@ export function createPlaybackStore(
       entry: { mediaTime: number; scrub: boolean },
     ): void => {
       repairLanding = null;
+      // The seek opens the doubt of the stop again at once, before its `seeking` event runs. No
+      // frame is settled between the two, because the element reports `seeking` (ADR 074).
+      forgetStopConfirmation();
       issuedTarget = entry.mediaTime;
       // A seek that keeps the playback running needs no repair of a moved position: the playback
       // moves it anyway (repairSeek). A seek that pauses has paused the element first.
@@ -2789,27 +2856,114 @@ export function createPlaybackStore(
      * On the grid the step counts from the frame on screen, `framePts`, which always lies after
      * the last frame. With no frame named, it counts from the position of the element: with no
      * frame on screen, the frame step starts from the position (stepToFrame).
+     *
+     * Returns true when the seek back started, or when the frame step found the last frame where
+     * it starts and needed no seek. Returns false when no seek back started (ADR 074): the store
+     * could not start it, or a listener of the write of the stop point set a new stop point.
      */
     const seekToStopFrame = (
       target: PlaybackStopTarget,
       framePts: Pts | null,
-    ): void => {
+    ): boolean => {
       set({ playbackStop: null });
+      // A listener of that write can have started a new segment playback. Its stop point stays,
+      // and this seek back does not run (ADR 074).
+      if (get().playbackStop !== null) {
+        return false;
+      }
       if (!attachedSource || !attachedElement) {
-        return;
+        return false;
       }
       if (target.kind === "tick") {
+        // seekToPts reports a failed seek in the error, and a seek that started clears it.
         get().seekToPts(target.lastTick);
-        return;
+        return get().error !== "seekFailed";
       }
       const state = get();
-      stepToFrame(
-        { kind: "absolute", frameIndex: target.lastFrame, keepPlaying: false },
-        framePts === null ? { ...state, presentedFrame: null } : state,
-        attachedSource,
-        attachedElement,
-        target.fps,
+      return (
+        stepToFrame(
+          { kind: "absolute", frameIndex: target.lastFrame, keepPlaying: false },
+          framePts === null ? { ...state, presentedFrame: null } : state,
+          attachedSource,
+          attachedElement,
+          target.fps,
+        ) !== "none"
       );
+    };
+
+    /**
+     * Runs `stop`, the steps of a handler that ends a segment playback because of its stop point,
+     * and then writes that the playback reached its stop (ADR 074). Each handler that makes such a
+     * stop puts all of its steps after its decision in `stop`: the frame test
+     * (applyPlaybackStop, the last step of syncPresentedFrame), the clock test
+     * (applyPlaybackStopBackstop, the last step of syncBrowserTime), and the end of the media
+     * (endPlaybackStopAtEnd, with the rest of syncPause or of syncEnded). A step that returns early
+     * from `stop` still comes back here, so no branch of a handler can miss the write, and the
+     * write comes after the pause and after the start of the seek back.
+     *
+     * `stop` returns true when it made the stop: it needed no seek back, or its seek back started.
+     * It returns false when its seek back did not start, or when a listener of one of its writes
+     * set a new stop point, and nothing is written then. The stop point is gone, and `reached`
+     * stays false.
+     *
+     * The number is read before `stop` runs, while the stop point of that playback is still set.
+     * The write happens only while the field still holds that number, not reached: a listener of
+     * a write in `stop` can have started a new segment playback, which keeps its own number.
+     */
+    const stopAtStopPoint = (stop: () => boolean): void => {
+      const accepted = get().segmentPlayback;
+      const made = stop();
+      const current = get().segmentPlayback;
+      if (
+        !made ||
+        accepted === null ||
+        current === null ||
+        current.id !== accepted.id ||
+        current.reached
+      ) {
+        return;
+      }
+      set({ segmentPlayback: { id: current.id, reached: true } });
+    };
+
+    /**
+     * True when the element is paused away from the end of the media while a segment playback is
+     * in the "playing" phase: something other than the stop paused it (ADR 074). The stop of the
+     * store moves the phase to "stopped", or drops the stop point, in the same call that pauses,
+     * and each other pause of the store drops the stop point or comes with an error. This is the
+     * fact that syncPause reads for a pause from the system. The frame test and the clock test
+     * then do nothing, and the `pause` event drops the stop point (syncPause). At the end of the
+     * media the browser pauses the element itself, and the element is at its end (isAtMediaEnd):
+     * the tests act there as before, and that end is a stop reached. An element that reports
+     * `ended` during a seek is not at its end: a scrub from the system pauses it so.
+     */
+    const isPausedFromOutside = (element: PlaybackMediaElement): boolean =>
+      element.paused === true && !isAtMediaEnd(element);
+
+    /**
+     * True when a frame at `frameMediaTime` leads the position of the element: the position is a
+     * finite number, and the frame lies more than PLAYBACK_STOP_FRAME_LEAD_SECONDS after it (ADR
+     * 074). Both times are on the timeline of the element.
+     */
+    const leadsPosition = (
+      frameMediaTime: number,
+      element: PlaybackMediaElement,
+    ): boolean => {
+      const position = element.currentTime;
+      return (
+        typeof position === "number" &&
+        Number.isFinite(position) &&
+        frameMediaTime > position + PLAYBACK_STOP_FRAME_LEAD_SECONDS
+      );
+    };
+
+    /**
+     * Opens the doubt of PLAYBACK_STOP_FRAME_LEAD_SECONDS again: no stop point is confirmed, and
+     * no frame is in doubt. Each seek, a detach and a reset call it (ADR 074).
+     */
+    const forgetStopConfirmation = (): void => {
+      confirmedStop = null;
+      frameInDoubt = null;
     };
 
     /**
@@ -2835,8 +2989,14 @@ export function createPlaybackStore(
      * In the "stopped" phase the element is paused. A frame of the stop keeps it (keepsStop). A
      * frame in the seek-back window (isInStopWindow) gets one seek back. Any other frame comes from
      * a seek that the store did not make, and the stop point goes with no seek.
+     *
+     * In the "playing" phase, while the playback is not confirmed after a seek, the first frame
+     * that leads the position at `frameMediaTime` is in doubt and does nothing, also when it meets
+     * the stop (ADR 074). A frame that does not lead the position, or a second frame with another
+     * media time, confirms the playback. A confirmed playback tests each frame with no test of the
+     * position (PLAYBACK_STOP_FRAME_LEAD_SECONDS).
      */
-    const applyPlaybackStop = (framePts: Pts): void => {
+    const applyPlaybackStop = (framePts: Pts, frameMediaTime: number): void => {
       const stop = get().playbackStop;
       if (stop === null || !attachedSource || !attachedElement) {
         return;
@@ -2866,6 +3026,12 @@ export function createPlaybackStore(
         return;
       }
 
+      // Something else paused the element away from the end of the media. That is no stop, and
+      // its `pause` event drops the stop point (syncPause, ADR 074).
+      if (isPausedFromOutside(attachedElement)) {
+        return;
+      }
+
       const reached =
         target.kind === "frame"
           ? stopFrameIndexOfPts(attachedSource, target.fps, framePts) >=
@@ -2878,30 +3044,58 @@ export function createPlaybackStore(
                 attachedSource.videoTimeBase,
                 target.fps,
               ));
+      if (confirmedStop !== stop) {
+        // The playback is not confirmed after a seek (ADR 074). The first frame that leads the
+        // position can come from before the seek to the In: it is in doubt, and it does nothing.
+        // The same frame reported again stays in doubt. A frame that does not lead the position
+        // confirms the playback, and so does a second frame with another media time: at most one
+        // callback of a frame from before the seek comes after the seek ended.
+        const doubt =
+          frameInDoubt !== null && frameInDoubt.stop === stop ? frameInDoubt : null;
+        if (
+          leadsPosition(frameMediaTime, attachedElement) &&
+          (doubt === null || doubt.mediaTime === frameMediaTime)
+        ) {
+          frameInDoubt = { stop, mediaTime: frameMediaTime };
+          return;
+        }
+        confirmedStop = stop;
+        frameInDoubt = null;
+      }
       if (!reached) {
         return;
       }
-      pauseElement();
-      if (!isRestFrame(attachedSource, target, framePts)) {
-        seekToStopFrame(target, framePts);
-        return;
-      }
-      // The phase changes in the call that pauses, before the `pause` event of this pause runs,
-      // so that event does not read as a pause from the system (syncPause). The position is read
-      // after the pause, where the element stopped.
-      set({
-        playbackStop: {
-          phase: "stopped",
-          inPts: stop.inPts,
-          outPts: stop.outPts,
-          restPts: framePts,
-          windowEndSeconds: stopWindowEndSeconds(
-            attachedSource,
-            target,
-            stop.outPts,
-            attachedElement.currentTime,
-          ),
-        },
+      const source = attachedSource;
+      const element = attachedElement;
+      // The playback reached its stop: stopAtStopPoint writes that after these steps (ADR 074).
+      stopAtStopPoint(() => {
+        pauseElement();
+        // A listener of the write of the pause can have replaced the stop point, as with a new
+        // segment playback. That stop point is not the one of this handler, which stops here.
+        if (get().playbackStop !== stop) {
+          return false;
+        }
+        if (!isRestFrame(source, target, framePts)) {
+          return seekToStopFrame(target, framePts);
+        }
+        // The phase changes in the call that pauses, before the `pause` event of this pause runs,
+        // so that event does not read as a pause from the system (syncPause). The position is
+        // read after the pause, where the element stopped.
+        set({
+          playbackStop: {
+            phase: "stopped",
+            inPts: stop.inPts,
+            outPts: stop.outPts,
+            restPts: framePts,
+            windowEndSeconds: stopWindowEndSeconds(
+              source,
+              target,
+              stop.outPts,
+              element.currentTime,
+            ),
+          },
+        });
+        return true;
       });
     };
 
@@ -2924,35 +3118,49 @@ export function createPlaybackStore(
      */
     const applyPlaybackStopBackstop = (element: PlaybackMediaElement): void => {
       const stop = get().playbackStop;
+      // An element that something else paused away from the end of the media is no stop, and its
+      // `pause` event drops the stop point (isPausedFromOutside, ADR 074). The `timeupdate` of an
+      // element at its end comes before its `pause` and `ended`, and it acts as before.
       if (
         stop === null ||
         stop.phase !== "playing" ||
         !attachedSource ||
         element.seeking === true ||
-        queuedSeek !== null
+        queuedSeek !== null ||
+        isPausedFromOutside(element)
       ) {
         return;
       }
-      const target = playbackStopTarget(attachedSource, stop.inPts, stop.outPts);
+      const source = attachedSource;
+      const target = playbackStopTarget(source, stop.inPts, stop.outPts);
       if (
         target === null ||
-        !isPastStopWindow(attachedSource, target, stop, element.currentTime)
+        !isPastStopWindow(source, target, stop, element.currentTime)
       ) {
         return;
       }
-      pauseElement();
-      if (endsWithVideo(attachedSource, target)) {
-        set({ playbackStop: null });
-        return;
-      }
-      seekToStopFrame(target, null);
+      // The playback reached its stop: stopAtStopPoint writes that after these steps (ADR 074).
+      stopAtStopPoint(() => {
+        pauseElement();
+        // A listener of the write of the pause can have replaced the stop point, as with a new
+        // segment playback. That stop point is not the one of this handler, which stops here.
+        if (get().playbackStop !== stop) {
+          return false;
+        }
+        if (endsWithVideo(source, target)) {
+          set({ playbackStop: null });
+          return true;
+        }
+        return seekToStopFrame(target, null);
+      });
     };
 
     /**
      * Ends a segment playback when the element reaches the end of the media before the stop
      * (ADR 026). The element sends `pause` and then `ended`, and the first of the two calls this.
-     * Both callers call it only while the element reports `ended`, so a late `ended` event of an
-     * earlier end does not end a segment playback that started after it.
+     * Both callers call it only while the element is at its end (isAtMediaEnd), so a late `ended`
+     * event of an earlier end does not end a segment playback that started after it, and neither
+     * does a pause during a seek whose target is the end.
      *
      * The stop point goes. The store seeks back to the last frame only when the playback passed
      * the Out with no frame callback. It does not seek in two cases:
@@ -2963,15 +3171,26 @@ export function createPlaybackStore(
      *   an extent that ends after the last frame, where the last frame of the grid does not exist.
      * - The Out lies at or after the position where the element ended. This test applies whenever
      *   the first one does not, also when the probe gives no extent in ticks.
+     *
+     * Each end of it is a stop reached (ADR 074). Each caller runs it, with the rest of its
+     * handler, in stopAtStopPoint, so the write of "reached" is the last step of that handler.
+     * It returns true when it made the stop: it needed no seek back, or its seek back started. It
+     * returns false when it found no stop point in the "playing" phase, when a listener of its
+     * write set a new stop point, or when its seek back did not start.
      */
-    const endPlaybackStopAtEnd = (element: PlaybackMediaElement): void => {
+    const endPlaybackStopAtEnd = (element: PlaybackMediaElement): boolean => {
       const stop = get().playbackStop;
       if (stop === null || stop.phase !== "playing") {
-        return;
+        return false;
       }
       set({ playbackStop: null });
+      // A listener of that write can have started a new segment playback. Its stop point stays,
+      // and this handler stops here (ADR 074).
+      if (get().playbackStop !== null) {
+        return false;
+      }
       if (!attachedSource || calibratedMediaTime === null) {
-        return;
+        return true;
       }
       const target = playbackStopTarget(attachedSource, stop.inPts, stop.outPts);
       const startPts = attachedSource.videoStartPts;
@@ -2983,7 +3202,7 @@ export function createPlaybackStore(
         typeof position !== "number" ||
         !Number.isFinite(position)
       ) {
-        return;
+        return true;
       }
       const outTime = ptsToMediaTime(
         stop.outPts,
@@ -2995,9 +3214,9 @@ export function createPlaybackStore(
         outTime === null ||
         outTime >= position - NOMINAL_STEP_EDGE_TOLERANCE_SECONDS
       ) {
-        return;
+        return true;
       }
-      seekToStopFrame(target, null);
+      return seekToStopFrame(target, null);
     };
 
     /**
@@ -3113,6 +3332,7 @@ export function createPlaybackStore(
       seekTargetSeconds: initialState?.seekTargetSeconds ?? null,
       hasDeferredNavigation: initialState?.hasDeferredNavigation ?? false,
       playbackStop: initialState?.playbackStop ?? null,
+      segmentPlayback: initialState?.segmentPlayback ?? null,
       isPlaying: initialState?.isPlaying ?? false,
       isAttached: initialState?.isAttached ?? false,
       attachedSourceRevisionKey: initialState?.attachedSourceRevisionKey ?? null,
@@ -3296,6 +3516,7 @@ export function createPlaybackStore(
         attachedElement = null;
         frameTable = null;
         repairLanding = null;
+        forgetStopConfirmation();
         issuedFastSeek = false;
         issuedTarget = null;
         issuedKeepsPlaying = false;
@@ -3904,8 +4125,15 @@ export function createPlaybackStore(
         if (!get().isPlaying) {
           return;
         }
+        // The store accepts the segment playback here, and only here. The number comes in the
+        // same write as the stop point, so no reader sees the stop point of one playback with the
+        // number of another (ADR 074).
         const stop: PlaybackStop = { inPts, outPts, phase: "playing" };
-        set({ playbackStop: stop });
+        lastSegmentPlaybackId++;
+        set({
+          playbackStop: stop,
+          segmentPlayback: { id: lastSegmentPlaybackId, reached: false },
+        });
       },
 
       seekToPts: (targetPts: Pts, options?: SeekOptions) => {
@@ -4569,9 +4797,11 @@ export function createPlaybackStore(
         });
 
         // A frame that arrives while a seek runs or waits can come from before that seek, such as
-        // the seek to the In of a segment playback, so only a settled frame meets the stop.
+        // the seek to the In of a segment playback, so only a settled frame meets the stop. Its
+        // media time and the position of the element are on the same timeline, so the stop
+        // compares them as they are (ADR 074).
         if (settled) {
-          applyPlaybackStop(inferredPts);
+          applyPlaybackStop(inferredPts, mediaTime);
         }
       },
 
@@ -4734,6 +4964,9 @@ export function createPlaybackStore(
             scrub: false,
           });
         }
+        // The repair is a seek of the store too, and it opens the doubt of the stop again (ADR
+        // 074).
+        forgetStopConfirmation();
         try {
           if (offset === null) {
             // A frame of 6 ms and four ticks or less holds no seek 3 ms from the target, so the
@@ -4831,6 +5064,12 @@ export function createPlaybackStore(
         // over. Without this, the later frame of that seek could lie in the seek-back window and
         // be pulled back. In the "playing" phase the late `seeking` event of the seek to the In
         // still arrives after playSegment set the stop point, so that phase keeps it.
+        //
+        // Each seek opens the doubt of PLAYBACK_STOP_FRAME_LEAD_SECONDS again, also a seek that
+        // keeps the stop point in the "playing" phase. A seek of the store already did it when it
+        // started (issueSeek). This covers a seek of the system and the repair of a seek (ADR
+        // 074).
+        forgetStopConfirmation();
         if (get().playbackStop?.phase === "stopped") {
           set({ playbackStop: null });
         }
@@ -4993,31 +5232,50 @@ export function createPlaybackStore(
           return;
         }
 
+        const endPausedSession = (): void => {
+          // The event runs as a task after the pause. An element that plays again had a play
+          // after that pause: Play Segment and the release of a drag during playback seek, which
+          // pauses, and then play (ADR 026, ADR 035). The playback runs, so isPlaying and the
+          // session of the pending play stay. Without this, the play button showed Play until
+          // the `play` event, and the session of that play was dropped.
+          if (element.paused === false) {
+            return;
+          }
+
+          playSessionId++;
+          set({ isPlaying: false });
+        };
+
         // While a segment playback runs, a pause from the system ends it (ADR 026). The pause of
         // the stop itself never reaches this test, because the stop moves the phase to "stopped"
         // before it pauses. Two other pauses do not end it. An element that reached its end
         // sends `pause` before `ended`, and the end has its own rule. A `pause` event that finds
         // the element playing again is the late event of the seek to the In, which play
-        // followed.
+        // followed. An element that reports `ended` during a seek is not at its end
+        // (isAtMediaEnd): the scrub of the system pauses it so, and that pause takes the path of
+        // a pause from the system (ADR 074).
         if (get().playbackStop?.phase === "playing") {
-          if (element.ended === true) {
-            endPlaybackStopAtEnd(element);
-          } else if (element.paused !== false) {
+          if (isAtMediaEnd(element)) {
+            // The end of the media inside the segment playback is a stop reached. The rest of
+            // this handler runs first, and stopAtStopPoint then writes it (ADR 074).
+            stopAtStopPoint(() => {
+              const made = endPlaybackStopAtEnd(element);
+              // A listener of a write of that step can have started a new segment playback,
+              // whose play session stays.
+              if (get().playbackStop !== null) {
+                return false;
+              }
+              endPausedSession();
+              return made;
+            });
+            return;
+          }
+          if (element.paused !== false) {
             set({ playbackStop: null });
           }
         }
 
-        // The event runs as a task after the pause. An element that plays again had a play
-        // after that pause: Play Segment and the release of a drag during playback seek, which
-        // pauses, and then play (ADR 026, ADR 035). The playback runs, so isPlaying and the
-        // session of the pending play stay. Without this, the play button showed Play until
-        // the `play` event, and the session of that play was dropped.
-        if (element.paused === false) {
-          return;
-        }
-
-        playSessionId++;
-        set({ isPlaying: false });
+        endPausedSession();
       },
 
       syncEnded: (sourceRevisionKey: string, element: PlaybackMediaElement) => {
@@ -5038,13 +5296,32 @@ export function createPlaybackStore(
         // A priming play that reached the end of the media shows no frame any more.
         endPriming(false);
 
-        // A late `ended` event of an earlier end finds the element away from its end, and it
-        // does not end a segment playback that started after that end.
-        if (element.ended === true) {
-          endPlaybackStopAtEnd(element);
+        const endSession = (): void => {
+          playSessionId++;
+          set({ isPlaying: false });
+        };
+
+        // A late `ended` event of an earlier end, or an `ended` event during a seek, finds the
+        // element away from its end (isAtMediaEnd), and it does not end a segment playback that
+        // started after that end: the stop point stays. It still ends the play session below.
+        // The preview drops such an event before it reaches the store (ADR 074), so this test is
+        // a second guard.
+        if (isAtMediaEnd(element) && get().playbackStop?.phase === "playing") {
+          // The end of the media inside the segment playback is a stop reached. The rest of this
+          // handler runs first, and stopAtStopPoint then writes it (ADR 074).
+          stopAtStopPoint(() => {
+            const made = endPlaybackStopAtEnd(element);
+            // A listener of a write of that step can have started a new segment playback, whose
+            // play session stays.
+            if (get().playbackStop !== null) {
+              return false;
+            }
+            endSession();
+            return made;
+          });
+          return;
         }
-        playSessionId++;
-        set({ isPlaying: false });
+        endSession();
       },
 
       dismissError: (code?: PlaybackErrorCode) => {
@@ -5062,6 +5339,7 @@ export function createPlaybackStore(
 
       reset: () => {
         repairLanding = null;
+        forgetStopConfirmation();
         issuedFastSeek = false;
         issuedTarget = null;
         issuedKeepsPlaying = false;
