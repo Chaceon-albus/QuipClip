@@ -314,11 +314,17 @@ time: a request that arrives while the element seeks replaces the queued request
 drag. A drag uses `fastSeek` where the web view has it, and the release always ends with an
 exact seek. See ADR 022.
 
-The current _Source_ preview plays the sequence, one clip at a time (ADR 052). ADR 074 adds
-the _Program_ preview, and its code is not in yet. Play Program plays the segments of the
-export one after another, and Play Joins plays only the parts at each join, so the user can
-watch what the export will contain. Each part is on one clip and ends at a stop point of the
-playback store, and the preview pauses for a seek between two parts.
+The _Source_ preview plays the sequence, one clip at a time (ADR 052). ADR 074 adds the
+_Program_ preview. Play Program plays the segments of the export one after another, and Play
+Joins plays only the parts at each join, so the user can watch what the export will contain.
+Each part is on one clip, and the preview pauses for a seek between two parts.
+`src/features/sequence/programParts.ts` makes the list of the parts. The playback of the
+sequence (`src/features/sequence/playback.ts`) runs the list. It asks the playback store for
+one segment playback for each part. The store sets a stop point for the part, and it reports
+when the playback reached that stop or the end of the media. The run then first tests that
+the program did not change and that the playback has no fault, and it goes to the next part.
+A seek or a change of the playback by the user, an edit of the program, a fault of the
+playback, and a part that makes no progress for 10 seconds end the run.
 
 The timeline can show the audio envelope of a source, so the user can find where a person
 sings or speaks in a long recording. The menu of a clip label starts it, and it is off by

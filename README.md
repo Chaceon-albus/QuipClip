@@ -24,6 +24,8 @@ QuipClip can do these things:
   an edit.
 - Give a segment a name, and change the order in which the export joins the segments.
 - Export only the segments that you select.
+- Play the segments of the export in the preview, one after another, or only the joins
+  between them.
 - Choose the audio track of a video file that has two or more. This does not apply to an FLV
   file.
 - Save one frame as a PNG image.
@@ -159,6 +161,31 @@ file name needs it. For a file for each segment, use **Export Segment…** one t
 segment. If the export dialog shows an export in progress, click **Run in Background** before
 you right-click a segment.
 
+To see what an export of all the segments will contain, press `P`, or click the Play Program
+button. It is at the right of the Step Forward One Frame button below the preview. QuipClip
+plays the segments one after another, in the export order. It starts at the segment that `/`
+plays: the selected segment, or the segment at the playhead. When there is no such segment, it
+starts at the first segment of the export.
+
+To play only the joins, press `Shift+P`, or hold `Shift` and click the button. At each join,
+QuipClip plays up to 2 seconds from the end of one segment, and then up to 2 seconds from the
+start of the next segment. A short segment between two joins plays one time. The joins need
+two or more segments. When the start segment is the last segment of the export, the joins
+start at the first segment.
+
+While the program plays, the tooltip of the button shows the number of the part that plays and
+the count of the parts. Between two parts, the preview pauses for a moment while it goes to
+the next part. The pause can be longer when the next part is in a different video. The export
+has no such pause.
+
+To stop the program, press `Space`, or click the Pause button or the Play Program button. `P`
+and `Shift+P` start it again. A seek and a frame step also stop it. So does each edit that
+changes what the export contains: when you add, split or delete a segment, drag a segment
+edge, change the export order, or add or remove a video. The program always has all the
+segments, also when you selected only some of them. It does not follow **Export N
+Segments…**. `P` and `Shift+P` do nothing while a menu or a dialog is open, while you drag on
+the timeline, and while you hold the Step Back One Frame or the Step Forward One Frame button.
+
 To save one frame as a PNG image, go to the frame and press `Cmd+Shift+S`, or click the
 Export Frame button below the preview. The image is the first frame of a segment whose In is
 at that position. It has the full display size of the video.
@@ -230,6 +257,7 @@ is the macOS key. On Windows, use `Ctrl`.
 | -------------------- | -------------------------------------------------------------------------------- |
 | `Space`              | Play or pause                                                                    |
 | `/`                  | Play the current segment, or the segment at the playhead. Stop at its last frame |
+| `P`                  | Play the segments of the export in order. With `Shift`, play only the joins      |
 | `←` `→`              | Paused: step one frame. Playing: jump 5 s. With `Shift`, 1 s. With `Cmd`, 30 s   |
 | `,` `.` or `D` `F`   | Step one frame. With `Shift`, ten frames                                         |
 | `↑` `↓`              | Go to the previous or the next edit point                                        |
