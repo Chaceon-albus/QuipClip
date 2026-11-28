@@ -4,4 +4,5 @@
 
 export * from "./media";
 export * from "./playback";
+export * from "./programParts";
 export * from "./virtualMedia";

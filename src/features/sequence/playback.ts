@@ -15,6 +15,9 @@
  *
  * With one clip, every value and every request passes through unchanged.
  *
+ * It also runs a program play (ADR 074): a list of parts that it plays one after another, each
+ * as a segment playback of the playback store (`startProgramPlay`).
+ *
  * The preview itself (`PreviewPane`) keeps the playback store: it owns the media element and the
  * attach of the real source.
  */
@@ -45,10 +48,20 @@ import {
   type VirtualClip,
   type VirtualTimeline,
 } from "@/features/timeline/virtualTime";
-import { ptsFromBigInt, ptsToBigInt } from "@/lib/time";
+import { ptsFromBigInt, ptsToBigInt, ptsToMediaTime } from "@/lib/time";
 import type { Pts } from "@/types/project";
 import { mediaBySourceOf } from "./media";
+import { programKey, type ProgramAction, type ProgramPart } from "./programParts";
 import { sequenceNominalRate, type MediaBySource } from "./virtualMedia";
+
+/**
+ * The watchdog of a part of a program play (ADR 074): the time with no progress after which the
+ * part fails. It starts when the run asks for the part, and again when the store accepts the
+ * part. After the acceptance, each change of the clock of the element that the store publishes
+ * starts it again, so a part that plays never fails by it, however long the part is. Before the
+ * acceptance, nothing else starts it again.
+ */
+export const PROGRAM_PART_TIMEOUT_MS = 10_000;
 
 /** The mapping between the clip that the playback store shows and the virtual axis. */
 interface ClipMapping {
@@ -73,12 +86,21 @@ type Navigation = { readonly clipId: string } & (
       readonly options?: FrameIndexSeekOptions;
     }
   | { readonly kind: "segment"; readonly inPts: Pts; readonly outPts: Pts }
+  | {
+      // A part of a program play (ADR 074): the run asks the playback store for a segment
+      // playback of `[inPts, outPts)` once the element and the calibration are ready.
+      readonly kind: "part";
+      readonly inPts: Pts;
+      readonly outPts: Pts;
+      readonly partToken: number;
+    }
 );
 
 /**
  * A navigation that waits for an attach, as a seek with no play: a play that waits loses its
- * play, and a Play Segment that waits becomes a seek to its In. The replacement of the element
- * for a new audio stream stops the playback, which does not start again (ADR 070).
+ * play, and a Play Segment or a part of a program play that waits becomes a seek to its start.
+ * The replacement of the element for a new audio stream stops the playback, which does not
+ * start again (ADR 070), and so does the end of a program play (ADR 074).
  */
 function withoutPlay(navigation: Navigation): {
   readonly navigation: Navigation;
@@ -86,12 +108,23 @@ function withoutPlay(navigation: Navigation): {
 } {
   return {
     navigation:
-      navigation.kind === "segment"
+      navigation.kind === "segment" || navigation.kind === "part"
         ? { kind: "pts", clipId: navigation.clipId, pts: navigation.inPts }
         : navigation,
     play: false,
   };
 }
+
+/**
+ * Starts a timer of `ms` milliseconds that calls `callback`, and returns the function that
+ * cancels it.
+ */
+export type ProgramTimer = (callback: () => void, ms: number) => () => void;
+
+const defaultTimer: ProgramTimer = (callback, ms) => {
+  const handle = setTimeout(callback, ms);
+  return () => clearTimeout(handle);
+};
 
 /** Dependencies of `createSequencePlayback`, injected for tests. */
 export interface SequencePlaybackDependencies {
@@ -99,14 +132,28 @@ export interface SequencePlaybackDependencies {
   readonly timeline: TimelineStore;
   /** The media of every source of the session, by source ID. */
   readonly media: () => MediaBySource;
+  /** The timer of the parts of a program play (PROGRAM_PART_TIMEOUT_MS). `setTimeout` by default. */
+  readonly timer?: ProgramTimer;
 }
 
 /**
- * The state of the sequence playback: the state of the playback store on the virtual axis, and
- * `switching`, true during a cold switch (`SequencePlayback.isSwitching`).
+ * The program play that runs, for the interface (ADR 074): its action, the number of the part
+ * that plays or loads, counted from 1, and the count of the parts of its list.
+ */
+export interface ProgramRunState {
+  readonly action: ProgramAction;
+  readonly part: number;
+  readonly count: number;
+}
+
+/**
+ * The state of the sequence playback: the state of the playback store on the virtual axis,
+ * `switching`, true during a cold switch (`SequencePlayback.isSwitching`), and `programRun`, the
+ * program play that runs, or null with no run (ADR 074).
  */
 export type SequencePlaybackState = PlaybackStoreState & {
   readonly switching: boolean;
+  readonly programRun: ProgramRunState | null;
 };
 
 /** The store of the sequence playback, and the hook of the end of the media element. */
@@ -165,6 +212,85 @@ export interface SequencePlayback {
    * stream, because the playback does not start again after a change of the stream.
    */
   readonly dropPlayIntent: () => void;
+  /**
+   * Starts a program play (ADR 074) of `parts`, the list that `buildProgramParts` made for
+   * `action`. It ends a run that exists, drops the play intent of a Play Segment that crosses a
+   * junction, and starts the first part: the clip of the part attaches when it is not on screen,
+   * and the run asks the playback store for a segment playback of the part once the element and
+   * its calibration are ready. Each part goes on at the next part when the store reports that it
+   * reached its stop, and the run ends after the last part. Returns true when the run started.
+   * With an empty list it does nothing and returns false.
+   */
+  readonly startProgramPlay: (
+    action: ProgramAction,
+    parts: readonly ProgramPart[],
+  ) => boolean;
+  /**
+   * Ends the program play that runs, as the user takes the playback (ADR 074): it pauses, drops
+   * the stop point of the part, and a request of the run that waits for the attach of a clip
+   * becomes a seek to the start of its part with no play. Each entry point of the user calls it
+   * before it plans its command. Returns true when a run ended, and false with no run.
+   */
+  readonly endProgramPlay: () => boolean;
+  /**
+   * The preview calls this when it gives up the element of `sourceRevisionKey`, the revision key
+   * of the source of its element, on its path of a fatal failure: the element does not decode,
+   * and it leaves the tree. When the part of a program play is on a clip of that source, the run
+   * ends as a failure (ADR 074), with the three effects of each end before the last part. A
+   * request of the run that waits for that element stays as a seek with no play, so a new
+   * element of the source that loads later plays nothing. With no run, or another source, it
+   * does nothing.
+   */
+  readonly notePreviewFailure: (sourceRevisionKey: string) => void;
+}
+
+/** The facts of the playback store that a failure of a program play compares (ADR 074). */
+interface ProgramRunWatch {
+  readonly error: PlaybackState["error"];
+  readonly decodeStall: PlaybackState["decodeStall"];
+  readonly reloadGeneration: number;
+}
+
+function watchOf(real: PlaybackState): ProgramRunWatch {
+  return {
+    error: real.error,
+    decodeStall: real.decodeStall,
+    reloadGeneration: real.reloadGeneration,
+  };
+}
+
+/**
+ * A program play that runs (ADR 074). The stage of the part that plays or loads:
+ *
+ * - `loading`: the run asked for the part, and it waits for the attach of its clip, for the
+ *   element or for the calibration;
+ * - `accepted`: the store accepted the segment playback of the part with the number `acceptedId`;
+ * - `refused`: the start of the part does not lie before the end of the media, or the store did
+ *   not accept the part. The next read ends the run;
+ * - `completed`: the store reported that the part reached its stop.
+ */
+interface ProgramRun {
+  readonly action: ProgramAction;
+  readonly parts: readonly ProgramPart[];
+  index: number;
+  partToken: number;
+  stage: "loading" | "accepted" | "refused" | "completed";
+  acceptedId: number | null;
+  /** True when the store published "reached" for `acceptedId`. */
+  reached: boolean;
+  /**
+   * The clock of the element (`approximateBrowserTimeSeconds`) at the last write of the store
+   * that the run saw since the store accepted the part (`notePlaybackChange`).
+   */
+  clock: number | null;
+  /** Cancels the watchdog of the part (PROGRAM_PART_TIMEOUT_MS). */
+  cancelTimer: (() => void) | null;
+  /** The part token of the read that waits in a microtask, or null. */
+  scheduledToken: number | null;
+  /** The facts of the store at the last read (watchOf). */
+  watch: ProgramRunWatch;
+  /** The program when the run started (`programKey`). */
+  readonly program: string;
 }
 
 /**
@@ -251,6 +377,13 @@ export function createSequencePlayback(
   // the playback store attached that clip's source, so the frames of the old source keep their
   // mapping during a switch.
   let mappedClipId: string | null = null;
+  const timer = dependencies.timer ?? defaultTimer;
+  // The program play that runs, or null (ADR 074).
+  let programRun: ProgramRun | null = null;
+  // The last token of a part. Each part of each run gets a new one.
+  let lastPartToken = 0;
+  // The state of the run for the interface, kept while its fields stay the same.
+  let programRunMemo: ProgramRunState | null = null;
 
   const mediaOfClip = (clipId: string) => {
     const clip = timeline.getState().clips.find((entry) => entry.id === clipId);
@@ -459,8 +592,19 @@ export function createSequencePlayback(
       case "segment":
         real.playSegment(navigation.inPts, navigation.outPts);
         return;
+      case "part":
+        startPartOnStore(navigation);
+        return;
     }
   };
+
+  /**
+   * True when the run needs the calibration of the clip before it asks for the part: the store
+   * refuses a segment playback while the calibration is open (ADR 074).
+   */
+  const waitsForCalibration = (navigation: Navigation): boolean =>
+    navigation.kind === "part" &&
+    playback.getState().calibrationStatus === "calibrating";
 
   /**
    * The one clip of the timeline while a recalibration replaces its element and the new element
@@ -484,7 +628,8 @@ export function createSequencePlayback(
     if (
       realKey !== null &&
       revisionKeyOfClip(navigation.clipId) === realKey &&
-      real.isReady
+      real.isReady &&
+      !waitsForCalibration(navigation)
     ) {
       // The playback store shows the source of this clip already, and its element is ready:
       // two clips of one source share an element, so the seek needs no attach. An element that
@@ -503,9 +648,10 @@ export function createSequencePlayback(
   };
 
   /** Runs a pending navigation once the playback store attached the source of its clip. */
-  const flushPending = (): void => {
+  /** True when the pending navigation can run now on the element that the store attached. */
+  const pendingCanRun = (): boolean => {
     if (pending === null) {
-      return;
+      return false;
     }
     const real = playback.getState();
     const { navigation, play } = pending;
@@ -513,18 +659,33 @@ export function createSequencePlayback(
       !real.isAttached ||
       real.attachedSourceRevisionKey !== revisionKeyOfClip(navigation.clipId)
     ) {
-      return;
+      return false;
     }
     // A new element reports `readyState` 0, and a seek before it is ready fails. A play drops a
     // seek that waits for the calibration, and a segment playback is refused during it, so those
     // wait for the anchor of the new source too.
     if (!real.isReady) {
+      return false;
+    }
+    return !(
+      (play || navigation.kind === "segment" || navigation.kind === "part") &&
+      real.calibrationStatus === "calibrating"
+    );
+  };
+
+  const flushPending = (): void => {
+    if (pending === null || !pendingCanRun()) {
       return;
     }
-    if (
-      (play || navigation.kind === "segment") &&
-      real.calibrationStatus === "calibrating"
-    ) {
+    const real = playback.getState();
+    const { navigation, play } = pending;
+    if (navigation.kind === "part") {
+      // A part of a program play never starts inside a notification of a store: the read of
+      // the run starts it in a task of its own (ADR 074), after the store call that made the
+      // element ready returned, so it reads the length of the element at that time.
+      if (programRun !== null) {
+        scheduleRead(programRun);
+      }
       return;
     }
     pending = null;
@@ -617,11 +778,51 @@ export function createSequencePlayback(
       }
     };
 
+  /**
+   * An action of another caller than the run (ADR 074): it first ends a program play that runs,
+   * as the user takes the playback (`endProgramPlay`), and then runs. The run never calls the
+   * actions of this store: it calls the playback store and the navigation of this module
+   * directly. So each call of a wrapped action comes from another caller.
+   */
+  const endsRun =
+    <A extends unknown[], R>(action: (...args: A) => R) =>
+    (...args: A): R => {
+      if (programRun !== null) {
+        endProgramPlay();
+      }
+      return action(...args);
+    };
+
+  /** An action of the interface (`asNavigation`) that another caller than the run calls. */
+  const asUserAction = <A extends unknown[], R>(action: (...args: A) => R) =>
+    asNavigation(endsRun(action));
+
+  /** The state of the run for the interface, or null with no run. */
+  const programRunState = (): ProgramRunState | null => {
+    const run = programRun;
+    if (run === null) {
+      programRunMemo = null;
+      return null;
+    }
+    const part = run.index + 1;
+    const count = run.parts.length;
+    if (
+      programRunMemo === null ||
+      programRunMemo.action !== run.action ||
+      programRunMemo.part !== part ||
+      programRunMemo.count !== count
+    ) {
+      programRunMemo = { action: run.action, part, count };
+    }
+    return programRunMemo;
+  };
+
   const store = createStore<SequencePlaybackState>()(() => ({
     switching: false,
+    programRun: null,
     ...mapState(stateOf(playback.getState()), timeline.getState()),
 
-    seekToPts: asNavigation((pts: Pts, options?: SeekOptions) => {
+    seekToPts: asUserAction((pts: Pts, options?: SeekOptions) => {
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state) || state.virtual === null) {
@@ -642,7 +843,7 @@ export function createSequencePlayback(
       navigate({ kind: "pts", clipId: clip.clipId, pts: sourcePts, options });
     }),
 
-    seekApproximate: asNavigation((seconds: number, options?: SeekOptions) => {
+    seekApproximate: asUserAction((seconds: number, options?: SeekOptions) => {
       userNavigates();
       const state = timeline.getState();
       if (!isSequence(state)) {
@@ -671,7 +872,7 @@ export function createSequencePlayback(
       });
     }),
 
-    seekNominal: asNavigation(
+    seekNominal: asUserAction(
       (deltaFrames: number, options?: FrameStepOptions): FrameStepOutcome => {
         // The store refuses a step while its element is stalled or being replaced, so the
         // navigation of the sequence stays as it is (refusesTransportForReload, ADR 063).
@@ -756,7 +957,7 @@ export function createSequencePlayback(
       },
     ),
 
-    seekToFrameIndex: asNavigation(
+    seekToFrameIndex: asUserAction(
       (frameIndex: number, options?: FrameIndexSeekOptions) => {
         userNavigates();
         const state = timeline.getState();
@@ -799,7 +1000,7 @@ export function createSequencePlayback(
       },
     ),
 
-    playSegment: asNavigation((inPts: Pts, outPts: Pts) => {
+    playSegment: asUserAction((inPts: Pts, outPts: Pts) => {
       // The store refuses Play Segment while its element is stalled or being replaced. The seek
       // to the In of a segment that crosses a junction would otherwise replace the request of
       // the reload.
@@ -835,14 +1036,16 @@ export function createSequencePlayback(
       playingTo = outPts;
     }),
 
-    // Every other action and every sync of the element goes to the playback store unchanged.
+    // Every other action and every sync of the element goes to the playback store unchanged. A
+    // reload of a stalled element, `resumeAfterSeek` and `reset` first end a program play that
+    // runs (`endsRun`), and so do the actions of the interface above (`asUserAction`).
     attach: (...args) => playback.getState().attach(...args),
     detach: (...args) => playback.getState().detach(...args),
     syncReady: (...args) => playback.getState().syncReady(...args),
     syncUnready: (...args) => playback.getState().syncUnready(...args),
     primeFirstFrame: (...args) => playback.getState().primeFirstFrame(...args),
     syncDecodeStall: (...args) => playback.getState().syncDecodeStall(...args),
-    reloadStalledPreview: (sourceRevisionKey) => {
+    reloadStalledPreview: endsRun((sourceRevisionKey: string) => {
       // With one clip the key passes through, so the playback store refuses an old one. On a
       // sequence the key of the interface is the key of the sequence, so the attached key stands.
       const key = isSequence(timeline.getState())
@@ -851,13 +1054,13 @@ export function createSequencePlayback(
       if (key !== null) {
         playback.getState().reloadStalledPreview(key);
       }
-    },
+    }),
     // A recalibration is a navigation of the user (ADR 063): it ends a segment playback that
     // crosses a junction and drops a navigation that waits for an attach, so the clip on screen
     // stays. It is not a cold switch, and it keeps the mapped clip. The key passes as for
     // `reloadStalledPreview`. The store reads the position from its own state, in seconds of the
     // attached source, so no sequence time enters the request.
-    recalibrate: asNavigation((sourceRevisionKey: string) => {
+    recalibrate: asUserAction((sourceRevisionKey: string) => {
       // A recalibration that the store refuses changes nothing here either, so a navigation
       // that waits for an attach stays.
       if (!playback.getState().canRecalibrate) {
@@ -889,7 +1092,7 @@ export function createSequencePlayback(
     refusesTransportForReload: () => playback.getState().refusesTransportForReload(),
     syncAnchorWaitExpired: (...args) =>
       playback.getState().syncAnchorWaitExpired(...args),
-    togglePlayback: asNavigation(() => {
+    togglePlayback: asUserAction(() => {
       // The store plays nothing while its element is stalled or being replaced (ADR 063).
       if (playback.getState().refusesTransportForReload()) {
         return;
@@ -897,18 +1100,18 @@ export function createSequencePlayback(
       userNavigates();
       playback.getState().togglePlayback();
     }),
-    play: asNavigation(() => {
+    play: asUserAction(() => {
       if (playback.getState().refusesTransportForReload()) {
         return;
       }
       userNavigates();
       playback.getState().play();
     }),
-    pause: asNavigation(() => {
+    pause: asUserAction(() => {
       userNavigates();
       playback.getState().pause();
     }),
-    resumeAfterSeek: () => playback.getState().resumeAfterSeek(),
+    resumeAfterSeek: endsRun(() => playback.getState().resumeAfterSeek()),
     syncPresentedFrame: (...args) => playback.getState().syncPresentedFrame(...args),
     syncPresentationUnavailable: (...args) =>
       playback.getState().syncPresentationUnavailable(...args),
@@ -926,7 +1129,7 @@ export function createSequencePlayback(
     syncEnded: (...args) => playback.getState().syncEnded(...args),
     dismissError: (...args) => playback.getState().dismissError(...args),
     calibrationAnchorMediaTime: () => playback.getState().calibrationAnchorMediaTime(),
-    reset: () => playback.getState().reset(),
+    reset: endsRun(() => playback.getState().reset()),
   }));
 
   /**
@@ -959,6 +1162,7 @@ export function createSequencePlayback(
     const next = {
       ...mapState(stateOf(playback.getState()), timeline.getState()),
       switching: isSwitching(),
+      programRun: programRunState(),
     };
     const current = store.getState();
     const changed = (Object.keys(next) as (keyof typeof next)[]).some(
@@ -970,6 +1174,12 @@ export function createSequencePlayback(
   };
   playback.subscribe(refresh);
   timeline.subscribe(refresh);
+  playback.subscribe(() => notePlaybackChange());
+  timeline.subscribe(() => {
+    if (programRun !== null) {
+      scheduleRead(programRun);
+    }
+  });
 
   const notePause = (ended: boolean): void => {
     const real = playback.getState();
@@ -985,6 +1195,15 @@ export function createSequencePlayback(
   };
 
   const handleEnded = (): boolean => {
+    // While a program play runs, the run alone decides what plays next (ADR 074). The end of a
+    // clip does not go on at the next clip, and the store then syncs the end, as it does for a
+    // segment playback.
+    if (programRun !== null) {
+      endedWhilePlaying = false;
+      endedInSegment = false;
+      playingTo = null;
+      return false;
+    }
     const state = timeline.getState();
     const mapping = mappingOf(state);
     const played = endedWhilePlaying || playback.getState().isPlaying;
@@ -1024,7 +1243,7 @@ export function createSequencePlayback(
     return true;
   };
 
-  const seekToClipFrame = asNavigation((clipId: string, frameIndex: number): void => {
+  const seekToClipFrame = asUserAction((clipId: string, frameIndex: number): void => {
     if (
       !Number.isSafeInteger(frameIndex) ||
       frameIndex < 0 ||
@@ -1036,15 +1255,411 @@ export function createSequencePlayback(
     navigate({ kind: "frame", clipId, frameIndex });
   });
 
-  const dropNavigation = asNavigation((): void => {
+  const dropNavigation = asUserAction((): void => {
     if (pending !== null) {
       userNavigates();
     }
   });
 
-  const dropPlayIntent = asNavigation((): void => {
+  const dropPlayIntent = asUserAction((): void => {
     stripPlayIntent();
   });
+
+  // The key of the program (`programKey`) of the last timeline inputs that a run compared.
+  let programMemo: {
+    readonly clips: TimelineState["clips"];
+    readonly sequenceSegments: TimelineState["sequenceSegments"];
+    readonly sequenceSources: TimelineState["sequenceSources"];
+    readonly segments: TimelineState["segments"];
+    readonly sourceId: TimelineState["sourceId"];
+    readonly generation: number;
+    readonly key: string;
+  } | null = null;
+
+  /**
+   * The key of the program of the timeline now. It is computed again only when an input of the
+   * program changed identity, so the reads of a run at each frame stay cheap.
+   */
+  const programKeyNow = (): string => {
+    const state = timeline.getState();
+    const memo = programMemo;
+    if (
+      memo !== null &&
+      memo.clips === state.clips &&
+      memo.sequenceSegments === state.sequenceSegments &&
+      memo.sequenceSources === state.sequenceSources &&
+      memo.segments === state.segments &&
+      memo.sourceId === state.sourceId &&
+      memo.generation === state.generation
+    ) {
+      return memo.key;
+    }
+    const key = programKey(state);
+    programMemo = {
+      clips: state.clips,
+      sequenceSegments: state.sequenceSegments,
+      sequenceSources: state.sequenceSources,
+      segments: state.segments,
+      sourceId: state.sourceId,
+      generation: state.generation,
+      key,
+    };
+    return key;
+  };
+
+  /** True when the store published "reached" for the accepted part of `run`. */
+  const hasReached = (run: ProgramRun, real: PlaybackState): boolean =>
+    run.stage === "accepted" &&
+    (run.reached ||
+      (real.segmentPlayback !== null &&
+        real.segmentPlayback.id === run.acceptedId &&
+        real.segmentPlayback.reached));
+
+  /** True when the stop point of the accepted part of `run` is still set. */
+  const holdsStop = (run: ProgramRun, real: PlaybackState): boolean =>
+    real.playbackStop !== null && real.segmentPlayback?.id === run.acceptedId;
+
+  /**
+   * Starts the watchdog of the current part of `run` (PROGRAM_PART_TIMEOUT_MS), and cancels the
+   * one before it. Each run and each part has one watchdog at most, and a watchdog whose run or
+   * part is no longer current does nothing (`onPartTimer`).
+   */
+  const startWatchdog = (run: ProgramRun): void => {
+    run.cancelTimer?.();
+    const token = run.partToken;
+    run.cancelTimer = timer(() => onPartTimer(run, token), PROGRAM_PART_TIMEOUT_MS);
+  };
+
+  /**
+   * True when the playback failed since the last read: a new error, a new decode stall, or a new
+   * element of a reload, as for another audio track (ADR 070) or a recalibration (ADR 063). The
+   * attach of another clip changes none of these.
+   */
+  const failedSince = (watch: ProgramRunWatch, real: PlaybackState): boolean =>
+    (real.error !== null && real.error !== watch.error) ||
+    (real.decodeStall !== null && real.decodeStall !== watch.decodeStall) ||
+    real.reloadGeneration !== watch.reloadGeneration;
+
+  /**
+   * Ends the run before the end of its last part, and does the three things of ADR 074: it
+   * pauses, it drops the stop point of the part, and a request of the run that waits for the
+   * attach of a clip becomes a seek to the start of its part with no play (`withoutPlay`). The
+   * pause of the store drops the stop point, also while the seek to the start of the part runs.
+   * It is left out while the request waits on the element of its own clip and nothing plays:
+   * that element loads, and the pause would stop its first-frame prime (ADR 003). Returns false
+   * with no run.
+   */
+  const endRunEarly = (): boolean => {
+    const run = programRun;
+    if (run === null) {
+      return false;
+    }
+    programRun = null;
+    run.cancelTimer?.();
+    run.cancelTimer = null;
+    if (pending !== null && pending.navigation.kind === "part") {
+      pending = withoutPlay(pending.navigation);
+    }
+    const real = playback.getState();
+    const loads =
+      pending !== null &&
+      real.attachedSourceRevisionKey !== null &&
+      real.attachedSourceRevisionKey === revisionKeyOfClip(pending.navigation.clipId) &&
+      !real.isPlaying;
+    if (!loads) {
+      real.pause();
+    }
+    return true;
+  };
+
+  const endProgramPlay = asNavigation((): boolean => endRunEarly());
+
+  const notePreviewFailure = asNavigation((sourceRevisionKey: string): void => {
+    const run = programRun;
+    const part = run === null ? undefined : run.parts[run.index];
+    if (part !== undefined && revisionKeyOfClip(part.clipId) === sourceRevisionKey) {
+      endRunEarly();
+    }
+  });
+
+  /**
+   * Reads the state of the stores for `run` in a microtask of its own, after the call of the store
+   * that made the change returned. One read waits at most for each part, and a read for an
+   * earlier part, or after the run ended, does nothing.
+   */
+  const scheduleRead = (run: ProgramRun): void => {
+    if (run.scheduledToken === run.partToken) {
+      return;
+    }
+    const token = run.partToken;
+    run.scheduledToken = token;
+    queueMicrotask(() => {
+      if (run.scheduledToken === token) {
+        run.scheduledToken = null;
+      }
+      if (programRun !== run || run.partToken !== token) {
+        return;
+      }
+      readRun(run);
+    });
+  };
+
+  /**
+   * A change of the playback store during a run. It notes "reached" for the accepted part at
+   * once, so a later write in the same task cannot hide it, and it leaves the rest to the read.
+   *
+   * It is also the watchdog of progress (ADR 074): it sees each write of the store, and while
+   * the store holds the stop point and the number of the accepted part, a clock of the element
+   * that is not the clock of the write before starts PROGRAM_PART_TIMEOUT_MS again. The
+   * acceptance of the part starts it again too (`startPartOnStore`). Nothing else does: a frame,
+   * a play, the display target and a clock before the acceptance do not. The comparison starts
+   * from the clock when the store accepted the part.
+   */
+  const notePlaybackChange = (): void => {
+    const run = programRun;
+    if (run === null) {
+      return;
+    }
+    const real = playback.getState();
+    if (hasReached(run, real)) {
+      run.reached = true;
+    }
+    if (run.stage === "accepted" && holdsStop(run, real)) {
+      const clock = real.approximateBrowserTimeSeconds;
+      if (clock !== run.clock) {
+        run.clock = clock;
+        startWatchdog(run);
+      }
+    }
+    scheduleRead(run);
+  };
+
+  /**
+   * Starts the part of `run` that waits for its element, once that element and its calibration
+   * are ready (`pendingCanRun`). Only the read of the run calls it, in a task of its own.
+   */
+  const startWaitingPart = (run: ProgramRun): void => {
+    const waiting = pending;
+    if (run.stage !== "loading" || waiting === null || !pendingCanRun()) {
+      return;
+    }
+    const navigation = waiting.navigation;
+    if (navigation.kind !== "part" || navigation.partToken !== run.partToken) {
+      return;
+    }
+    pending = null;
+    settling = true;
+    mappedClipId = navigation.clipId;
+    startPartOnStore(navigation);
+  };
+
+  /** The part of `run` completed: the run goes on at the next part, or ends after the last. */
+  const completePart = (run: ProgramRun): void => {
+    run.stage = "completed";
+    run.cancelTimer?.();
+    run.cancelTimer = null;
+    if (run.index + 1 >= run.parts.length) {
+      // The stop point of the last part stays, as after Play Segment (ADR 022).
+      programRun = null;
+      return;
+    }
+    startPart(run, run.index + 1);
+  };
+
+  /**
+   * The checks of a read of the run and of its timer (ADR 074), in this order:
+   *
+   * 1. a change of the program, and a failure (a new error, a new decode stall, a reload) end
+   *    the run, also when the part reached its stop in the same task: the next part does not
+   *    start on a program that changed or on a playback that failed;
+   * 2. "reached" for the number of the part completes it. It comes before the stop point that
+   *    went, so a handler of the store that drops the stop point and then publishes "reached" is
+   *    one event;
+   * 3. a part that the store refused ends the run;
+   * 4. a stop point that went ends the run.
+   *
+   * Returns true when the run ended or the part completed.
+   */
+  const checkRun = (run: ProgramRun, real: PlaybackState): boolean => {
+    if (programKeyNow() !== run.program) {
+      endRunEarly();
+      return true;
+    }
+    const watch = run.watch;
+    run.watch = watchOf(real);
+    if (failedSince(watch, real)) {
+      endRunEarly();
+      return true;
+    }
+    if (hasReached(run, real)) {
+      completePart(run);
+      return true;
+    }
+    if (run.stage === "refused") {
+      endRunEarly();
+      return true;
+    }
+    if (run.stage === "accepted" && !holdsStop(run, real)) {
+      endRunEarly();
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * The read of a run, in a microtask of its own (`scheduleRead`). After the checks, a part that
+   * waits for its element starts when that element and its calibration are ready.
+   */
+  const readRun = asNavigation((run: ProgramRun): void => {
+    if (!checkRun(run, playback.getState())) {
+      startWaitingPart(run);
+    }
+  });
+
+  /**
+   * The end of the watchdog of a part: no progress for PROGRAM_PART_TIMEOUT_MS. It runs the
+   * checks of a read first, and a part that did not complete then fails the run.
+   */
+  const onPartTimer = asNavigation((run: ProgramRun, token: number): void => {
+    if (programRun !== run || run.partToken !== token) {
+      return;
+    }
+    if (checkRun(run, playback.getState())) {
+      return;
+    }
+    endRunEarly();
+  });
+
+  /** Starts part `index` of `run`: its timer, and the navigation to its clip. */
+  const startPart = (run: ProgramRun, index: number): void => {
+    const part = run.parts[index];
+    if (part === undefined) {
+      return;
+    }
+    lastPartToken += 1;
+    const token = lastPartToken;
+    run.index = index;
+    run.partToken = token;
+    run.stage = "loading";
+    run.acceptedId = null;
+    run.reached = false;
+    run.clock = null;
+    startWatchdog(run);
+    navigate({
+      kind: "part",
+      clipId: part.clipId,
+      inPts: part.startPts,
+      outPts: part.endPts,
+      partToken: token,
+    });
+  };
+
+  /**
+   * True unless the start of the part lies at or after the end of the media that the element
+   * reports. With no length of the element, or no anchor, nothing is known here, and the store
+   * decides.
+   */
+  const startsBeforeMediaEnd = (navigation: {
+    clipId: string;
+    inPts: Pts;
+  }): boolean => {
+    const real = playback.getState();
+    const duration = real.runtimeBrowserDurationSeconds;
+    const anchor = real.calibrationAnchorMediaTime();
+    const probe = mediaOfClip(navigation.clipId)?.probe;
+    if (
+      duration === null ||
+      anchor === null ||
+      probe === undefined ||
+      probe.videoStartPts === null
+    ) {
+      return true;
+    }
+    const time = ptsToMediaTime(
+      navigation.inPts,
+      probe.videoStartPts,
+      anchor,
+      probe.videoTimeBase,
+    );
+    return time === null || time < duration;
+  };
+
+  /**
+   * Asks the playback store for the segment playback of a part, once the element of its clip and
+   * the calibration are ready: at once in the task that starts the part when its clip is on
+   * screen and ready (`navigate`), or else in the read of the run (`startWaitingPart`), never
+   * inside a notification of a store. The part started when the store accepted it: the
+   * run keeps the number of `segmentPlayback`. A part that the store refuses, and a part whose
+   * start is not before the end of the media, end the run at the next read.
+   */
+  function startPartOnStore(navigation: Navigation & { kind: "part" }): void {
+    const run = programRun;
+    const real = playback.getState();
+    if (
+      run === null ||
+      run.partToken !== navigation.partToken ||
+      run.stage !== "loading"
+    ) {
+      // A request of a run that ended: a seek to its start, with no play.
+      real.seekToPts(navigation.inPts);
+      return;
+    }
+    if (!startsBeforeMediaEnd(navigation)) {
+      run.stage = "refused";
+      scheduleRead(run);
+      return;
+    }
+    const before = real.segmentPlayback;
+    real.playSegment(navigation.inPts, navigation.outPts);
+    if (programRun !== run || run.partToken !== navigation.partToken) {
+      return;
+    }
+    const after = playback.getState().segmentPlayback;
+    if (after !== null && after.id !== before?.id && !after.reached) {
+      const accepted = playback.getState();
+      run.stage = "accepted";
+      run.acceptedId = after.id;
+      run.watch = watchOf(accepted);
+      // The acceptance is progress: the watchdog starts again, and it compares each later clock
+      // with the clock at the acceptance of this part.
+      run.clock = accepted.approximateBrowserTimeSeconds;
+      startWatchdog(run);
+    } else {
+      run.stage = "refused";
+    }
+    scheduleRead(run);
+  }
+
+  const startProgramPlay = asNavigation(
+    (action: ProgramAction, parts: readonly ProgramPart[]): boolean => {
+      if (parts.length === 0) {
+        return false;
+      }
+      endRunEarly();
+      // The run alone decides what plays next: the play intent of a Play Segment across a
+      // junction goes (ADR 052).
+      playingTo = null;
+      endedWhilePlaying = false;
+      endedInSegment = false;
+      const run: ProgramRun = {
+        action,
+        parts: [...parts],
+        index: 0,
+        partToken: 0,
+        stage: "loading",
+        acceptedId: null,
+        reached: false,
+        clock: null,
+        cancelTimer: null,
+        scheduledToken: null,
+        watch: watchOf(playback.getState()),
+        program: programKeyNow(),
+      };
+      programRun = run;
+      startPart(run, 0);
+      return true;
+    },
+  );
 
   return {
     store,
@@ -1055,6 +1670,9 @@ export function createSequencePlayback(
     seekToClipFrame,
     dropNavigation,
     dropPlayIntent,
+    startProgramPlay,
+    endProgramPlay,
+    notePreviewFailure,
   };
 }
 

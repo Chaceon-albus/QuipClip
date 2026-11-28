@@ -1246,6 +1246,7 @@ export function PreviewPane() {
       pictureCheckRef.current = { ...check, state: "failed", timer: null };
     }
     syncUnready(sourceRevisionKey, element);
+    sequencePlayback.notePreviewFailure(sourceRevisionKey);
     setFailureTrigger(trigger);
   };
 

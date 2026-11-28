@@ -183,8 +183,7 @@ For each part, in the order of the list:
 2. When the element of that clip is ready and its calibration is ready, the run tests that
    the start of the part lies before the end of the media that the element reports. Then it
    asks the playback store for a segment playback of the part.
-3. The part **started** when the store accepted it. The run keeps the number. The part
-   **plays** when the seek to its start ended and the store reports a playback.
+3. The part **started** when the store accepted it. The run keeps the number.
 4. The part **completed** when the store published "reached" for that number. The run then
    goes to the next part, in a task of its own and not inside the call of the store. It first
    tests that it is still the run.
@@ -200,12 +199,39 @@ timer of a part, first tests that the run is still the run and that the part is 
 part. The run takes "reached" one time for a part. The timer of a part tests for "reached"
 before it fails.
 
-A part must play, or be completed, within 10 seconds of step 1. The seek to the start of a
-part can wait for a long time at a gap of the media (ADR 046), also after the store accepted
-the part. A part that does not play in that time, a part whose start is not before the end of
-the media, and a part that the store does not accept, end the run as a failure (see below).
-The store does not accept a part when the calibration of the clip is not ready, or when the
-seek to its start fails.
+(Changed on 2026-11-28, with the code of the run.) A part must make progress. A time of 10
+seconds starts when the run asks for the part (step 1). It starts again when the store
+accepts the part, and then at each change of the clock of the element that the store
+publishes. That clock moves also in a window that presents no frame. When the 10 seconds end
+and the part is not completed, the run fails. So a part that plays never fails by the time,
+however long it is. A clip that does not show, a seek to the start that does not end (it can
+wait for a long time at a gap of the media, ADR 046), and a play that does not start fail 10
+seconds after the last progress. A part whose start is not before the end of the media, and a
+part that the store does not accept, also end the run as a failure (see below). The store
+does not accept a part when the calibration of the clip is not ready, or when the seek to its
+start fails.
+
+Before, this record said that a part must "play" within 10 seconds: the seek to its start
+ended, and the store reports a playback. The published state cannot prove that. A hidden
+window keeps the display target of the store (ADR 022), a frame of the seek clears it before
+the element plays, and the store reports a playback from the request on.
+
+(Changed on 2026-11-28, with the code of the run.) Three rules say more exactly how the run
+reads the store:
+
+- **A read is a microtask.** It runs after the call of the store returned, and it can run
+  before another listener of the same event of the element. One limit follows. The stop of a
+  part can come in a `timeupdate` event that the controller of a MediaSource source (ADR 046)
+  also reads, to find a playback with no progress. The run can then start the next part
+  before the controller reads the event, and the controller does not report the fault at the
+  position that the run left. A task of a timer has no such order, but a hidden window slows
+  it down.
+- **A part starts in a read of the run.** When the clip of a waiting part becomes ready, the
+  run does not ask the store inside that notification. Its next read tests the start against
+  the end of the media that the store reports then, and asks the store.
+- **The order of a read.** A read first tests a change of the program and a failure (see
+  "What ends a run"), then "reached", and then the stop point that is gone. So a stop that
+  publishes "reached" in the same task as an edit or a reload does not start the next part.
 
 The stop of a part is the stop of Play Segment, with its limits (ADR 022, ADR 026). A frame
 after the last frame can show for a moment before the store seeks back. For a source off the
@@ -254,10 +280,17 @@ the clips on the sequence changes, or a project opens. An Undo and a Redo that d
 end it too. The attach of a clip that the run asked for changes the clip on screen. That is no
 change of the program.
 
-**The run fails.** A run ends in each of these cases: a part does not play in its time; the
+(Changed on 2026-11-28.) A segment is changed when its In or its Out changes. A new name of a
+segment (ADR 065) is no change of the program, and the run goes on.
+
+**The run fails.** A run ends in each of these cases: a part makes no progress for 10
+seconds (changed on 2026-11-28, see "How a program play runs"); the
 stop point of the part goes and the store did not publish "reached"; the playback has an error
 or a decode stall; the element is loaded again, as for another audio track (ADR 070) or a
 recalibration (ADR 063). The new element of the clip that the run asked for is no such case.
+(Changed on 2026-11-28.) A run also ends when the preview gives up the element of the clip of
+its part, because the clip cannot be decoded. The store reports no error then, and the preview
+tells the playback of the sequence.
 
 A dialog that opens and an export that starts do not end a run.
 
