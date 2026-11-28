@@ -31,6 +31,12 @@ export interface TimelineScrubScheduler {
 export interface CreateTimelineScrubGestureOptions {
   onSample: (clientX: number, phase: TimelineScrubPhase) => void;
   /**
+   * Called once each time a gesture becomes active, in `begin`, before the sample of the
+   * pointer down. Each start is followed by one call of `onFinish`. The panel uses the pair to
+   * hold the fact that a pointer seeks (`pointerSeekHold`, ADR 074).
+   */
+  onStart?: () => void;
+  /**
    * Called once each time an active gesture stops being active: after the final sample of
    * `end` or `cancel`, on `dispose`, and when the sample of `begin` throws. The panel uses it
    * to remove the aids of a drag, such as the snap indicator and the edge auto-scroll.
@@ -80,6 +86,7 @@ export function createTimelineScrubGesture(
 ): TimelineScrubGesture {
   const {
     onSample,
+    onStart,
     onFinish,
     scheduler = defaultScheduler,
     holdCursor = holdScrubCursor,
@@ -118,6 +125,7 @@ export function createTimelineScrubGesture(
       latestClientX = clientX;
       hasMoved = false;
       try {
+        onStart?.();
         onSample(clientX, "final");
       } catch (err) {
         finish();

@@ -20,7 +20,7 @@ import { formatPreviewCurrentTime, presentApproximateBadge } from "./previewFram
 import { findPreviewRegion } from "./previewRegion";
 import { closesFieldOnPress } from "./timecodeFieldPress";
 import {
-  resolveTimecodeEntry,
+  commitTimecodeEntry,
   runTimecodeEntryCommand,
   type TimecodeEntryErrorCode,
 } from "./timecodeEntrySeek";
@@ -268,10 +268,17 @@ export function PreviewTimecode({
   };
 
   const commit = (text: string) => {
-    const outcome = resolveTimecodeEntry(text, {
-      probe,
-      playback: sequencePlayback.store.getState(),
-      display,
+    // A typed time takes the playback from a program play (ADR 074): the run ends first, and
+    // the seek plans on the state that results.
+    const outcome = commitTimecodeEntry(text, display, {
+      endProgramPlay: () => {
+        sequencePlayback.endProgramPlay();
+      },
+      readSnapshot: () => ({
+        probe,
+        playback: sequencePlayback.store.getState(),
+        display,
+      }),
     });
     if (outcome.kind === "error") {
       setDraft((current) =>

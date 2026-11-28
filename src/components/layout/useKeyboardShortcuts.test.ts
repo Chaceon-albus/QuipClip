@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { playbackStore, type PlaybackStoreState } from "@/features/playback";
 import { projectSaveErrorStore } from "@/features/project/saveErrorStore";
+import { sequencePlayback } from "@/features/sequence";
 import type { Pts } from "@/types/project";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
@@ -130,6 +131,30 @@ describe("runShortcutCommand", () => {
     expect(playSegment).toHaveBeenCalledExactlyOnceWith("50", "100");
     runShortcutCommand({ kind: "pause" });
     expect(pause).toHaveBeenCalledOnce();
+  });
+});
+
+// ADR 074: Play Program and Play Joins start a run with the list of the parts that the plan made.
+describe("runShortcutCommand for a program play", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("starts the run of the action with the parts of the command", () => {
+    const startProgramPlay = vi
+      .spyOn(sequencePlayback, "startProgramPlay")
+      .mockReturnValue(true);
+    const parts = [
+      {
+        segmentId: "s1",
+        clipId: "c1",
+        sourceId: "/a.mp4",
+        startPts: "0" as Pts,
+        endPts: "50" as Pts,
+      },
+    ];
+    runShortcutCommand({ kind: "playProgram", action: "joins", parts });
+    expect(startProgramPlay).toHaveBeenCalledExactlyOnceWith("joins", parts);
   });
 });
 

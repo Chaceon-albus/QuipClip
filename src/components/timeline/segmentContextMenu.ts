@@ -28,6 +28,11 @@
  * (`planSegmentMenuCommand`), through the same runner as the key (`runShortcutCommand`). A
  * condition that changed while the menu was open therefore applies to the item too.
  *
+ * The menu that opens does not end a program play (ADR 074). Go to In, Go to Out and Play
+ * Segment take the playback: their choice first ends the run, and the item then plans against
+ * the state that results (`takeOverProgramPlay`). While a run exists, Play Segment shows Play
+ * Segment and not Pause (`planShortcutCommand`).
+ *
  * An item that opens a dialog (`SEGMENT_MENU_DIALOG_ACTIONS`, ADR 065) runs only after the menu
  * closed: when both its choice and the end of the mark arrived, in either order
  * (`menuDialogHandoff.ts`). The end of the mark is the settled popup, or the first input after the
@@ -54,6 +59,7 @@ import {
   nativeContextMenuState,
   type NativeContextMenuState,
 } from "@/components/layout/nativeContextMenuState";
+import { takeOverProgramPlay } from "@/components/layout/programTakeover";
 import {
   getShortcutPlatform,
   type ShortcutPlatform,
@@ -70,6 +76,7 @@ import {
   readShortcutSnapshot,
   runShortcutCommand,
 } from "@/components/layout/useKeyboardShortcuts";
+import { sequencePlayback } from "@/features/sequence";
 import {
   findCurrentSegment,
   timelineStore,
@@ -107,6 +114,11 @@ export interface SegmentContextMenuDependencies {
   readonly readSnapshot: () => ShortcutSnapshot;
   /** Runs a planned command, as the window keyboard layer does (`runShortcutCommand`). */
   readonly runCommand: (command: ShortcutCommand) => void;
+  /**
+   * Ends the program play that runs (`SequencePlayback.endProgramPlay`), and returns true when
+   * a run ended (ADR 074). Absent means that no run exists.
+   */
+  readonly endProgramPlay?: () => boolean;
   /** True while a dialog, a menu or a list box of the page is open (`isModalLayerOpen`). */
   readonly isOverlayOpen: () => boolean;
   readonly menuState: NativeContextMenuState;
@@ -165,6 +177,7 @@ export function createSegmentContextMenu(
     translate,
   } = dependencies;
   const onError = dependencies.onError ?? (() => {});
+  const endProgramPlay = dependencies.endProgramPlay ?? (() => false);
   const schedule = dependencies.schedule ?? DEFAULT_SCHEDULE;
   // The dialog hand-off of the latest menu.
   let latestHandoff: MenuDialogHandoff<SegmentMenuAction> | null = null;
@@ -193,6 +206,9 @@ export function createSegmentContextMenu(
     if (shown === undefined) {
       return;
     }
+    // The user takes the playback from a program play before the item plans (ADR 074). The
+    // snapshot below is read after the end of the run.
+    takeOverProgramPlay(action, endProgramPlay);
     const command = planSegmentMenuCommand(
       action,
       target,
@@ -293,6 +309,7 @@ export const segmentContextMenu: SegmentContextMenu = createSegmentContextMenu({
   timeline: timelineStore,
   readSnapshot: readShortcutSnapshot,
   runCommand: runShortcutCommand,
+  endProgramPlay: sequencePlayback.endProgramPlay,
   isOverlayOpen: isModalLayerOpen,
   menuState: nativeContextMenuState,
   backend: tauriSegmentMenuBackend,

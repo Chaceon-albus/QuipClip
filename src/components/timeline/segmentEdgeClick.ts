@@ -8,6 +8,9 @@
  * threshold (ADR 030): that gesture captures the pointer, and the browser then sends its click
  * to another element, or to none. Both paths read the stores at the click, so the segment layer
  * does not subscribe to the playback state.
+ *
+ * The click takes the playback from a program play (ADR 074): it ends the run first, and the
+ * seek then plans against the state that results.
  */
 
 import { isSourceActive } from "@/components/layout/actionConditions";
@@ -18,9 +21,11 @@ import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
 
 /**
  * Seeks to the stored boundary that an edge names, under the condition of Shift+I and Shift+O
- * (`planSegmentEdgeSeek`).
+ * (`planSegmentEdgeSeek`). It first ends a program play, as each seek of the user does
+ * (ADR 074).
  */
 export function seekToSegmentEdge(segment: Segment, edge: SegmentEdge): void {
+  sequencePlayback.endProgramPlay();
   const playback = sequencePlayback.store.getState();
   const hasActiveSource = isSourceActive(
     sequenceMediaStore.getState().media !== null,

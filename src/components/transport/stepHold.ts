@@ -124,10 +124,16 @@ const defaultTimers: StepHoldTimers = {
  * @param step Performs one frame step. The button passes one `seekNominal` request. `held` is
  *   true for a timer repeat, and false for the step of the press and the step of a click.
  * @param timers The timers. Undefined uses `setTimeout`.
+ * @param onHoldChange Called with true when a press starts the hold, and with false when the
+ *   hold ends: a stop or a cancel of a hold that runs or waits for its delay (`isHolding`). The
+ *   button holds the fact that a pointer seeks with it (`pointerSeekHold`, ADR 074), so Play
+ *   Program and Play Joins do nothing while the button is held: a later repeat would end their
+ *   run.
  */
 export function createStepHold(
   step: (held: boolean) => void,
   timers: StepHoldTimers = defaultTimers,
+  onHoldChange?: (holding: boolean) => void,
 ): StepHold {
   let handle: number | null = null;
   // True from a press that stepped until the click of that press. A press that ends outside
@@ -139,6 +145,7 @@ export function createStepHold(
     if (handle !== null) {
       timers.clearTimer(handle);
       handle = null;
+      onHoldChange?.(false);
     }
   };
 
@@ -151,6 +158,7 @@ export function createStepHold(
     stop();
     pressStepped = true;
     handle = timers.setTimer(repeat, STEP_HOLD_DELAY_MS);
+    onHoldChange?.(true);
     step(false);
   };
 

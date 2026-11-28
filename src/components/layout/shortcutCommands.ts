@@ -37,6 +37,14 @@ import {
   type TimelineViewportState,
 } from "@/features/timeline";
 import type { FrameExportFacts } from "@/features/frameExport/controller";
+import type { ProgramRunState } from "@/features/sequence/playback";
+import {
+  buildProgramParts,
+  type ProgramAction,
+  type ProgramPart,
+} from "@/features/sequence/programParts";
+import type { MediaBySource } from "@/features/sequence/virtualMedia";
+import type { ExportSegmentsInput } from "@/features/timeline/exportSegments";
 import { I64_MAX, isPtsString, isTickCountString } from "@/lib/time";
 import { frameIndexOfTicks, lastFrameIndexOfExtent } from "@/lib/timecode";
 import type { Pts, Segment } from "@/types/project";
@@ -129,6 +137,12 @@ export interface ShortcutSnapshot {
      * frame steps do nothing, and a seek reloads the preview. Absent means none.
      */
     readonly decodeStall?: PlaybackState["decodeStall"];
+    /**
+     * The program play that runs (ADR 074), or null. While a run exists, Play Segment plans a
+     * new segment playback and not a pause: the stop point of the run is not the stop point of
+     * a Play Segment. Absent means none.
+     */
+    readonly programRun?: ProgramRunState | null;
   };
   readonly timeline: Pick<
     TimelineState,
@@ -142,7 +156,13 @@ export interface ShortcutSnapshot {
     | "pendingInPts"
     | "canUndo"
     | "canRedo"
-  >;
+  > & {
+    /**
+     * The clip whose source the preview attached (ADR 052). A program play reads it for a
+     * decode stall (`programPlayStallOf`). Absent means none.
+     */
+    readonly attachedClipId?: TimelineState["attachedClipId"];
+  };
   /** The zoom of the timeline (ADR 007), which is view state and not timeline state. */
   readonly viewport: Pick<TimelineViewportState, "zoom" | "maxZoom">;
   /**
@@ -158,6 +178,12 @@ export interface ShortcutSnapshot {
    */
   readonly isTrimArmed?: boolean;
   /**
+   * True while a pointer holds a gesture that seeks: a press, a scrub or a trim on the
+   * timeline, or a held frame step button (`pointerSeekHold`). The actions of
+   * POINTER_SEEK_LOCKED_ACTIONS do nothing then (ADR 074). Absent means false.
+   */
+  readonly isPointerSeekHeld?: boolean;
+  /**
    * The state that the plan of Export Frame reads (ADR 069): the playback store of the attached
    * element, whose PTS is a source PTS, and the facts that the action records. Absent means that
    * Export Frame does nothing.
@@ -168,6 +194,12 @@ export interface ShortcutSnapshot {
    * drop also reads. Export Selected Segments does nothing then (ADR 067). Absent means false.
    */
   readonly isImporting?: boolean;
+  /**
+   * The media of every source of the session, by source ID. Play Program and Play Joins read
+   * the probe of the source of each part (ADR 074). Absent means none, and the two actions then
+   * do nothing.
+   */
+  readonly media?: MediaBySource;
 }
 
 /**
@@ -179,6 +211,7 @@ export interface ShortcutSnapshot {
  * holds the pointer (ADR 065, ADR 066, ADR 067). Export Frame does nothing during a trim
  * (ADR 069). Save and Save As do nothing during a trim, as Rename (ADR 072): a save during the
  * drag would write a segment that the trim still changes, and Save As opens a modal dialog.
+ * Play Program and Play Joins do nothing during a trim (ADR 074).
  */
 export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<ShortcutAction>(
   [
@@ -194,6 +227,8 @@ export const TRIM_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> = new Set<Shortcut
     "selectAllSegments",
     "undo",
     "redo",
+    "playProgram",
+    "playJoins",
   ],
 );
 
@@ -215,6 +250,14 @@ export const EDGE_PRESS_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
   ]);
 
 /**
+ * The actions that do nothing while a pointer holds a gesture that seeks (`isPointerSeekHeld`,
+ * ADR 074). The gesture seeks again later with no new act of the user, and such a seek would end
+ * the run that the action starts. The other actions keep what they do during the gesture.
+ */
+export const POINTER_SEEK_LOCKED_ACTIONS: ReadonlySet<ShortcutAction> =
+  new Set<ShortcutAction>(["playProgram", "playJoins"]);
+
+/**
  * The key press that a plan reads, beside the snapshot. A caller that is not a key press, such
  * as a menu item, passes none, which plans a single press.
  */
@@ -228,6 +271,13 @@ export type ShortcutCommand =
   | { readonly kind: "togglePlayback" }
   | { readonly kind: "pause" }
   | { readonly kind: "playSegment"; readonly inPts: Pts; readonly outPts: Pts }
+  | {
+      /** Play Program or Play Joins (ADR 074): a run of the program play. */
+      readonly kind: "playProgram";
+      readonly action: ProgramAction;
+      /** The list of the parts that the plan made, so the run plays what the plan saw. */
+      readonly parts: readonly ProgramPart[];
+    }
   | {
       readonly kind: "seekNominal";
       readonly frames: number;
@@ -316,7 +366,10 @@ function isDecodeStalled(playback: ShortcutSnapshot["playback"]): boolean {
 }
 
 function currentSegmentOf(
-  timeline: ShortcutSnapshot["timeline"],
+  timeline: Pick<
+    ShortcutSnapshot["timeline"],
+    "segments" | "sourceId" | "currentSegmentId"
+  >,
 ): CurrentSegmentRef | null {
   return findCurrentSegment(
     timeline.segments,
@@ -749,9 +802,17 @@ function planSegmentBoundarySeek(
  *   no segment is found (`findSegmentAtPts`).
  *
  * The segment must hold a frame of the source (`canPlaySegment`), the rule of the store.
+ *
+ * A program play starts at this segment when it is in the program (ADR 074).
  */
-function segmentToPlay(
-  snapshot: ShortcutSnapshot,
+export function segmentToPlay(
+  snapshot: {
+    readonly timeline: Pick<
+      ShortcutSnapshot["timeline"],
+      "segments" | "sourceId" | "currentSegmentId"
+    >;
+    readonly playback: Pick<ShortcutSnapshot["playback"], "presentedFrame">;
+  },
   probe: ShortcutProbe,
 ): Segment | null {
   const { timeline, playback } = snapshot;
@@ -778,12 +839,14 @@ function segmentToPlay(
  * The call of Play Segment (ADR 026), or null when it must not act.
  *
  * A second press while a segment plays toward its stop pauses, as Space does, and the pause
- * clears the stop point. Otherwise the action needs an active source and a ready calibration:
- * the stop reads the exact PTS of each presented frame, which only a ready calibration gives
- * (ADR 003). While the calibration is open, the store defers every seek until the anchor
- * (ADR 022), and play drops a deferred seek, so a segment playback cannot start then. With an
- * unavailable calibration no presented frame has a PTS. The action is not available in either
- * state. No control shows the action yet, so no disabled reason is shown for it.
+ * clears the stop point. The stop point of a part of a program play is not such a stop: while a
+ * run exists, the action plans a new segment playback, as with no run (ADR 074). Otherwise the
+ * action needs an active source and a ready calibration: the stop reads the exact PTS of each
+ * presented frame, which only a ready calibration gives (ADR 003). While the calibration is
+ * open, the store defers every seek until the anchor (ADR 022), and play drops a deferred seek,
+ * so a segment playback cannot start then. With an unavailable calibration no presented frame
+ * has a PTS. The action is not available in either state. No control shows the action yet, so
+ * no disabled reason is shown for it.
  */
 function planPlaySegment(
   snapshot: ShortcutSnapshot,
@@ -794,7 +857,7 @@ function planPlaySegment(
   if (!hasActiveSource || probe === null || isDecodeStalled(playback)) {
     return null;
   }
-  if (playback.playbackStop?.phase === "playing") {
+  if (playback.playbackStop?.phase === "playing" && playback.programRun == null) {
     return { kind: "pause" };
   }
   if (playback.calibrationStatus !== "ready") {
@@ -804,6 +867,110 @@ function planPlaySegment(
   return segment === null
     ? null
     : { kind: "playSegment", inPts: segment.inPts, outPts: segment.outPts };
+}
+
+/**
+ * The decode stall of the element on screen, as the plan of a program play reads it: the source
+ * of that element, or null when no clip names it. Null for no stall.
+ */
+export type ProgramPlayStall = { readonly sourceId: string | null } | null;
+
+/**
+ * The stall of the element on screen for `planProgramParts`: the source of the attached clip,
+ * or of the one clip of the sequence when no clip is named as attached. Null with no stall.
+ */
+export function programPlayStallOf(
+  timeline: Pick<TimelineState, "clips"> & {
+    readonly attachedClipId?: string | null;
+  },
+  isDecodeStalled: boolean,
+): ProgramPlayStall {
+  if (!isDecodeStalled) {
+    return null;
+  }
+  const clip =
+    timeline.clips.find((entry) => entry.id === timeline.attachedClipId) ??
+    (timeline.clips.length === 1 ? timeline.clips[0] : undefined);
+  return { sourceId: clip?.sourceId ?? null };
+}
+
+/** The facts that the plan of Play Program and Play Joins reads (`planProgramParts`). */
+export interface ProgramPlayFacts {
+  /** True while media is open and its element on screen is attached and ready. */
+  readonly hasActiveSource: boolean;
+  /** The decode stall of the element on screen (`programPlayStallOf`). */
+  readonly stall: ProgramPlayStall;
+  /** True while a drag trims a segment edge (TRIM_LOCKED_ACTIONS). */
+  readonly isTrimDragging: boolean;
+  /**
+   * True while a pointer holds a gesture that seeks: the gesture of the timeline, or a held
+   * frame step button (`pointerSeekHold`, POINTER_SEEK_LOCKED_ACTIONS).
+   */
+  readonly isPointerSeekHeld: boolean;
+  readonly timeline: ExportSegmentsInput;
+  /** The media of every source of the session, or undefined for none. */
+  readonly media: MediaBySource | undefined;
+  /**
+   * The current segment of ADR 074: the segment that Play Segment would play
+   * (`segmentToPlay`), or null.
+   */
+  readonly currentSegmentId: string | null;
+}
+
+/**
+ * The list of the parts of Play Program (`program`) or Play Joins (`joins`), or null when the
+ * action is not available (ADR 074).
+ *
+ * The action needs a clip on screen whose element is attached, as each transport action, no
+ * drag that trims a segment edge, no pointer that holds a seek gesture, and a list with one or
+ * more parts (`buildProgramParts`). So Play Joins needs a program with two or more segments.
+ * The clip of the first part can be another clip: it then loads. A decode stall of the element
+ * on screen blocks the action only when the first part is on the source of that element, or
+ * when no clip names that source: the store does not play a stalled element again, and a part
+ * on another source loads a new element (ADR 039). The window keyboard layer refuses the
+ * action while a dialog is open, and the Play Program button reads the same rule
+ * (`planControlCommand`).
+ */
+export function planProgramParts(
+  action: ProgramAction,
+  facts: ProgramPlayFacts,
+): readonly ProgramPart[] | null {
+  if (
+    !facts.hasActiveSource ||
+    facts.isTrimDragging ||
+    facts.isPointerSeekHeld ||
+    facts.media === undefined
+  ) {
+    return null;
+  }
+  const parts = buildProgramParts(
+    action,
+    facts.timeline,
+    facts.media,
+    facts.currentSegmentId,
+  );
+  const first = parts[0];
+  if (first === undefined) {
+    return null;
+  }
+  if (
+    facts.stall !== null &&
+    (facts.stall.sourceId === null || facts.stall.sourceId === first.sourceId)
+  ) {
+    return null;
+  }
+  return parts;
+}
+
+/**
+ * True when Play Program or Play Joins is available (`planProgramParts`). The Play Program
+ * button is enabled while this is true, or while a run exists.
+ */
+export function isProgramPlayAvailable(facts: ProgramPlayFacts): boolean {
+  return (
+    planProgramParts("program", facts) !== null ||
+    planProgramParts("joins", facts) !== null
+  );
 }
 
 /**
@@ -865,6 +1032,9 @@ export function planShortcutCommand(
   if (snapshot.isTrimArmed === true && EDGE_PRESS_LOCKED_ACTIONS.has(action)) {
     return null;
   }
+  if (snapshot.isPointerSeekHeld === true && POINTER_SEEK_LOCKED_ACTIONS.has(action)) {
+    return null;
+  }
 
   switch (action) {
     case "togglePlayback":
@@ -874,6 +1044,25 @@ export function planShortcutCommand(
 
     case "playSegment":
       return planPlaySegment(snapshot, hasActiveSource);
+
+    case "playProgram":
+    case "playJoins": {
+      const programAction: ProgramAction =
+        action === "playProgram" ? "program" : "joins";
+      const parts = planProgramParts(programAction, {
+        hasActiveSource,
+        stall: programPlayStallOf(timeline, isDecodeStalled(playback)),
+        isTrimDragging: snapshot.isTrimDragging === true,
+        isPointerSeekHeld: snapshot.isPointerSeekHeld === true,
+        timeline,
+        media: snapshot.media,
+        currentSegmentId:
+          probe === null ? null : (segmentToPlay(snapshot, probe)?.id ?? null),
+      });
+      return parts === null
+        ? null
+        : { kind: "playProgram", action: programAction, parts };
+    }
 
     case "stepBackOneFrame":
     case "stepForwardOneFrame":

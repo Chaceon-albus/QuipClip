@@ -376,4 +376,29 @@ describe("createStepHold", () => {
     expect(step).not.toHaveBeenCalled();
     expect(timers.pending()).toBe(0);
   });
+
+  // ADR 074: the button holds the fact that a pointer seeks while it is held.
+  it("reports the start and the end of each hold, and nothing for a click", () => {
+    const timers = createManualTimers();
+    const changes: boolean[] = [];
+    const hold = createStepHold(
+      () => {},
+      timers,
+      (holding) => changes.push(holding),
+    );
+    hold.press();
+    timers.advance(STEP_HOLD_DELAY_MS + STEP_HOLD_INTERVAL_MS * 3);
+    // The repeat goes on with no change.
+    expect(changes).toEqual([true]);
+    hold.stop();
+    hold.stop();
+    hold.click(1);
+    hold.click(0);
+    expect(changes).toEqual([true, false]);
+    // A second press while a hold runs ends it first.
+    hold.press();
+    hold.press();
+    hold.cancel();
+    expect(changes).toEqual([true, false, true, false, true, false]);
+  });
 });

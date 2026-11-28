@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ImageDown,
+  ListVideo,
   Loader2,
   Pause,
   Play,
@@ -30,13 +31,19 @@ import {
 import { isFrameExportAvailable } from "@/components/layout/frameExportPlan";
 import { segmentTrimSession } from "@/components/timeline/segmentTrimSession";
 import { isPageOverlayOpen } from "@/components/layout/nativeContextMenuState";
-import { planControlCommand } from "@/components/layout/shortcutCommands";
+import { pointerSeekHold } from "@/components/layout/pointerSeekHold";
+import {
+  isProgramPlayAvailable,
+  planControlCommand,
+  programPlayStallOf,
+  segmentToPlay,
+} from "@/components/layout/shortcutCommands";
 import {
   readShortcutSnapshot,
   runShortcutCommand,
 } from "@/components/layout/useKeyboardShortcuts";
 import { useFrameExportStore } from "@/features/frameExport";
-import { type MediaStoreState } from "@/features/media";
+import { useMediaStore, type MediaStoreState } from "@/features/media";
 import { hasNominalFrameRate, usePlaybackStore } from "@/features/playback";
 import {
   canMarkIn,
@@ -52,6 +59,13 @@ import {
 } from "@/features/timeline";
 import { cn } from "@/lib/utils";
 import { FrameStepButton } from "./FrameStepButton";
+import {
+  isPlayProgramButtonDisabled,
+  presentPlayButton,
+  presentProgramRunStatus,
+  pressPlayButton,
+  pressPlayProgramButton,
+} from "./programPlayButton";
 import { MarkInIcon, MarkOutIcon } from "./markPointIcons";
 import { SegmentDurationReadout } from "./SegmentDurationReadout";
 import { VolumeControl } from "./VolumeControl";
@@ -71,6 +85,7 @@ import {
   type TransportDisabledReasonKey,
 } from "./transportDisabledReason";
 import {
+  mediaBySourceOf,
   sequencePlayback,
   useSequenceMediaStore,
   useSequencePlaybackStore,
@@ -82,6 +97,11 @@ const selectMedia = (s: MediaStoreState) => s.media;
 const selectCanUndo = (s: TimelineStoreState) => s.canUndo;
 const selectCanRedo = (s: TimelineStoreState) => s.canRedo;
 const selectIsSequenceEmpty = (s: TimelineStoreState) => s.clips.length === 0;
+const selectClips = (s: TimelineStoreState) => s.clips;
+const selectSequenceSegments = (s: TimelineStoreState) => s.sequenceSegments;
+const selectSequenceSources = (s: TimelineStoreState) => s.sequenceSources;
+const selectAttachedClipId = (s: TimelineStoreState) => s.attachedClipId;
+const selectMediaSources = (s: MediaStoreState) => s.sources;
 const selectPendingInPts = (s: TimelineStoreState) => s.pendingInPts;
 const selectSegments = (s: TimelineStoreState) => s.segments;
 const selectSourceId = (s: TimelineStoreState) => s.sourceId;
@@ -110,6 +130,37 @@ const exportFrame = () => {
   if (command !== null) {
     runShortcutCommand(command);
   }
+};
+
+/**
+ * A click on the Play button (ADR 074): it does nothing while an overlay of the page owns the
+ * commands, such as a native context menu that is on its way. Otherwise it ends a program play
+ * and does nothing more, so the playback stays paused, or else plays or pauses.
+ */
+const pressPlay = () => {
+  pressPlayButton({
+    isOverlayOpen: isPageOverlayOpen,
+    endProgramPlay: sequencePlayback.endProgramPlay,
+    togglePlayback: () => sequencePlayback.store.getState().togglePlayback(),
+  });
+};
+
+/**
+ * A click on the Play Program button (ADR 074). It does nothing while an overlay of the page
+ * owns the commands, as the key does not, and while a pointer holds a gesture that seeks, as
+ * the key does not (`pointerSeekHold`). Otherwise it ends a program play, with or without
+ * Shift, or else it plans Play Program, or Play Joins with Shift, on the state at click time,
+ * as the key does.
+ */
+const pressPlayProgram = (event: React.MouseEvent<HTMLButtonElement>) => {
+  pressPlayProgramButton(event.shiftKey, {
+    isOverlayOpen: isPageOverlayOpen,
+    isPointerSeekHeld: pointerSeekHold.isHeld,
+    endProgramPlay: sequencePlayback.endProgramPlay,
+    plan: (action) =>
+      planControlCommand(action, isPageOverlayOpen(), readShortcutSnapshot()),
+    run: runShortcutCommand,
+  });
 };
 
 /** Each glyph of the Play button: one grid cell, and the cross-fade of the two states. */
@@ -186,7 +237,10 @@ export function TransportBar() {
   // the preview says so.
   const isDecodeStalled = useSequencePlaybackStore((s) => s.decodeStall !== null);
   const isReadStall = useSequencePlaybackStore((s) => s.decodeStall?.cause === "read");
-  const togglePlayback = sequencePlayback.store.getState().togglePlayback;
+  // The program play that runs (ADR 074). The store keeps one object for each part, so a frame
+  // does not render this tree.
+  const programRun = useSequencePlaybackStore((s) => s.programRun);
+  const hasProgramRun = programRun !== null;
 
   const hasNominalRate = hasNominalFrameRate(attachedProbe);
 
@@ -277,6 +331,8 @@ export function TransportBar() {
   );
   const reasonText = (key: TransportDisabledReasonKey | null) =>
     key === null ? null : t(key);
+  // While a program play exists, Play is enabled, so it shows no reason (ADR 074).
+  const playReasonText = hasProgramRun ? null : reasonText(playReason);
   // Each disabled-reason element is always in the document, and its button names it in
   // `aria-describedby`, so assistive technology reads the reason on the button itself. The
   // tooltip only opens on hover or focus, and a disabled button takes neither.
@@ -314,6 +370,8 @@ export function TransportBar() {
   const deleteSegmentShortcut = shortcutOf("deleteSegment");
   const previousStepShortcut = shortcutOf("stepBackOneFrame");
   const playShortcut = shortcutOf("togglePlayback");
+  const playProgramShortcut = shortcutOf("playProgram");
+  const playJoinsShortcut = shortcutOf("playJoins");
   const nextStepShortcut = shortcutOf("stepForwardOneFrame");
   const exportFrameShortcut = shortcutOf("exportFrame");
 
@@ -379,10 +437,84 @@ export function TransportBar() {
     hasNominalRate,
     isDecodeStalled,
   );
-  const isPlayDisabled = !canTogglePlayback(hasActiveSource, isDecodeStalled);
+  const canPlay = canTogglePlayback(hasActiveSource, isDecodeStalled);
+  // While a program play exists, Play is available and shows Pause (ADR 074).
+  const playButton = presentPlayButton(isPlaying, canPlay, hasProgramRun);
+  const playLabel = playButton.showsPause
+    ? t("transport.action.pause")
+    : t("transport.action.play");
+
+  // Play Program and Play Joins (ADR 074). The plan reads the program, the media of every
+  // source, and the segment where the run starts: the segment that Play Segment would play. The
+  // selector settles on a segment id, so a frame that does not change it does not render this
+  // tree, and the list of the parts is built again only when one of its inputs changes.
+  const clips = useTimelineStore(selectClips);
+  const sequenceSegments = useTimelineStore(selectSequenceSegments);
+  const sequenceSources = useTimelineStore(selectSequenceSources);
+  const attachedClipId = useTimelineStore(selectAttachedClipId);
+  // A press, a scrub or a trim on the timeline, or a held frame step button (ADR 074).
+  const isPointerSeekHeld = useSyncExternalStore(
+    pointerSeekHold.subscribe,
+    pointerSeekHold.isHeld,
+  );
+  const mediaSources = useMediaStore(selectMediaSources);
+  const openMedia = useMediaStore(selectMedia);
+  const mediaBySource = useMemo(
+    () => mediaBySourceOf({ sources: mediaSources, media: openMedia }),
+    [mediaSources, openMedia],
+  );
+  const sequenceProbe = media?.probe ?? null;
+  const programSegmentId = useSequencePlaybackStore((s) =>
+    sequenceProbe === null
+      ? null
+      : (segmentToPlay(
+          { timeline: { segments, sourceId, currentSegmentId }, playback: s },
+          sequenceProbe,
+        )?.id ?? null),
+  );
+  const canPlayProgram = useMemo(
+    () =>
+      isProgramPlayAvailable({
+        hasActiveSource,
+        stall: programPlayStallOf({ clips, attachedClipId }, isDecodeStalled),
+        isTrimDragging,
+        isPointerSeekHeld,
+        timeline: { clips, sequenceSegments, sequenceSources, segments, sourceId },
+        media: mediaBySource,
+        currentSegmentId: programSegmentId,
+      }),
+    [
+      hasActiveSource,
+      attachedClipId,
+      isDecodeStalled,
+      isTrimDragging,
+      isPointerSeekHeld,
+      clips,
+      sequenceSegments,
+      sequenceSources,
+      segments,
+      sourceId,
+      mediaBySource,
+      programSegmentId,
+    ],
+  );
+  const isPlayProgramDisabled = isPlayProgramButtonDisabled(
+    canPlayProgram,
+    hasProgramRun,
+    isPointerSeekHeld,
+  );
+  const programStatus = presentProgramRunStatus(programRun);
+  const programStateText =
+    programStatus === null
+      ? null
+      : t(programStatus.key, {
+          index: programStatus.index,
+          count: programStatus.count,
+        });
+  const playProgramStateId = useId();
 
   /*
-   * The bar is three columns. The play group sits in the centre column, so Play is in the
+   * The bar is three columns. The play group sits in the centre column, so the group is in the
    * middle of the window at every width. The left column holds the history and the mark
    * groups, packed against the play group, and the right column holds the segment group and
    * the mute toggle with the volume slider, packed the same way, and the segment duration at
@@ -397,6 +529,10 @@ export function TransportBar() {
    * the 16 px gap after it; those figures do not count it. A column never shrinks below its
    * content, so a longer label moves the play group off the centre and does not make the
    * controls overlap.
+   *
+   * The Play Program button at the right end of the play group (ADR 074) is not in those
+   * figures. With it, Play is 24 px to the left of the middle of the window, half of that
+   * button and its gap, and each outer column is 24 px narrower.
    *
    * Every button is 40 px high, and Play is 44 px. A button with its label under the icon
    * takes the 40 px row size, with the flex direction and the padding changed for the stack,
@@ -610,8 +746,9 @@ export function TransportBar() {
         <Separator orientation="vertical" className="h-8 bg-border" />
       </div>
 
-      {/* Group 3: Playback Controls (Previous / Next nominal step, Play/Pause), in the centre
-          column. The two step buttons repeat while they are held (FrameStepButton). */}
+      {/* Group 3: Playback Controls (Previous / Next nominal step, Play/Pause, Play Program),
+          in the centre column. The two step buttons repeat while they are held
+          (FrameStepButton). */}
       <div className="flex items-center gap-2">
         <FrameStepButton
           delta={-1}
@@ -637,13 +774,11 @@ export function TransportBar() {
             <span className="inline-flex">
               <Button
                 size="tool-icon-lg"
-                disabled={isPlayDisabled}
+                disabled={playButton.disabled}
                 onMouseDown={preventFocusOnMouseDown}
-                onClick={togglePlayback}
+                onClick={pressPlay}
                 className="shadow-xs transition-[color,background-color,border-color,box-shadow,opacity,scale] motion-safe:enabled:active:scale-[0.96]"
-                aria-label={
-                  isPlaying ? t("transport.action.pause") : t("transport.action.play")
-                }
+                aria-label={playLabel}
                 aria-describedby={playReasonId}
                 aria-keyshortcuts={playShortcut?.aria}
               >
@@ -651,26 +786,30 @@ export function TransportBar() {
                   <Play
                     className={cn(
                       PLAY_GLYPH_CLASS,
-                      isPlaying ? PLAY_GLYPH_HIDDEN_CLASS : PLAY_GLYPH_SHOWN_CLASS,
+                      playButton.showsPause
+                        ? PLAY_GLYPH_HIDDEN_CLASS
+                        : PLAY_GLYPH_SHOWN_CLASS,
                     )}
                   />
                   <Pause
                     className={cn(
                       PLAY_GLYPH_CLASS,
-                      isPlaying ? PLAY_GLYPH_SHOWN_CLASS : PLAY_GLYPH_HIDDEN_CLASS,
+                      playButton.showsPause
+                        ? PLAY_GLYPH_SHOWN_CLASS
+                        : PLAY_GLYPH_HIDDEN_CLASS,
                     )}
                   />
                 </span>
               </Button>
               <span id={playReasonId} className="sr-only">
-                {reasonText(playReason)}
+                {playReasonText}
               </span>
             </span>
           </TooltipTrigger>
           <ShortcutTooltipContent
-            label={isPlaying ? t("transport.action.pause") : t("transport.action.play")}
+            label={playLabel}
             keys={playShortcut?.keys}
-            reason={reasonText(playReason)}
+            reason={playReasonText}
           />
         </Tooltip>
 
@@ -683,6 +822,47 @@ export function TransportBar() {
         >
           <ChevronRight className="size-4" />
         </FrameStepButton>
+
+        {/* Play Program (ADR 074): a click plays the segments of the export in the export
+            order, and a click with Shift plays only the joins. The button is a toggle: it is
+            pressed from the start of a run to its end, also between two parts and while a clip
+            loads, and a click then ends the run. The name stays the same in both states, and
+            the state line of the run is the second line of the tooltip and the description of
+            the button, as the other states of the bar are. The span is the tooltip trigger
+            while the button is disabled, as for the edit buttons. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex">
+              <Button
+                variant="tool-ghost"
+                size="tool-icon"
+                disabled={isPlayProgramDisabled}
+                onMouseDown={preventFocusOnMouseDown}
+                onClick={pressPlayProgram}
+                className="aria-pressed:bg-muted aria-pressed:text-foreground aria-pressed:hover:bg-secondary-hover aria-pressed:active:bg-[color-mix(in_oklab,var(--secondary-hover),var(--foreground)_5%)]"
+                aria-label={t("transport.action.playProgram")}
+                aria-pressed={hasProgramRun}
+                aria-describedby={playProgramStateId}
+                aria-keyshortcuts={
+                  [playProgramShortcut?.aria, playJoinsShortcut?.aria]
+                    .filter((value) => value !== undefined && value !== "")
+                    .join(" ") || undefined
+                }
+              >
+                <ListVideo className="size-4" />
+              </Button>
+              {/* A live region, so assistive technology reads each new part of a run. */}
+              <span id={playProgramStateId} className="sr-only" role="status">
+                {programStateText}
+              </span>
+            </span>
+          </TooltipTrigger>
+          <ShortcutTooltipContent
+            label={t("transport.action.playProgram")}
+            keys={playProgramShortcut?.keys}
+            reason={programStateText ?? t("transport.action.playJoinsHint")}
+          />
+        </Tooltip>
       </div>
 
       <div className="flex items-center justify-start gap-4">

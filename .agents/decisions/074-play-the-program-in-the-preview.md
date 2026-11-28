@@ -303,6 +303,20 @@ transport action. The clip of the first part can be another clip: it then loads.
 Both do nothing while a drag trims a segment edge, and while a dialog of the window is open,
 as the other actions of the key table.
 
+(Changed on 2026-11-28, with the code of the interface.) Two more rules:
+
+- Both do nothing while a pointer holds a gesture that seeks: from a press on the ruler or
+  the track of the timeline to its release or its cancel, and while a step button of the
+  transport bar is held. Such a gesture seeks again later with no new act of the user, and
+  that seek would end the new run. The other actions of the key table do not read this. A
+  press that acts only at its release, as a click, holds nothing: the release is an act of
+  the user, and a click that seeks or steps takes the playback.
+- A decode stall of the clip on screen (ADR 039) turns the two actions off only when the
+  first part is on the source of that clip. A first part on another source loads its clip.
+
+A click on the Play button or the Play Program button under an open menu or dialog of the
+page does nothing, with or without a run.
+
 ### What the interface shows
 
 The state of the playback of the sequence gets the run: its action, the number of the part
@@ -312,6 +326,15 @@ that plays or loads, from 1, and the count of the parts of its list. It is null 
   two parts and while a clip loads.
 - The status line of the transport bar says which part it is: "Playing part 2 of 5 of the
   program." or "Playing part 2 of 5 of the joins."
+
+(Changed on 2026-11-28, with the code of the interface.) The transport bar has no status
+line, so the bar shows the part as it shows its other states. While a run exists, the second
+line of the tooltip of the Play Program button says which part it is, in the place of the
+line about `Shift`: "Playing the program: part 2 of 5." or "Playing the joins: part 2 of 5."
+A status text that only a screen reader reads says the same at each new part. The Play
+Program button is the last button of the play group, after the step buttons, so the two step
+buttons stay on each side of the Play button. In Simplified Chinese the action is 预览成片, and
+a join is 拼接处.
 
 The playhead and the timecode show the position on the sequence, as in each other play. No
 part of the interface gets a time axis of the program.

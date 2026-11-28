@@ -103,6 +103,11 @@ export interface SegmentTrimSessionStores {
    * the playhead after the trim (ADR 030). Without it, nothing is dropped.
    */
   readonly dropNavigation?: () => void;
+  /**
+   * Ends the program play that runs (`SequencePlayback.endProgramPlay`), and returns true when
+   * a run ended. The start of a trim takes the playback (ADR 074). Without it, no run ends here.
+   */
+  readonly endProgramPlay?: () => boolean;
 }
 
 /** The facts of a press that the timeline panel passes to start a trim. */
@@ -172,7 +177,8 @@ export interface SegmentTrimSession {
   /**
    * Starts a trim at the drag threshold, and selects its segment (ADR 030). A trim that still
    * waits for its frame fails first. Returns false, and changes nothing, when the press cannot
-   * start a trim.
+   * start a trim. The start of a trim first ends a program play (ADR 074), and the trim then
+   * records the playhead of the paused playback.
    */
   readonly begin: (input: SegmentTrimBeginInput) => boolean;
   /** Sends the scrub seek of one sample of the drag (ADR 022). */
@@ -446,9 +452,17 @@ export function createSegmentTrimSession(
     canBegin: (input) => plan(input) !== null,
 
     begin: (input) => {
-      const next = plan(input);
+      let next = plan(input);
       if (next === null) {
         return false;
+      }
+      // The user takes the playback from a program play (ADR 074). The end of the run pauses,
+      // so the trim plans again, on the state that results.
+      if (stores.endProgramPlay?.() === true) {
+        next = plan(input);
+        if (next === null) {
+          return false;
+        }
       }
       if (view?.phase === "committing") {
         fail();
@@ -567,4 +581,5 @@ export const segmentTrimSession: SegmentTrimSession = createSegmentTrimSession({
   timeline: timelineStore,
   seekToClipFrame: sequencePlayback.seekToClipFrame,
   dropNavigation: sequencePlayback.dropNavigation,
+  endProgramPlay: sequencePlayback.endProgramPlay,
 });

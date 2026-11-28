@@ -16,7 +16,9 @@ import { timelineStore, type TimelineStore } from "@/features/timeline/store";
 import { virtualMediaOf, type MediaBySource } from "./virtualMedia";
 
 /** The media of every source of the session, by source ID. */
-export function mediaBySourceOf(state: MediaState): MediaBySource {
+export function mediaBySourceOf(
+  state: Pick<MediaState, "media" | "sources">,
+): MediaBySource {
   const id = state.media === null ? null : getGeneratedSourceId(state.media);
   const latest = state.media === null || id === null ? {} : { [id]: state.media };
   return { ...state.sources, ...latest };

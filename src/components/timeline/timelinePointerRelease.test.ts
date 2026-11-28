@@ -4,6 +4,7 @@ import {
   createSegmentClickGuard,
   planPointerRelease,
   shouldResumeAfterGesture,
+  takePlaybackAtPress,
   type GestureResumeInput,
   type PointerReleaseInput,
 } from "./timelinePointerRelease";
@@ -254,6 +255,35 @@ describe("createPressPlaybackRecord", () => {
       expect(gesture.isActive()).toBe(false);
       expect(record.wasPlayingAtPress()).toBe(false);
     }
+  });
+});
+
+// ADR 074: a press on the timeline takes the playback from a program play.
+describe("takePlaybackAtPress", () => {
+  it("ends a run first, and then reads whether the store plays", () => {
+    let playing = true;
+    const calls: string[] = [];
+    const wasPlaying = takePlaybackAtPress({
+      endProgramPlay: () => {
+        calls.push("end");
+        // The end of the run pauses the playback.
+        playing = false;
+        return true;
+      },
+      isPlaying: () => {
+        calls.push("read");
+        return playing;
+      },
+    });
+    expect(calls).toEqual(["end", "read"]);
+    // The press seeks as from a paused playback, and the release of a drag does not resume.
+    expect(wasPlaying).toBe(false);
+  });
+
+  it("records a playback that no run made", () => {
+    expect(
+      takePlaybackAtPress({ endProgramPlay: () => false, isPlaying: () => true }),
+    ).toBe(true);
   });
 });
 

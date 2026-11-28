@@ -369,13 +369,46 @@ export function resolveTimecodeEntry(
   text: string,
   snapshot: TimecodeEntrySnapshot,
 ): TimecodeEntryOutcome {
-  const parsed = parseTimecodeEntry(text, snapshot.display);
+  return commitTimecodeEntry(text, snapshot.display, {
+    endProgramPlay: () => {},
+    readSnapshot: () => snapshot,
+  });
+}
+
+/** The calls of `commitTimecodeEntry`. */
+export interface TimecodeEntryCommitDependencies {
+  /**
+   * Ends the program play that runs (`SequencePlayback.endProgramPlay`). A typed time takes the
+   * playback (ADR 074).
+   */
+  readonly endProgramPlay: () => void;
+  /** One read of the media and playback state, and the display of the source. */
+  readonly readSnapshot: () => TimecodeEntrySnapshot;
+}
+
+/**
+ * What Enter in the field does, as `resolveTimecodeEntry` says, for a field that can end a
+ * program play (ADR 074). A text that does not parse changes nothing: the field stays open, or
+ * closes as Escape does for an empty text. A time ends the run first, and its seek then plans
+ * against the state that results, so a typed step counts from the paused position. When that
+ * seek is not available then, the end of the run is all that Enter does.
+ *
+ * @param text The text of the field.
+ * @param display The timecode format of the source, in which the text is parsed (ADR 028).
+ */
+export function commitTimecodeEntry(
+  text: string,
+  display: TimecodeDisplay,
+  dependencies: TimecodeEntryCommitDependencies,
+): TimecodeEntryOutcome {
+  const parsed = parseTimecodeEntry(text, display);
   if (!parsed.ok) {
     return parsed.error === "empty"
       ? { kind: "cancel" }
       : { kind: "error", error: parsed.error };
   }
-  const plan = planTimecodeEntrySeek(parsed.entry, snapshot);
+  dependencies.endProgramPlay();
+  const plan = planTimecodeEntrySeek(parsed.entry, dependencies.readSnapshot());
   return plan.ok
     ? { kind: "run", command: plan.command }
     : { kind: "error", error: plan.error };

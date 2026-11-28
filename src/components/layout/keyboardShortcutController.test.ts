@@ -1719,4 +1719,74 @@ describe("keyboardShortcutController", () => {
       ).toEqual({ claimed: true, action: "finishSegment" });
     });
   });
+
+  // ADR 074: the user takes the playback from a program play before the action plans.
+  describe("the takeover of a program play", () => {
+    it("asks the takeover for the matched action before its availability", () => {
+      const calls: string[] = [];
+      const resolution = resolveShortcut(createKeyEvent({ key: "ArrowLeft" }), {
+        platform: "windows",
+        takeOver: (action) => {
+          calls.push(`takeOver:${action}`);
+          return false;
+        },
+        isActionAvailable: (action) => {
+          calls.push(`available:${action}`);
+          return true;
+        },
+      });
+      expect(resolution).toEqual({ claimed: true, action: "stepOrJumpBack" });
+      expect(calls).toEqual(["takeOver:stepOrJumpBack", "available:stepOrJumpBack"]);
+    });
+
+    it("claims the press with no action when the takeover says that it is done", () => {
+      const isActionAvailable = vi.fn(() => true);
+      expect(
+        resolveShortcut(createKeyEvent({ key: " " }), {
+          platform: "windows",
+          takeOver: (action) => action === "togglePlayback",
+          isActionAvailable,
+        }),
+      ).toEqual(CLAIMED_WITHOUT_ACTION);
+      expect(isActionAvailable).not.toHaveBeenCalled();
+    });
+
+    it("takes over also for an action that is not available then", () => {
+      const takeOver = vi.fn(() => false);
+      expect(
+        resolveShortcut(createKeyEvent({ key: "Home", code: "Home" }), {
+          platform: "windows",
+          takeOver,
+          isActionAvailable: () => false,
+        }),
+      ).toEqual(CLAIMED_WITHOUT_ACTION);
+      expect(takeOver).toHaveBeenCalledExactlyOnceWith("goToStart");
+    });
+
+    it("does not take over in a text field, in a dialog, or for a taken repeat", () => {
+      const takeOver = vi.fn(() => true);
+      const context: ShortcutContext = {
+        platform: "windows",
+        takeOver,
+        isActionAvailable: () => true,
+      };
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: " ", target: createTarget({ tagName: "INPUT" }) }),
+          context,
+        ),
+      ).toEqual(NOT_CLAIMED);
+      expect(
+        resolveShortcut(createKeyEvent({ key: " ", isOverlayOpen: true }), context),
+      ).toEqual(NOT_CLAIMED);
+      // A held P starts one run: its repeats are taken and do not end that run.
+      expect(
+        resolveShortcut(
+          createKeyEvent({ key: "p", code: "KeyP", repeat: true }),
+          context,
+        ),
+      ).toEqual(CLAIMED_WITHOUT_ACTION);
+      expect(takeOver).not.toHaveBeenCalled();
+    });
+  });
 });

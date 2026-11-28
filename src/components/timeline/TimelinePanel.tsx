@@ -12,6 +12,10 @@ import {
   isModalLayerOpen,
   nativeContextMenuState,
 } from "@/components/layout/nativeContextMenuState";
+import {
+  pointerSeekHold,
+  TIMELINE_GESTURE_KEY,
+} from "@/components/layout/pointerSeekHold";
 import { getShortcutPlatform } from "@/components/layout/shortcutBindings";
 import { useMediaStore, type MediaStoreState } from "@/features/media";
 import {
@@ -118,6 +122,7 @@ import {
   createSegmentClickGuard,
   planPointerRelease,
   shouldResumeAfterGesture,
+  takePlaybackAtPress,
   type TrimPress,
 } from "./timelinePointerRelease";
 import {
@@ -894,8 +899,14 @@ export function TimelinePanel({
           seekRef.current(clientX, phase);
         }
       },
+      // From the press to each end of the gesture, Play Program and Play Joins do nothing
+      // (`pointerSeekHold`, ADR 074): a later sample of the gesture would end their run.
+      onStart: () => {
+        pointerSeekHold.hold(TIMELINE_GESTURE_KEY);
+      },
       // The end of a gesture, by any path, ends its aids: the release, a cancel, a lost
-      // capture, the cancel of PlayheadFollow when seeking stops being possible, and unmount.
+      // capture, a blur of the window, the cancel of PlayheadFollow when seeking stops being
+      // possible, and unmount. It also releases the fact that the pointer seeks.
       // It also ends the trim mode. A trim that still drags here ended with no final sample,
       // as at unmount, and it makes no change.
       onFinish: () => {
@@ -910,6 +921,7 @@ export function TimelinePanel({
         trimPressRef.current = null;
         segmentTrimSession.armPress(null);
         pressPlayback.finish();
+        pointerSeekHold.release(TIMELINE_GESTURE_KEY);
       },
     });
     return gestureRef.current;
@@ -1123,8 +1135,14 @@ export function TimelinePanel({
       // application, no longer names this pointer.
       trimPointerIdRef.current = null;
       // Read before the seek at pointer down. That seek keeps a playback running, and the
-      // first scrub sample of a drag pauses it, so the release reads this value.
-      pressPlayback.pressScrub(sequencePlayback.store.getState().isPlaying);
+      // first scrub sample of a drag pauses it, so the release reads this value. The press
+      // first ends a program play (ADR 074), so it seeks as from a paused playback.
+      pressPlayback.pressScrub(
+        takePlaybackAtPress({
+          endProgramPlay: sequencePlayback.endProgramPlay,
+          isPlaying: () => sequencePlayback.store.getState().isPlaying,
+        }),
+      );
     }
     gesture.begin(event.pointerId, event.clientX);
   };

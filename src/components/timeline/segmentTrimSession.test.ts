@@ -311,6 +311,53 @@ describe("segmentTrimSession: the start", () => {
   });
 });
 
+// ADR 074: the start of a trim takes the playback from a program play.
+describe("segmentTrimSession: a program play", () => {
+  function inputOf(h: Harness) {
+    return {
+      segmentId: "a",
+      edge: "out" as const,
+      hasActiveSource: true,
+      totalDurationSeconds: h.total,
+      probe: h.probe,
+    };
+  }
+
+  it("ends the run at the start, and records the playhead of the paused playback", () => {
+    const h = createHarness();
+    const calls: string[] = [];
+    const session = createSegmentTrimSession({
+      playback: h.playback,
+      timeline: h.timeline,
+      clock: h.timers.clock,
+      isVisible: () => true,
+      endProgramPlay: () => {
+        calls.push("end");
+        // The run paused on the frame at 2 s.
+        h.present(2);
+        return true;
+      },
+    });
+    expect(session.begin(inputOf(h))).toBe(true);
+    expect(calls).toEqual(["end"]);
+    expect(session.getDraggingTrim()?.startPlayheadPts).toBe("180000");
+  });
+
+  it("ends no run for a press that cannot start a trim", () => {
+    const h = createHarness({ calibrate: false });
+    const endProgramPlay = vi.fn(() => true);
+    const session = createSegmentTrimSession({
+      playback: h.playback,
+      timeline: h.timeline,
+      clock: h.timers.clock,
+      isVisible: () => true,
+      endProgramPlay,
+    });
+    expect(session.begin(inputOf(h))).toBe(false);
+    expect(endProgramPlay).not.toHaveBeenCalled();
+  });
+});
+
 describe("segmentTrimSession: the armed edge press and the dialogs (ADR 065)", () => {
   it("locks Rename Segment from the armed press to the end of the drag", () => {
     const h = createHarness();

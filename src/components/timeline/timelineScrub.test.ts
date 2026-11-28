@@ -576,6 +576,33 @@ describe("timelineScrub", () => {
     });
   });
 
+  describe("onStart", () => {
+    it("is called once for each gesture that starts, before the sample of the press", () => {
+      const scheduler = createFakeScheduler();
+      const calls: string[] = [];
+      const gesture = createTimelineScrubGesture({
+        onSample: (_clientX, phase) => calls.push(phase),
+        onStart: () => calls.push(`start:${String(gesture.isActive())}`),
+        onFinish: () => calls.push("finish"),
+        scheduler,
+      });
+      gesture.begin(1, 100);
+      // A press during an active gesture starts no gesture.
+      gesture.begin(2, 100);
+      gesture.end(1, 100);
+      gesture.begin(3, 100);
+      gesture.dispose();
+      expect(calls).toEqual([
+        "start:true",
+        "final",
+        "finish",
+        "start:true",
+        "final",
+        "finish",
+      ]);
+    });
+  });
+
   describe("onFinish", () => {
     it("is called once after the final sample of end and of cancel", () => {
       const scheduler = createFakeScheduler();

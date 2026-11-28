@@ -63,6 +63,19 @@ describe("shortcutBindings", () => {
         action: "playSegment",
         repeat: "taken",
       },
+      // ADR 074.
+      {
+        name: "P",
+        press: () => press({ key: "p", code: "KeyP" }),
+        action: "playProgram",
+        repeat: "taken",
+      },
+      {
+        name: "Shift+P",
+        press: () => press({ key: "P", code: "KeyP", shiftKey: true }),
+        action: "playJoins",
+        repeat: "taken",
+      },
       {
         name: "ArrowLeft",
         press: () => press({ key: "ArrowLeft", code: "ArrowLeft" }),

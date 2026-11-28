@@ -29,6 +29,8 @@ export function getShortcutPlatform(): ShortcutPlatform {
 export const SHORTCUT_ACTIONS = [
   "togglePlayback",
   "playSegment",
+  "playProgram",
+  "playJoins",
   "stepOrJumpBack",
   "stepOrJumpForward",
   "jumpBackOneSecond",
@@ -300,6 +302,11 @@ export const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     action: "playSegment",
     repeat: "taken",
   },
+  // ADR 074: Play Program plays each segment of the export in the export order, and Play Joins
+  // plays only the parts at each join of two segments. A held key starts one run: the repeats
+  // are taken and do nothing. The letter follows the layout (ADR 026).
+  { key: letter("P"), modifiers: [], action: "playProgram", repeat: "taken" },
+  { key: letter("P"), modifiers: ["shift"], action: "playJoins", repeat: "taken" },
   // The arrows of a media player, such as PotPlayer and mpv. The arrow alone jumps 5 s while
   // the video plays, and steps one frame while it is paused, because a user who adjusts a
   // frame pauses first (`stepOrJumpBack`, `shortcutCommands.ts`). Shift jumps 1 s and primary

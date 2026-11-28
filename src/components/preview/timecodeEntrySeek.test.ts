@@ -13,6 +13,7 @@ import {
 import type { TimecodeEntry } from "@/lib/timecodeEntry";
 import type { Pts, Rational, TickCount } from "@/types/project";
 import {
+  commitTimecodeEntry,
   MAX_TYPED_STEP_FRAMES,
   planTimecodeEntrySeek,
   resolveTimecodeEntry,
@@ -631,6 +632,61 @@ describe("resolveTimecodeEntry", () => {
       kind: "run",
       command: { kind: "seekNominal", frames: 10 },
     });
+  });
+});
+
+// ADR 074: a typed time takes the playback from a program play.
+describe("commitTimecodeEntry", () => {
+  const display = MILLISECONDS_TIMECODE_DISPLAY;
+
+  it("ends the run first, and plans a step from the paused position", () => {
+    // The run plays at 5.480 s, and it pauses on the frame at 5.500 s.
+    let playback: Partial<Playback> = {
+      isPlaying: true,
+      presentedFrame: presentedAt(noRateProbe, 5480),
+    };
+    const calls: string[] = [];
+    const outcome = commitTimecodeEntry("-2", display, {
+      endProgramPlay: () => {
+        calls.push("end");
+        playback = { isPlaying: false, presentedFrame: presentedAt(noRateProbe, 5500) };
+      },
+      readSnapshot: () => {
+        calls.push("read");
+        return snapshot(noRateProbe, playback, display);
+      },
+    });
+    expect(calls).toEqual(["end", "read"]);
+    expect(outcome).toEqual({
+      kind: "run",
+      command: { kind: "seekToPts", pts: "4000" },
+    });
+  });
+
+  it("ends the run also when the time has no seek then", () => {
+    const endProgramPlay = vi.fn();
+    expect(
+      commitTimecodeEntry("5", display, {
+        endProgramPlay,
+        // The element of the clip that the run loads has no metadata yet.
+        readSnapshot: () => snapshot(noRateProbe, { isReady: false }, display),
+      }),
+    ).toEqual({ kind: "run", command: null });
+    expect(endProgramPlay).toHaveBeenCalledOnce();
+  });
+
+  it("does not end the run for a text that does not parse", () => {
+    const endProgramPlay = vi.fn();
+    const readSnapshot = vi.fn(() => snapshot(gridProbe));
+    const frames = resolveTimecodeDisplay("frames", gridProbe);
+    expect(commitTimecodeEntry("  ", frames, { endProgramPlay, readSnapshot })).toEqual(
+      { kind: "cancel" },
+    );
+    expect(
+      commitTimecodeEntry("5:x", frames, { endProgramPlay, readSnapshot }),
+    ).toEqual({ kind: "error", error: "invalid" });
+    expect(endProgramPlay).not.toHaveBeenCalled();
+    expect(readSnapshot).not.toHaveBeenCalled();
   });
 });
 

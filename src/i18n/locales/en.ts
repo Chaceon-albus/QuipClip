@@ -352,6 +352,16 @@ export const en = {
       deleteSelectedSegmentsAria_other: "Delete {{count}} Selected Segments",
       play: "Play",
       pause: "Pause",
+      // The button after Play (ADR 074). It plays each segment of the export in the export
+      // order, from its In to its last frame, one after another. "Program" is the list of the
+      // segments that the export joins, as in the Program monitor of a video editor. It is not
+      // a computer program.
+      playProgram: "Play Program",
+      // The second line of the tooltip of Play Program while no program play runs. Shift with a
+      // click plays only the parts at each join: up to 2 seconds at the end of a segment, and
+      // then up to 2 seconds at the start of the next segment. "Join" is the place where the
+      // export joins two segments.
+      playJoinsHint: "Shift-click plays only the joins.",
       previousStep: "Step Back One Frame",
       nextStep: "Step Forward One Frame",
       // A toggle. The name stays the same while it is on, and the button reports the state.
@@ -392,6 +402,15 @@ export const en = {
       // The second line of the tooltip of Export Frame while the action runs: from the save
       // dialog to the end of the export of the image (ADR 069).
       exportingFrame: "Exporting the frame…",
+      // The second line of the tooltip of Play Program while a program play runs (ADR 074).
+      // `playingProgram` shows for Play Program, and `playingJoins` for Play Joins (Shift with
+      // a click, or Shift+P). {{index}} is the number of the part that plays or loads, from 1.
+      // {{count}} is the number of the parts of the play, always 1 or more. A segment can be
+      // one part or more. The English forms for one part and for more parts are the same.
+      playingProgram_one: "Playing the program: part {{index}} of {{count}}.",
+      playingProgram_other: "Playing the program: part {{index}} of {{count}}.",
+      playingJoins_one: "Playing the joins: part {{index}} of {{count}}.",
+      playingJoins_other: "Playing the joins: part {{index}} of {{count}}.",
     },
     // The label above the duration at the right end of the transport bar. `segment` names the
     // current segment. {{index}} is its number, as in `timeline.segment`. `pending` names the

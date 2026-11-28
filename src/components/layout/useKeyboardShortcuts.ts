@@ -19,6 +19,8 @@ import {
   type ShortcutEventTarget,
   type ShortcutKeyEvent,
 } from "./keyboardShortcutController";
+import { pointerSeekHold } from "./pointerSeekHold";
+import { takeOverProgramPlay } from "./programTakeover";
 import { getShortcutPlatform } from "./shortcutBindings";
 import {
   APPROXIMATE_SHORTCUT_SEEK_OPTIONS,
@@ -26,7 +28,11 @@ import {
   type ShortcutCommand,
   type ShortcutSnapshot,
 } from "./shortcutCommands";
-import { sequenceMediaStore, sequencePlayback } from "@/features/sequence";
+import {
+  mediaBySourceOf,
+  sequenceMediaStore,
+  sequencePlayback,
+} from "@/features/sequence";
 import { attachedMediaStore } from "@/features/sequence/attachedMedia";
 
 /**
@@ -44,9 +50,13 @@ export function readShortcutSnapshot(): ShortcutSnapshot {
     viewport: timelineViewportStore.getState(),
     isTrimDragging: segmentTrimSession.isDragging(),
     isTrimArmed: segmentTrimSession.isPressArmed(),
+    // A press, a scrub or a trim on the timeline, or a held frame step button (ADR 074).
+    isPointerSeekHeld: pointerSeekHold.isHeld(),
     frameExport: readFrameExportSnapshot(),
     // The fact that a file drop reads (`useFileDropOpen`).
     isImporting: mediaStore.getState().status === "loading",
+    // The probes of the sources of the parts of a program play (ADR 074).
+    media: mediaBySourceOf(mediaStore.getState()),
   };
 }
 
@@ -69,6 +79,10 @@ export function runShortcutCommand(command: ShortcutCommand): void {
     case "playSegment":
       // Play Segment: seek to the In, play, and stop on the last frame of the segment (ADR 026).
       playback.playSegment(command.inPts, command.outPts);
+      return;
+    case "playProgram":
+      // Play Program or Play Joins (ADR 074), with the list of the parts that the plan made.
+      sequencePlayback.startProgramPlay(command.action, command.parts);
       return;
     case "seekNominal":
       // A key repeat is a held step (FrameStepOptions). A menu item plans a single press, so
@@ -232,10 +246,25 @@ export function useKeyboardShortcuts(): void {
 
       // One read of each store, so the condition the resolver tests and the call that runs
       // below come from the same state.
-      const snapshot = readShortcutSnapshot();
+      let snapshot = readShortcutSnapshot();
 
       const resolution = resolveShortcut(shortcutEvent, {
         platform,
+        // The user takes the playback from a program play (ADR 074). The end of the run pauses,
+        // so the action plans on a new read of the stores, the state that results.
+        // Play Program and Play Joins do nothing while a pointer holds a gesture that seeks:
+        // the layer takes the key and ends no run, as for an action that a trim locks.
+        takeOver: (action) => {
+          const takeover = takeOverProgramPlay(
+            action,
+            sequencePlayback.endProgramPlay,
+            snapshot.isPointerSeekHeld === true,
+          );
+          if (takeover === "ended" || takeover === "done") {
+            snapshot = readShortcutSnapshot();
+          }
+          return takeover === "done" || takeover === "locked";
+        },
         isActionAvailable: (action) => planShortcutCommand(action, snapshot) !== null,
       });
 

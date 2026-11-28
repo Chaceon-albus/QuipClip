@@ -81,6 +81,14 @@ const ROWS: readonly Row[] = [
     ariaWindows: "Space",
   },
   { id: "playSegment:/", macos: "/", windows: "/", ariaMacos: "/", ariaWindows: "/" },
+  { id: "playProgram:P", macos: "P", windows: "P", ariaMacos: "P", ariaWindows: "P" },
+  {
+    id: "playJoins:shift:P",
+    macos: "⇧P",
+    windows: "Shift+P",
+    ariaMacos: "Shift+P",
+    ariaWindows: "Shift+P",
+  },
   {
     id: "stepOrJumpBack:ArrowLeft",
     macos: "←",

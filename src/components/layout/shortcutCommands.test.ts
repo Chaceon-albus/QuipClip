@@ -11,7 +11,12 @@ import {
   type PlaybackMediaElement,
   type PlaybackSource,
 } from "@/features/playback";
+import type { ImportMediaResult } from "@/features/media/types";
+import { buildProgramParts } from "@/features/sequence/programParts";
+import type { MediaBySource } from "@/features/sequence/virtualMedia";
 import { createTimelineViewportStore } from "@/features/timeline";
+import { createTimelineStore } from "@/features/timeline/store";
+import type { SequenceSource } from "@/features/timeline/sequence";
 import type { Pts, Segment, TickCount } from "@/types/project";
 import { resolveShortcut } from "./keyboardShortcutController";
 import {
@@ -29,6 +34,10 @@ import {
   planShortcutCommand,
   EDGE_PRESS_LOCKED_ACTIONS,
   TRIM_LOCKED_ACTIONS,
+  isProgramPlayAvailable,
+  planProgramParts,
+  POINTER_SEEK_LOCKED_ACTIONS,
+  type ProgramPlayFacts,
   type ShortcutCommand,
   type ShortcutPress,
   type ShortcutProbe,
@@ -61,6 +70,21 @@ function segment(
   sourceId = SOURCE_ID,
 ): Segment {
   return { id, sourceId, inPts: pts(inPts), outPts: pts(outPts) };
+}
+
+/** The timing facts of the one source of the tests, as the timeline keeps them (ADR 052). */
+const SOURCE_FACTS: SequenceSource = {
+  id: SOURCE_ID,
+  videoTimeBase: { n: 1, d: 90_000 },
+  videoStartPts: pts("0"),
+  videoEndPts: pts("900000"),
+  videoDurationTicks: ticks("900000"),
+  approximateDurationSeconds: 10.01,
+};
+
+/** The media of the one source of the tests, which a program play reads (ADR 074). */
+function createMediaBySource(probe: ShortcutProbe = createProbe()): MediaBySource {
+  return { [SOURCE_ID]: { probe } as unknown as ImportMediaResult };
 }
 
 interface SnapshotOverrides {
@@ -1803,6 +1827,335 @@ describe("planShortcutCommand", () => {
         outPts: "120000",
       });
     });
+
+    // ADR 074: the stop point of a part of a program play is not the stop of a Play Segment.
+    it("plays the segment from its In while a program play runs, and does not pause", () => {
+      const segments = [segment("a", "60000", "120000")];
+      const running = withSegments(
+        { segments },
+        {
+          isPlaying: true,
+          playbackStop: {
+            inPts: pts("60000"),
+            outPts: pts("120000"),
+            phase: "playing",
+          },
+          programRun: { action: "program", part: 1, count: 2 },
+        },
+      );
+      expect(planShortcutCommand("playSegment", running)).toEqual({
+        kind: "playSegment",
+        inPts: "60000",
+        outPts: "120000",
+      });
+      // A run that ended (null) leaves the rule of ADR 026.
+      expect(
+        planShortcutCommand("playSegment", {
+          ...running,
+          playback: { ...running.playback, programRun: null },
+        }),
+      ).toEqual({ kind: "pause" });
+    });
+  });
+
+  describe("Play Program and Play Joins (ADR 074)", () => {
+    // Segment b lasts 5 s, more than a head and a tail of 2 s, so they are two parts of Play
+    // Joins.
+    const segments = [
+      segment("a", "45000", "225000"),
+      segment("b", "270000", "720000"),
+      segment("c", "765000", "855000"),
+    ];
+
+    /** A source with three segments, nothing selected, and the frame at 1 s on screen. */
+    function programSnapshot(
+      timeline: Partial<ShortcutSnapshot["timeline"]> = {},
+      playback: Partial<ShortcutSnapshot["playback"]> = {},
+    ): ShortcutSnapshot {
+      return {
+        ...createSnapshot({
+          timeline: {
+            clips: [{ id: "c1", sourceId: SOURCE_ID }],
+            sequenceSources: { [SOURCE_ID]: SOURCE_FACTS },
+            segments,
+            ...timeline,
+          },
+          playback,
+        }),
+        media: createMediaBySource(),
+      };
+    }
+
+    function segmentsOfParts(command: ShortcutCommand | null): string[] {
+      return command?.kind === "playProgram"
+        ? command.parts.map((part) => part.segmentId)
+        : [];
+    }
+
+    it("plans the list of the parts, and the command carries it", () => {
+      const snapshot = programSnapshot();
+      expect(planShortcutCommand("playProgram", snapshot)).toEqual({
+        kind: "playProgram",
+        action: "program",
+        parts: buildProgramParts(
+          "program",
+          snapshot.timeline,
+          createMediaBySource(),
+          null,
+        ),
+      });
+      expect(planShortcutCommand("playJoins", snapshot)).toEqual({
+        kind: "playProgram",
+        action: "joins",
+        parts: buildProgramParts(
+          "joins",
+          snapshot.timeline,
+          createMediaBySource(),
+          null,
+        ),
+      });
+      // Play Program has one part for each segment, and Play Joins a tail, a head and a tail,
+      // and a head.
+      expect(segmentsOfParts(planShortcutCommand("playProgram", snapshot))).toEqual([
+        "a",
+        "b",
+        "c",
+      ]);
+      expect(segmentsOfParts(planShortcutCommand("playJoins", snapshot))).toEqual([
+        "a",
+        "b",
+        "b",
+        "c",
+      ]);
+    });
+
+    it("starts at the selected segment, as Play Segment names it", () => {
+      const snapshot = programSnapshot({ currentSegmentId: "b" });
+      expect(segmentsOfParts(planShortcutCommand("playProgram", snapshot))).toEqual([
+        "b",
+        "c",
+      ]);
+      expect(segmentsOfParts(planShortcutCommand("playJoins", snapshot))).toEqual([
+        "b",
+        "c",
+      ]);
+    });
+
+    it("starts at the segment under the frame on screen when nothing is selected", () => {
+      const snapshot = programSnapshot(
+        {},
+        { presentedFrame: { mediaTime: 8.5, inferredSourcePts: pts("765000") } },
+      );
+      expect(segmentsOfParts(planShortcutCommand("playProgram", snapshot))).toEqual([
+        "c",
+      ]);
+      // The last segment of the program is as no current segment for Play Joins.
+      expect(segmentsOfParts(planShortcutCommand("playJoins", snapshot))).toEqual([
+        "a",
+        "b",
+        "b",
+        "c",
+      ]);
+    });
+
+    it("needs a list with one part or more: Play Joins needs two segments", () => {
+      const one = programSnapshot({ segments: [segment("a", "90000", "270000")] });
+      expect(segmentsOfParts(planShortcutCommand("playProgram", one))).toEqual(["a"]);
+      expect(planShortcutCommand("playJoins", one)).toBeNull();
+      const none = programSnapshot({ segments: [] });
+      expect(planShortcutCommand("playProgram", none)).toBeNull();
+      expect(planShortcutCommand("playJoins", none)).toBeNull();
+    });
+
+    it("needs an attached element, the media, no trim and no pointer that seeks", () => {
+      const cases: readonly [string, ShortcutSnapshot][] = [
+        ["no element", programSnapshot({}, { isAttached: false })],
+        ["no metadata", programSnapshot({}, { isReady: false })],
+        // The first part is on the one clip, whose element is stalled.
+        ["a decode stall", programSnapshot({}, { decodeStall: { atSeconds: 1 } })],
+        ["no media", { ...programSnapshot(), media: undefined }],
+        ["no open media", { ...programSnapshot(), probe: null }],
+        ["a drag that trims", { ...programSnapshot(), isTrimDragging: true }],
+        // A scrub of the timeline or a held frame step button would end the run later.
+        ["a pointer that seeks", { ...programSnapshot(), isPointerSeekHeld: true }],
+      ];
+      for (const [name, snapshot] of cases) {
+        expect(planShortcutCommand("playProgram", snapshot), name).toBeNull();
+        expect(planShortcutCommand("playJoins", snapshot), name).toBeNull();
+      }
+      // The calibration of the clip on screen is not a condition: the first part can be on
+      // another clip, and the run waits for the calibration of its clip.
+      expect(
+        planShortcutCommand(
+          "playProgram",
+          programSnapshot({}, { calibrationStatus: "calibrating" }),
+        ),
+      ).not.toBeNull();
+    });
+
+    it("keeps the other actions during a pointer that seeks", () => {
+      const held: ShortcutSnapshot = { ...programSnapshot(), isPointerSeekHeld: true };
+      expect([...POINTER_SEEK_LOCKED_ACTIONS].sort()).toEqual([
+        "playJoins",
+        "playProgram",
+      ]);
+      for (const action of SHORTCUT_ACTIONS) {
+        if (POINTER_SEEK_LOCKED_ACTIONS.has(action)) {
+          continue;
+        }
+        expect(planShortcutCommand(action, held), action).toEqual(
+          planShortcutCommand(action, programSnapshot()),
+        );
+      }
+    });
+
+    it("tells whether either action is available, from the facts of the button", () => {
+      const facts: ProgramPlayFacts = {
+        hasActiveSource: true,
+        stall: null,
+        isTrimDragging: false,
+        isPointerSeekHeld: false,
+        timeline: programSnapshot().timeline,
+        media: createMediaBySource(),
+        currentSegmentId: null,
+      };
+      expect(planProgramParts("joins", facts)).toHaveLength(4);
+      expect(isProgramPlayAvailable(facts)).toBe(true);
+      expect(isProgramPlayAvailable({ ...facts, hasActiveSource: false })).toBe(false);
+      expect(isProgramPlayAvailable({ ...facts, isTrimDragging: true })).toBe(false);
+      expect(isProgramPlayAvailable({ ...facts, isPointerSeekHeld: true })).toBe(false);
+      expect(isProgramPlayAvailable({ ...facts, stall: { sourceId: SOURCE_ID } })).toBe(
+        false,
+      );
+      expect(isProgramPlayAvailable({ ...facts, stall: { sourceId: null } })).toBe(
+        false,
+      );
+      expect(
+        isProgramPlayAvailable({ ...facts, stall: { sourceId: "/other.mp4" } }),
+      ).toBe(true);
+      expect(isProgramPlayAvailable({ ...facts, media: undefined })).toBe(false);
+      expect(
+        isProgramPlayAvailable({
+          ...facts,
+          timeline: programSnapshot({ segments: [] }).timeline,
+        }),
+      ).toBe(false);
+    });
+  });
+
+  // ADR 074: the clip of the first part can be another clip than the clip on screen.
+  describe("Play Program and Play Joins on a sequence of two clips", () => {
+    /** A source of 10 s at 25 fps on 1/25, so PTS k is frame k. */
+    function sequenceSource(path: string): {
+      media: ImportMediaResult;
+      facts: SequenceSource;
+    } {
+      const probe = {
+        videoTimeBase: { n: 1, d: 25 },
+        videoStartPts: pts("0"),
+        videoEndPts: pts("250"),
+        videoDurationTicks: ticks("250"),
+        approximateDurationSeconds: 10,
+        avgFrameRate: { n: 25, d: 1 },
+        rFrameRate: { n: 25, d: 1 },
+      };
+      return {
+        media: { path, probe } as unknown as ImportMediaResult,
+        facts: { id: path, ...probe },
+      };
+    }
+    const A = sequenceSource("/a.mp4");
+    const B = sequenceSource("/b.mp4");
+
+    /**
+     * Clip a1 on screen, then clip b1. Both segments of the program are on b1, so the first
+     * part is on b1. Nothing is selected and no frame is on screen yet.
+     */
+    function twoClipSnapshot(
+      attachedClipId: string | null,
+      playback: Partial<ShortcutSnapshot["playback"]> = {},
+    ): ShortcutSnapshot {
+      const store = createTimelineStore();
+      store.getState().loadSequence(
+        [
+          { id: "a1", sourceId: "/a.mp4" },
+          { id: "b1", sourceId: "/b.mp4" },
+        ],
+        [A.facts, B.facts],
+        [
+          {
+            id: "s1",
+            inClipId: "b1",
+            inPts: pts("25"),
+            outClipId: "b1",
+            outPts: pts("125"),
+          },
+          {
+            id: "s2",
+            inClipId: "b1",
+            inPts: pts("150"),
+            outClipId: "b1",
+            outPts: pts("200"),
+          },
+        ],
+      );
+      return {
+        ...createSnapshot({ playback: { presentedFrame: null, ...playback } }),
+        timeline: { ...store.getState(), attachedClipId },
+        media: { "/a.mp4": A.media, "/b.mp4": B.media },
+      };
+    }
+
+    it("plays a first part on another clip than the healthy clip on screen", () => {
+      const command = planShortcutCommand("playProgram", twoClipSnapshot("a1"));
+      expect(command).toEqual({
+        kind: "playProgram",
+        action: "program",
+        parts: [
+          {
+            segmentId: "s1",
+            clipId: "b1",
+            sourceId: "/b.mp4",
+            startPts: "25",
+            endPts: "125",
+          },
+          {
+            segmentId: "s2",
+            clipId: "b1",
+            sourceId: "/b.mp4",
+            startPts: "150",
+            endPts: "200",
+          },
+        ],
+      });
+    });
+
+    it("is available with a stall on the clip on screen when the first part is on another", () => {
+      const stalled = twoClipSnapshot("a1", { decodeStall: { atSeconds: 1 } });
+      const command = planShortcutCommand("playJoins", stalled);
+      expect(command?.kind).toBe("playProgram");
+      expect(command?.kind === "playProgram" ? command.parts[0] : null).toEqual({
+        segmentId: "s1",
+        clipId: "b1",
+        sourceId: "/b.mp4",
+        startPts: "75",
+        endPts: "125",
+      });
+      expect(planShortcutCommand("playProgram", stalled)).toEqual(
+        planShortcutCommand("playProgram", twoClipSnapshot("a1")),
+      );
+    });
+
+    it("is not available when the first part is on the stalled clip, or no clip is named", () => {
+      for (const attached of ["b1", null]) {
+        const stalled = twoClipSnapshot(attached, { decodeStall: { atSeconds: 1 } });
+        expect(
+          planShortcutCommand("playProgram", stalled),
+          String(attached),
+        ).toBeNull();
+        expect(planShortcutCommand("playJoins", stalled), String(attached)).toBeNull();
+      }
+    });
   });
 
   describe("Rename Segment (ADR 065)", () => {
@@ -2503,10 +2856,19 @@ describe("planShortcutCommand", () => {
         }),
         frameExport: acceptingFrameExport(),
       };
+      // Play Program and Play Joins read the media and the timing facts of the source.
+      const playable: ShortcutSnapshot = {
+        ...editable,
+        timeline: {
+          ...editable.timeline,
+          sequenceSources: { [SOURCE_ID]: SOURCE_FACTS },
+        },
+        media: createMediaBySource(),
+      };
       for (const action of TRIM_LOCKED_ACTIONS) {
-        expect(planShortcutCommand(action, editable)).not.toBeNull();
+        expect(planShortcutCommand(action, playable)).not.toBeNull();
         expect(
-          planShortcutCommand(action, { ...editable, isTrimDragging: true }),
+          planShortcutCommand(action, { ...playable, isTrimDragging: true }),
         ).toBeNull();
       }
       expect([...TRIM_LOCKED_ACTIONS].sort()).toEqual(
@@ -2523,6 +2885,8 @@ describe("planShortcutCommand", () => {
           "saveProjectAs",
           "selectAllSegments",
           "undo",
+          "playProgram",
+          "playJoins",
         ].sort(),
       );
       // Playback and the steps stay available.

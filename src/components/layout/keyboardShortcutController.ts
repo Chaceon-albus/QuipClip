@@ -144,6 +144,14 @@ export interface ShortcutContext {
    * that performs the action (ADR 026). The resolver asks only for the action it matched.
    */
   readonly isActionAvailable: (action: ShortcutAction) => boolean;
+  /**
+   * Called once for the matched action of a key press that the layer owns and that can act,
+   * before `isActionAvailable`: after the rules that leave a key press to a text field, a
+   * dialog or a menu, and after the rule of a repeated key. The layer uses it to end a program
+   * play before the action plans (ADR 074), so a key whose action is not available still ends
+   * the run. Returns true when the press must do nothing more. Absent means false.
+   */
+  readonly takeOver?: (action: ShortcutAction) => boolean;
 }
 
 export interface ShortcutResolution {
@@ -359,6 +367,11 @@ export function resolveShortcut(
   // reach the page: a held Space would otherwise scroll it. An "acts" key, such as an arrow or
   // a frame step key, acts on every repeat so that holding it jumps or steps continuously.
   if (event.repeat && binding.repeat === "taken") {
+    return CLAIMED_WITHOUT_ACTION;
+  }
+
+  // The user takes the playback from a program play before the action plans (ADR 074).
+  if (context.takeOver?.(binding.action) === true) {
     return CLAIMED_WITHOUT_ACTION;
   }
 

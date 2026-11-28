@@ -84,7 +84,8 @@ export const SEGMENT_MENU_SELECTION_ACTIONS: ReadonlySet<SegmentMenuAction> =
 /**
  * The label of Play Segment while a segment plays toward its stop. The key `/` then pauses, as
  * `Space` does (ADR 026), so the item names that action with the label of the Play button in
- * that state.
+ * that state. A part of a program play is not such a playback: while a run exists, the item
+ * shows Play Segment (ADR 074).
  */
 export const SEGMENT_MENU_PAUSE_LABEL_KEY = "transport.action.pause";
 

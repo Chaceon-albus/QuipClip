@@ -223,6 +223,9 @@ export const zhCN: TranslationCatalog = {
       deleteSelectedSegmentsAria_other: "删除所选的 {{count}} 个片段",
       play: "播放",
       pause: "暂停",
+      // The user of this product calls the program preview 成片预览.
+      playProgram: "预览成片",
+      playJoinsHint: "按住 Shift 点击只预览拼接处。",
       previousStep: "后退一帧",
       nextStep: "前进一帧",
       mute: "静音",
@@ -237,6 +240,9 @@ export const zhCN: TranslationCatalog = {
       finishDiscardsIn: "放弃待定的入点。将播放头移到入点之后即可生成片段。",
       volumeMuted: "{{level}}，已静音",
       exportingFrame: "正在导出帧…",
+      // Chinese selects the `other` plural category for every count, so it has no `_one` form.
+      playingProgram_other: "正在预览成片：第 {{index}} 部分，共 {{count}} 部分。",
+      playingJoins_other: "正在预览拼接处：第 {{index}} 部分，共 {{count}} 部分。",
     },
     segmentDuration: {
       segment: "片段 {{index}} 时长",

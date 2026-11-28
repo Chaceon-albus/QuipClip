@@ -180,6 +180,26 @@ export function createPressPlaybackRecord(): PressPlaybackRecord {
   };
 }
 
+/** The calls of the sequence playback that a scrub-mode press makes (`takePlaybackAtPress`). */
+export interface PressPlaybackActions {
+  /** Ends the program play that runs (`SequencePlayback.endProgramPlay`). */
+  readonly endProgramPlay: () => boolean;
+  /** True while the store plays (`isPlaying`). */
+  readonly isPlaying: () => boolean;
+}
+
+/**
+ * The playback state that a scrub-mode press records (`PressPlaybackRecord.pressScrub`). The
+ * press takes the playback from a program play (ADR 074): it ends the run first, and then it
+ * reads whether the store plays. The end of the run pauses, so a press during a run records
+ * false: the seek at pointer down does not play on, and the release of a drag does not resume.
+ * The press then acts as it does from a paused playback.
+ */
+export function takePlaybackAtPress(actions: PressPlaybackActions): boolean {
+  actions.endProgramPlay();
+  return actions.isPlaying();
+}
+
 /**
  * The rule that makes the click after a trim-mode release do nothing.
  *

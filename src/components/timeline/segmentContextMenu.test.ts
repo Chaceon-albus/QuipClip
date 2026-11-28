@@ -123,6 +123,34 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     isImporting: facts.isImporting,
   });
   const runCommand = vi.fn<(command: ShortcutCommand) => void>();
+  // A program play (ADR 074): `startRun` puts a part of segment a on screen as it plays, and
+  // the end of the run pauses and drops the stop point of the part, as the sequence playback does.
+  const calls: string[] = [];
+  runCommand.mockImplementation((command) => {
+    calls.push(`run:${command.kind}`);
+  });
+  const startRun = () => {
+    facts.playback = {
+      ...facts.playback,
+      isPlaying: true,
+      presentedFrame: { mediaTime: 1.5, inferredSourcePts: pts("135000") },
+      playbackStop: { inPts: pts("90000"), outPts: pts("180000"), phase: "playing" },
+      programRun: { action: "program", part: 1, count: 2 },
+    };
+  };
+  const endProgramPlay = vi.fn(() => {
+    calls.push("end");
+    if (facts.playback.programRun == null) {
+      return false;
+    }
+    facts.playback = {
+      ...facts.playback,
+      isPlaying: false,
+      playbackStop: null,
+      programRun: null,
+    };
+    return true;
+  });
   // The state listens on a fake window with a manual clock, for the fallback of a popup that
   // never settles.
   const inputListeners: ((event: NativeContextMenuInputEvent) => void)[] = [];
@@ -181,6 +209,7 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     timeline,
     readSnapshot,
     runCommand,
+    endProgramPlay,
     isOverlayOpen: () => facts.isOverlayOpen,
     menuState,
     backend,
@@ -208,6 +237,9 @@ function createHarness(extraSegments: readonly OneSourceSegment[] = []) {
     facts,
     readSnapshot,
     runCommand,
+    calls,
+    startRun,
+    endProgramPlay,
     menuState,
     input,
     shows,
@@ -498,6 +530,64 @@ describe("createSegmentContextMenu", () => {
       expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
         kind: "deleteSegment",
       });
+    });
+  });
+
+  // ADR 074: a menu that opens does not end a program play, and a choice that takes the
+  // playback ends it before the item plans.
+  describe("a program play", () => {
+    it("goes on while the menu opens, and the menu shows Play Segment and not Pause", () => {
+      const harness = createHarness();
+      harness.startRun();
+      void harness.open({ segmentId: "a" });
+      expect(harness.endProgramPlay).not.toHaveBeenCalled();
+      const item = itemOf(harness.lastShow().entries, "playSegment");
+      expect(item.label).toBe("Play Segment");
+      expect(item.commandKind).toBe("playSegment");
+    });
+
+    it("ends the run before Play Segment plans, which then plays from the In", () => {
+      const harness = createHarness();
+      harness.startRun();
+      void harness.open({ segmentId: "a" });
+      harness.lastShow().select("playSegment");
+      expect(harness.calls).toEqual(["end", "run:playSegment"]);
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
+        kind: "playSegment",
+        inPts: pts("90000"),
+        outPts: pts("180000"),
+      });
+    });
+
+    it("ends the run before Go to In and Go to Out plan", () => {
+      for (const action of ["goToSegmentIn", "goToSegmentOut"] as const) {
+        const harness = createHarness();
+        harness.startRun();
+        void harness.open({ segmentId: "a" });
+        harness.lastShow().select(action);
+        expect(harness.calls).toEqual(["end", "run:seekToPts"]);
+      }
+    });
+
+    it("does not end the run for an item that does not take the playback", () => {
+      const harness = createHarness();
+      harness.startRun();
+      void harness.open({ segmentId: "a" });
+      harness.lastShow().select("deleteSegment");
+      expect(harness.endProgramPlay).not.toHaveBeenCalled();
+      expect(harness.runCommand).toHaveBeenCalledExactlyOnceWith({
+        kind: "deleteSegment",
+      });
+    });
+
+    it("does nothing while a dialog of the page is open, and the run goes on", () => {
+      const harness = createHarness();
+      harness.startRun();
+      void harness.open({ segmentId: "a" });
+      harness.facts.isOverlayOpen = true;
+      harness.lastShow().select("playSegment");
+      expect(harness.endProgramPlay).not.toHaveBeenCalled();
+      expect(harness.runCommand).not.toHaveBeenCalled();
     });
   });
 

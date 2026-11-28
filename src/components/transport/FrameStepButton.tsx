@@ -3,6 +3,7 @@ import { preventFocusOnMouseDown } from "@/components/common/preventFocusOnMouse
 import { ShortcutTooltipContent } from "@/components/common/ShortcutTooltipContent";
 import type { ShortcutLabel } from "@/components/common/useShortcutLabels";
 import { nativeContextMenuState } from "@/components/layout/nativeContextMenuState";
+import { frameStepHoldKey, pointerSeekHold } from "@/components/layout/pointerSeekHold";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger } from "@/components/ui/tooltip";
 import { createStepHold, isStepHoldPress, type StepHold } from "./stepHold";
@@ -59,10 +60,22 @@ export function FrameStepButton({
   const holdRef = useRef<StepHold | null>(null);
 
   useEffect(() => {
-    // A timer repeat is a held step, as a key repeat is (FrameStepOptions).
-    const hold = createStepHold((held) => {
-      sequencePlayback.store.getState().seekNominal(delta, { held });
-    });
+    // A timer repeat is a held step, as a key repeat is (FrameStepOptions). While the button
+    // is held, Play Program and Play Joins do nothing (`pointerSeekHold`, ADR 074).
+    const holdKey = frameStepHoldKey(delta);
+    const hold = createStepHold(
+      (held) => {
+        sequencePlayback.store.getState().seekNominal(delta, { held });
+      },
+      undefined,
+      (holding) => {
+        if (holding) {
+          pointerSeekHold.hold(holdKey);
+        } else {
+          pointerSeekHold.release(holdKey);
+        }
+      },
+    );
     holdRef.current = hold;
     // A release can land outside the button, so the end of a press is read on the window, in
     // the capture phase, where no other handler can stop it. A window blur ends it too: the
