@@ -4,7 +4,7 @@
 - Date: 2026-09-22
 - Deciders: capric98
 - Amends: ADR 019
-- Amended by: ADR 035, ADR 039, ADR 046, ADR 052, ADR 063
+- Amended by: ADR 035, ADR 039, ADR 046, ADR 052, ADR 063, ADR 074
 
 ## Context
 
@@ -639,6 +639,13 @@ one exact seek at the last pointer position. A drag therefore never ends on a ke
 A blur of the window also cancels a drag, with one exact seek at the last clamped and snapped
 target. The cancel and the release use the same snap as the last sample, so a drag ends
 where the indicator showed.
+
+(Changed on 2026-11-27.) The playback store gives each segment playback that it accepts a
+number, and it says of the last one whether it reached its stop (ADR 074): the store itself
+ended the playback because of the stop point. The frame test and the clock test of the stop
+do nothing for an element that something else paused away from the end of the media. An
+`ended` event that comes when the element is not at its end is dropped. Play Segment does
+not change.
 
 ## Consequences
 

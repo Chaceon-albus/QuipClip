@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 002, ADR 003, ADR 007, ADR 010, ADR 022, ADR 024, ADR 026, ADR 027, ADR 028,
   ADR 030, ADR 037, ADR 045, ADR 048
-- Amended by: ADR 056, ADR 063, ADR 072
+- Amended by: ADR 056, ADR 063, ADR 072, ADR 074
 
 ## Context
 
@@ -310,6 +310,10 @@ Older records name "the active source". On the sequence, the general rule is thi
 | ADR 037 | The edit points of the segments of the active source                          | The edit points of the segments of the sequence, in sequence order.                                                                                                                                                                 |
 | ADR 045 | Select All, Delete and the restored selection use the active source            | They use the segments of the sequence. Undo restores the selected segments that the restored array holds.                                                                                                                          |
 | ADR 048 | The active source has one segment                                              | The export has one piece (ADR 053).                                                                                                                                                                                                 |
+
+(Changed on 2026-11-27.) The row of ADR 003 says that the Program preview stays unbuilt.
+ADR 074 builds it: Play Program and Play Joins play the pieces of the segments of the export,
+each on its own clip, one after another.
 
 (Changed on 2026-11-02.) The drag trim of ADR 030 on a sequence whose clips share no frame grid:
 

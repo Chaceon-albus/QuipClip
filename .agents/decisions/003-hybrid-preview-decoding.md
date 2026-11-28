@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-31
 - Deciders: capric98
-- Amended by: ADR 039, ADR 046, ADR 052, ADR 063
+- Amended by: ADR 039, ADR 046, ADR 052, ADR 063, ADR 074
 
 ## Context
 
@@ -209,6 +209,11 @@ the nominal step above uses that rate (ADR 046).
 
 Source preview plays the active source. Program preview plays the ordered segments and
 seeks across excluded source ranges.
+
+(Changed on 2026-11-27.) ADR 074 builds the Program preview as two actions on the one
+element of the preview. Play Program plays the segments of the export one after another,
+and Play Joins plays only the parts at each join. The preview pauses for a seek between
+two parts.
 
 ## Consequences
 

@@ -95,6 +95,7 @@ document summarizes them and shows how the parts fit together.
 | [`071-release-no-msi-package-for-windows.md`](../.agents/decisions/071-release-no-msi-package-for-windows.md)                                                           | The Windows build makes only the NSIS installer, and no MSI package                |
 | [`072-save-a-project-and-open-it-again.md`](../.agents/decisions/072-save-a-project-and-open-it-again.md)                                                               | The user saves a project file, and one Open action opens it and checks each source |
 | [`073-recover-the-work-after-an-exit-that-did-not-ask.md`](../.agents/decisions/073-recover-the-work-after-an-exit-that-did-not-ask.md)                                 | A recovery file keeps the work of a session, and the next start offers it          |
+| [`074-play-the-program-in-the-preview.md`](../.agents/decisions/074-play-the-program-in-the-preview.md)                                                                 | Play Program and Play Joins play the segments of the export in the preview         |
 
 ## Shape
 
@@ -313,9 +314,11 @@ time: a request that arrives while the element seeks replaces the queued request
 drag. A drag uses `fastSeek` where the web view has it, and the release always ends with an
 exact seek. See ADR 022.
 
-The current _Source_ preview plays the sequence, one clip at a time (ADR 052). A future
-_Program_ preview will play only the segments, so the user can watch what the export will
-contain.
+The current _Source_ preview plays the sequence, one clip at a time (ADR 052). ADR 074 adds
+the _Program_ preview, and its code is not in yet. Play Program plays the segments of the
+export one after another, and Play Joins plays only the parts at each join, so the user can
+watch what the export will contain. Each part is on one clip and ends at a stop point of the
+playback store, and the preview pauses for a seek between two parts.
 
 The timeline can show the audio envelope of a source, so the user can find where a person
 sings or speaks in a long recording. The menu of a clip label starts it, and it is off by

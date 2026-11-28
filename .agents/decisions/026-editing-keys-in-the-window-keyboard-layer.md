@@ -5,7 +5,7 @@
 - Deciders: capric98
 - Amends: ADR 021
 - Amended by: ADR 035, ADR 037, ADR 038, ADR 039, ADR 046, ADR 052, ADR 065, ADR 066, ADR 067,
-  ADR 069, ADR 072
+  ADR 069, ADR 072, ADR 074
 
 ## Context
 
@@ -317,6 +317,10 @@ Windows.
 binding (ADR 072). The Open action takes videos and project files, and its menu items have the
 label "Open…". Undo and Redo are available while the sequence has no clip, when the history
 has an entry for them.
+
+(Changed on 2026-11-27.) The key table gains Play Program on `P` and Play Joins on `Shift`
+with `P` (ADR 074). A repeated key press of each is taken and does nothing. While a program
+play runs, each transport action first ends it, and `Space` then pauses.
 
 ## Consequences
 
